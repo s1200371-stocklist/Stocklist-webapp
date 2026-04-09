@@ -1,4 +1,5 @@
+
 streamlit
-yfinance
+yahooquery
 pandas
-plotly
+lxml
