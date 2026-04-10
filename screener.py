@@ -1,128 +1,137 @@
 import streamlit as st
-import yfinance as yf
+from yahooquery import Ticker
 import pandas as pd
+import numpy as np
 import time
 
-# --- 頁面配置 ---
-st.set_page_config(page_title="US Stock Master 500M+", layout="wide")
-st.title("🦅 全美股市場自動篩選器 (市值 > 500M)")
+st.set_page_config(page_title="RS 動能與行業矩陣", layout="wide")
+st.title("🦅 專業級 RS 動能與行業矩陣 (YahooQuery)")
 
-# --- 1. 獲取全美股名單 (自動同步) ---
 @st.cache_data(ttl=86400)
-def get_full_us_list():
-    # 使用另一個更穩定的數據源獲取全美股代碼 (包含 NYSE, NASDAQ, AMEX)
-    try:
-        # 這是 FTP 同步的標普全球代碼庫
-        url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
-        tickers = pd.read_csv(url, header=None)[0].tolist()
-        return [str(t).strip().upper() for t in tickers if len(str(t)) <= 4]
-    except:
-        return ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "META", "AMZN", "GOOGL"]
+def get_sample_tickers():
+    # 測試用嘅多行業強勢股名單
+    return ["AAPL", "MSFT", "NVDA", "AVGO", "META", "GOOGL", "AMZN", "TSLA", "LLY", "UNH", 
+            "V", "JPM", "WMT", "MA", "PG", "JNJ", "XOM", "HD", "COST", "MRK",
+            "ABBV", "CVX", "CRM", "AMD", "BAC", "PEP", "KO", "TMO", "MCD", "ADBE"]
 
-# --- 2. 側邊欄控制 ---
-with st.sidebar:
-    st.header("📌 篩選核心設定")
-    # 強制市值門檻為 500M
-    mkt_cap_threshold = st.number_input("強制市值下限 (百萬 USD)", value=500, min_value=1)
+def calculate_advanced_rs(tickers):
+    st_msg = st.empty()
+    st_msg.text("🚀 正在通過 YahooQuery 批量獲取數據...")
     
-    st.header("📈 成長與技術面")
-    min_growth = st.slider("最小營收增長 (%)", -20, 100, 20)
-    
-    ma_options = st.multiselect(
-        "股價必須站上：",
-        ["50天線", "150天線", "200天線"],
-        default=["50天線"]
-    )
-    
-    st.divider()
-    all_symbols = get_full_us_list()
-    # 這裡讓用戶選擇掃描多少隻，建議先測 300 隻
-    limit = st.slider("掃描股票數量 (由市值大到小)", 50, len(all_symbols), 300)
-    st.info(f"當前全美股庫存: {len(all_symbols)} 隻")
-
-# --- 3. 核心過濾引擎 ---
-def fast_screener(tickers, cap_limit, growth_limit, mas):
-    results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # 為了不讓 Yahoo 封鎖，我們分批次小量處理
-    for i, ticker in enumerate(tickers):
+    # 1. 獲取行業資料
+    t = Ticker(tickers, asynchronous=True)
+    profiles = t.summary_profile
+    sector_map = {}
+    for sym in tickers:
         try:
-            status_text.text(f"🔍 掃描中 ({i+1}/{len(tickers)}): {ticker}")
-            stock = yf.Ticker(ticker)
-            
-            # 第一步：只拿 Info (這最快)
-            info = stock.info
-            mkt_cap = info.get('marketCap', 0) or 0
-            
-            # 🟢 關鍵：如果不夠 500M，直接 Skip
-            if mkt_cap < (cap_limit * 1_000_000):
-                progress_bar.progress((i + 1) / len(tickers))
-                continue
-            
-            # 第二步：檢查成長性
-            rev_growth = info.get('revenueGrowth', 0) or 0
-            if (rev_growth * 100) < growth_limit:
-                progress_bar.progress((i + 1) / len(tickers))
-                continue
-                
-            # 第三步：最後才處理最耗時的歷史數據
-            hist = stock.history(period="1y")
-            if hist.empty or len(hist) < 200:
-                progress_bar.progress((i + 1) / len(tickers))
-                continue
-                
-            curr_p = hist['Close'].iloc[-1]
-            
-            # 均線判定
-            is_valid_ma = True
-            for ma in mas:
-                days = int(ma.replace("天線", ""))
-                ma_val = hist['Close'].rolling(days).mean().iloc[-1]
-                if curr_p < ma_val:
-                    is_valid_ma = False
-                    break
-            
-            if not is_valid_ma:
-                progress_bar.progress((i + 1) / len(tickers))
-                continue
+            if isinstance(profiles, dict) and sym in profiles and isinstance(profiles[sym], dict):
+                sector_map[sym] = profiles[sym].get('sector', 'Unknown')
+            else:
+                sector_map[sym] = 'Unknown'
+        except:
+            sector_map[sym] = 'Unknown'
 
-            # 全部通過！
-            results.append({
-                "代碼": ticker,
-                "名稱": info.get('shortName', 'N/A'),
-                "現價": round(curr_p, 2),
-                "市值 (M)": f"{round(mkt_cap/1_000_000, 1)}M",
-                "營收增長": f"{round(rev_growth * 100, 1)}%",
-                "產業": info.get('sector', 'N/A')
-            })
-            
-        except Exception:
-            pass
-        
-        progress_bar.progress((i + 1) / len(tickers))
+    # 2. 獲取一年歷史數據
+    st_msg.text("📊 正在下載歷史股價並運算時間矩陣...")
+    hist = t.history(period="1y", interval="1d")
     
-    status_text.text("✅ 篩選完成！")
-    return pd.DataFrame(results)
+    if hist.empty:
+        st.error("無法獲取歷史數據")
+        return pd.DataFrame()
 
-# --- 4. 執行與顯示 ---
-if st.button("🚀 開始全美股市場掃描 (市值 500M+)"):
-    # 排序名單 (這裡可以根據需要調整)
-    selected_tickers = all_symbols[:limit]
+    # 將數據表重組為 (日期 x 股票代碼) 格式
+    close_prices = hist['close'].unstack(level=0).ffill()
     
-    start_time = time.time()
-    final_df = fast_screener(selected_tickers, mkt_cap_threshold, min_growth, ma_options)
-    end_time = time.time()
+    if len(close_prices) < 130:
+        st.error("歷史數據不足半年，無法計算 RS")
+        return pd.DataFrame()
+
+    # --- 核心數據點 ---
+    p_today = close_prices.iloc[-1]           # 今日收市
+    p_3d_ago = close_prices.iloc[-4]          # 3日前收市
+    p_6m_today = close_prices.iloc[-126]      # 半年前 (以今日計)
+    p_6m_3d_ago = close_prices.iloc[-129]     # 半年前 (以3日前計)
+
+    # 過去 3 日最高價與最低價 (用來計算跌幅)
+    max_3d = close_prices.iloc[-4:].max()
+    min_3d = close_prices.iloc[-4:].min()
+    drop_3d = (min_3d - max_3d) / max_3d
+
+    # --- 回報率計算 ---
+    ret_today = (p_today - p_6m_today) / p_6m_today
+    ret_3d_ago = (p_3d_ago - p_6m_3d_ago) / p_6m_3d_ago
+
+    # 組合 DataFrame
+    df = pd.DataFrame({
+        '代碼': close_prices.columns,
+        '現價': p_today.values,
+        '行業': [sector_map.get(sym, 'Unknown') for sym in close_prices.columns],
+        'ret_today': ret_today.values,
+        'ret_3d_ago': ret_3d_ago.values,
+        'drop_3d': drop_3d.values
+    })
+
+    st_msg.text("🧮 正在進行市場與行業排名交叉分析...")
+
+    # --- 1 & 2. RS Rating (1-99) 及 3日變化 ---
+    df['RS_今日'] = (df['ret_today'].rank(pct=True) * 98 + 1).astype(int)
+    df['RS_3日前'] = (df['ret_3d_ago'].rank(pct=True) * 98 + 1).astype(int)
+    df['RS_3日變化'] = df['RS_今日'] - df['RS_3日前']
+
+    # --- 3. 過去3日股價下跌5%以內 ---
+    df['3日跌幅<5%'] = df['drop_3d'].apply(lambda x: "✅ 是" if x >= -0.05 else "❌ 否")
+
+    # --- 行業聚合運算 ---
+    sector_rs_today = df.groupby('行業')['RS_今日'].mean()
+    sector_rs_3d = df.groupby('行業')['RS_3日前'].mean()
+
+    # --- 5 & 7. 該行業在整個大市排名 及 3日變化 ---
+    sector_market_rank_today = (sector_rs_today.rank(pct=True) * 98 + 1).astype(int)
+    sector_market_rank_3d = (sector_rs_3d.rank(pct=True) * 98 + 1).astype(int)
     
-    st.write(f"⏱️ 掃描耗時: {round(end_time - start_time, 1)} 秒")
+    df['行業大市排名'] = df['行業'].map(sector_market_rank_today)
+    df['行業排名變化'] = df['行業大市排名'] - df['行業'].map(sector_market_rank_3d)
     
-    if not final_df.empty:
-        st.success(f"🎯 成功找到 {len(final_df)} 隻符合條件的股票！")
-        st.dataframe(final_df, use_container_width=True)
+    # --- 4. 該股票在該行業是否領先 ---
+    df['行業平均RS'] = df['行業'].map(sector_rs_today)
+    df['行業領先?'] = df.apply(lambda row: "👑 是" if row['RS_今日'] > row['行業平均RS'] else "❌ 否", axis=1)
+
+    # --- 6. 該股票在該行業的變動排名 ---
+    # 先計今日行業內排名 (1為最好)
+    df['行內排名_今日'] = df.groupby('行業')['RS_今日'].rank(ascending=False).astype(int)
+    df['行內排名_3日前'] = df.groupby('行業')['RS_3日前'].rank(ascending=False).astype(int)
+    # 排名數字越細越好，所以變動 = 舊排名 - 新排名 (例如由第5升到第2，+3)
+    df['行內排名變化'] = df['行內排名_3日前'] - df['行內排名_今日']
+
+    # --- 整理最終顯示格式 ---
+    final_cols = [
+        '代碼', '行業', '現價', 'RS_今日', 'RS_3日變化', '3日跌幅<5%', 
+        '行業領先?', '行內排名變化', '行業大市排名', '行業排名變化'
+    ]
+    
+    final_df = df[final_cols].sort_values(by='RS_今日', ascending=False).reset_index(drop=True)
+    st_msg.text("✅ 運算完成！")
+    return final_df
+
+# --- 介面 ---
+limit = st.slider("掃描數量", 10, 30, 30)
+
+if st.button("🔥 執行 7 維度動能矩陣分析"):
+    start_t = time.time()
+    test_list = get_sample_tickers()[:limit]
+    res_df = calculate_advanced_rs(test_list)
+    
+    if not res_df.empty:
+        st.write(f"⏱️ 運算耗時: {round(time.time() - start_t, 2)} 秒")
         
-        # 下載功能
-        csv = final_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 下載篩選結果", csv, "us_500m_stocks.csv", "text/csv")
-    else:
-        st.warning("在此批次中沒有股票符合條件，請嘗試減少「營收增長」或「均線」限制。")
+        # 使用 Streamlit 內建的美化表格，為變化加上箭頭
+        def format_change(val):
+            if val > 0: return f"🟢 +{val}"
+            elif val < 0: return f"🔴 {val}"
+            return "➖ 0"
+            
+        res_df['RS_3日變化'] = res_df['RS_3日變化'].apply(format_change)
+        res_df['行內排名變化'] = res_df['行內排名變化'].apply(format_change)
+        res_df['行業排名變化'] = res_df['行業排名變化'].apply(format_change)
+        
+        st.dataframe(res_df, use_container_width=True)
