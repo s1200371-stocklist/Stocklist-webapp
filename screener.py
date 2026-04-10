@@ -50,11 +50,21 @@ def run_full_scan(ticker_list):
         st.error("無法獲取任何歷史數據。")
         return pd.DataFrame()
 
-    # --- 第二階段：矩陣運算 ---
+# --- 第二階段：矩陣運算 ---
     status_msg.text("🧮 正在計算全市場 RS 排名與 7 大指標...")
     full_h = pd.concat(all_history)
     close_prices = full_h['close'].unstack(level=0).ffill()
     
+    # 💥 修復 AttributeError：安全地提取行業資料
+    safe_sectors = []
+    for s in close_prices.columns:
+        prof_data = all_profiles.get(s, {})
+        # 檢查 prof_data 是否真係一個字典 (避免 Yahoo 回傳錯誤字串而當機)
+        if isinstance(prof_data, dict):
+            safe_sectors.append(prof_data.get('sector', 'Unknown'))
+        else:
+            safe_sectors.append('Unknown')
+
     # 計算漲幅與動能
     ret_today = (close_prices.iloc[-1] / close_prices.iloc[-126]) - 1
     ret_3d = (close_prices.iloc[-4] / close_prices.iloc[-129]) - 1
@@ -63,11 +73,11 @@ def run_full_scan(ticker_list):
     recent_3d = close_prices.iloc[-4:]
     drop_3d = (recent_3d.min() - recent_3d.max()) / recent_3d.max()
 
-    # 建立主表
+    # 建立主表 (使用剛才安全處理好的 safe_sectors)
     df = pd.DataFrame({
         'Symbol': close_prices.columns,
         'Price': close_prices.iloc[-1].values,
-        'Sector': [all_profiles.get(s, {}).get('sector', 'Unknown') for s in close_prices.columns],
+        'Sector': safe_sectors,  # <--- 改咗呢度
         'Ret_Now': ret_today.values,
         'Ret_3d': ret_3d.values,
         'Drop_3d': drop_3d.values
