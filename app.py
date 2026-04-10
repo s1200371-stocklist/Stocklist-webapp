@@ -9,9 +9,7 @@ st.set_page_config(page_title="US Stock Screener Pro", layout="wide")
 
 st.title("📈 全美股市值篩選器 (修復版)")
 
-import re # 加入正則表達式庫
-
-# --- 優化版：符號清洗邏輯 ---
+# --- 2. 符號獲取邏輯 ---
 @st.cache_data
 def load_symbols():
     files = ['nasdaq-listed.csv', 'nyse-listed.csv', 'other-listed.csv']
@@ -21,24 +19,60 @@ def load_symbols():
         if os.path.exists(f):
             try:
                 df = pd.read_csv(f)
+                # 自動搜尋可能的欄位名稱 (不分大小寫)
                 cols = [c for c in df.columns if c.lower() in ['symbol', 'ticker']]
                 if cols:
-                    symbols = df[cols[0]].dropna().astype(str).str.strip().tolist()
+                    symbols = df[cols[0]].dropna().astype(str).str.strip().unique().tolist()
                     all_symbols.extend(symbols)
-            except Exception:
-                pass
+            except Exception as e:
+                st.warning(f"讀取 {f} 時發生小錯誤: {e}")
     
-    clean_symbols = []
-    for s in list(set(all_symbols)):
-        # 1. 將所有 CSV 的點 (.) 或斜線 (/) 換成 Yahoo 認可的橫線 (-)
-        # 例如 BRK.B -> BRK-B
-        formatted_s = re.sub(r'[\./]', '-', s.upper())
+    # 移除重複並過濾掉無效符號 (例如包含 $ 的權證或過長的名稱)
+    clean_symbols = [s for s in list(set(all_symbols)) if s.isalpha() and len(s) < 6]
+    return sorted(clean_symbols)
+
+# --- 3. 數據抓取邏輯 ---
+@st.cache_data(ttl=3600)
+def fetch_stock_data(symbols, min_cap):
+    results = []
+    batch_size = 200 # 縮小批次以提高穩定性
+    
+    progress = st.progress(0)
+    status = st.empty()
+    
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i+batch_size]
+        status.text(f"🚀 正在分析: {i} / {len(symbols)} 隻股票...")
+        progress.progress(min(i / len(symbols), 1.0))
         
-        # 2. 放寬限制：允許字母同橫線，長度限制放寬到 8
-        if re.match(r'^[A-Z-]+$', formatted_s) and len(formatted_s) < 8:
-            clean_symbols.append(formatted_s)
+        try:
+            # 使用 yahooquery 抓取數據
+            t = Ticker(batch, asynchronous=True)
+            data = t.summary_detail
             
-    return sorted(list(set(clean_symbols)))
+            # 確保 data 是字典格式
+            if not isinstance(data, dict):
+                continue
+                
+            for s in batch:
+                s_info = data.get(s)
+                if isinstance(s_info, dict):
+                    mkt_cap = s_info.get('marketCap')
+                    # 嚴格數字檢查
+                    if isinstance(mkt_cap, (int, float)) and mkt_cap >= min_cap:
+                        results.append({
+                            "Symbol": s,
+                            "Name": s_info.get('shortName', 'N/A'),
+                            "MarketCap": mkt_cap,
+                            "Price": s_info.get('previousClose', 0),
+                            "Sector": s_info.get('sector', 'N/A')
+                        })
+        except Exception:
+            continue # 忽略單一記錄錯誤
+            
+    progress.empty()
+    status.empty()
+    return pd.DataFrame(results)
 
 # --- 4. UI 介面 ---
 st.sidebar.header("篩選條件")
