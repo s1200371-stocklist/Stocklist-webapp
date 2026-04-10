@@ -3,129 +3,123 @@ from yahooquery import Ticker
 import pandas as pd
 import time
 
-st.set_page_config(page_title="Full Market Matrix", layout="wide")
-st.title("🦅 全美股動能矩陣 (全量顯示版)")
-st.info("此版本將顯示所有市值 > $500M 的股票。沒被抓到行業的股票將排在後方。")
+st.set_page_config(page_title="Ultimate Stock Matrix", layout="wide")
+
+st.title("🚀 美股全市場矩陣 (行業資料強化版)")
+st.markdown("""
+* **掃描範圍**：全美股 8,000+ 股票
+* **篩選條件**：市值 > $500M
+* **優化點**：擴大行業抓取範圍至前 1,500 隻，並加入防封鎖延遲。
+""")
 
 @st.cache_data(ttl=86400)
-def get_all_raw_symbols():
+def get_symbols():
     url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
     try:
-        tickers = pd.read_csv(url, header=None)[0].dropna().astype(str).tolist()
-        return [t.strip().upper() for t in tickers if t.isalpha() and len(t) <= 5]
+        df = pd.read_csv(url, header=None)
+        # 只取純英文字母且長度合理的代碼
+        full_list = df[0].dropna().astype(str).tolist()
+        return [s.strip().upper() for s in full_list if s.isalpha() and len(s) <= 5]
     except:
-        return ["AAPL", "NVDA", "TSLA", "MSFT"]
+        return ["AAPL", "NVDA", "TSLA", "MSFT", "AMD"]
 
-def filter_full_market_cap(symbols, min_cap_m):
-    status_msg = st.empty()
-    filtered_list = []
-    batch_size = 500 
-    total = len(symbols)
-    progress_cap = st.progress(0)
+def run_turbo_scan():
+    all_symbols = get_symbols()
+    qualified = []
     
-    for i in range(0, total, batch_size):
-        batch = symbols[i:i+batch_size]
-        progress_cap.progress(min(i / total, 1.0))
-        status_msg.text(f"🔍 正在篩選市值: 已掃描 {i} / {total} 隻")
+    with st.status("正在執行全市場掃描...", expanded=True) as status:
         
-        t = Ticker(batch)
-        try:
-            price_data = t.price
-            for sym in batch:
-                if isinstance(price_data, dict) and sym in price_data:
-                    m_cap = price_data[sym].get('marketCap', 0)
-                    if isinstance(m_cap, (int, float)) and (m_cap / 1_000_000) >= min_cap_m:
-                        filtered_list.append(sym)
-        except: continue
-            
-    progress_cap.empty()
-    status_msg.success(f"✅ 市值篩選完成！共找到 {len(filtered_list)} 隻合格股票。")
-    return filtered_list
-
-def get_sectors_safely(tickers, status_msg, limit):
-    """只對前 N 隻強勢股抓行業，其餘標註為 Pending"""
-    sector_map = {}
-    # 只掃描 RS 最強的前 limit 隻，避免被 Yahoo 封鎖 IP
-    to_scan = tickers[:limit]
-    batch_size = 40 
-    
-    for i in range(0, len(to_scan), batch_size):
-        batch = to_scan[i:i+batch_size]
-        status_msg.text(f"🏢 正在同步核心行業資料... ({i}/{len(to_scan)})")
-        t = Ticker(batch)
-        try:
-            profiles = t.asset_profile
-            for s in batch:
-                if isinstance(profiles, dict) and s in profiles:
-                    p = profiles[s]
-                    sector_map[s] = p.get('sector', 'Unknown') if isinstance(p, dict) else 'Unknown'
-        except: pass
-        time.sleep(1.2)
-    return sector_map
-
-if st.button("🚀 啟動 8,000 隻全市場掃描"):
-    start_time = time.time()
-    all_symbols = get_all_raw_symbols()
-    
-    # 1. 市值過濾
-    qualified_symbols = filter_full_market_cap(all_symbols, 500)
-    
-    if qualified_symbols:
-        status = st.empty()
-        # 2. 獲取所有合格股票的報價 (這步不限數量，3000 隻也能跑)
-        status.info(f"🧮 正在計算 {len(qualified_symbols)} 隻股票的動能...")
-        
-        all_h = []
-        for i in range(0, len(qualified_symbols), 200):
-            t_hist = Ticker(qualified_symbols[i:i+200], asynchronous=True)
+        # --- 階段 1: 市值篩選 ---
+        status.write("🔍 階段 1: 正在篩選全市場市值 (門檻: $500M)...")
+        batch_size = 500
+        for i in range(0, len(all_symbols), batch_size):
+            batch = all_symbols[i:i+batch_size]
             try:
-                h = t_hist.history(period="1y", interval="1d")
+                p_data = Ticker(batch).price
+                for s in batch:
+                    if isinstance(p_data, dict) and s in p_data:
+                        cap = p_data[s].get('marketCap', 0)
+                        if isinstance(cap, (int, float)) and cap >= 500_000_000:
+                            qualified.append(s)
+                status.update(label=f"已掃描 {i+len(batch)} 隻... 發現合格股: {len(qualified)} 隻")
+            except: continue
+        
+        if not qualified:
+            status.update(label="❌ 未找到符合市值的股票", state="error")
+            return None
+
+        # --- 階段 2: 動能運算 ---
+        status.write(f"📈 階段 2: 正在抓取 {len(qualified)} 隻股票的歷史價格...")
+        all_h = []
+        for i in range(0, len(qualified), 200):
+            try:
+                h = Ticker(qualified[i:i+200], asynchronous=True).history(period="1y", interval="1d")
                 if not h.empty: all_h.append(h)
             except: continue
         
-        if all_h:
-            full_hist = pd.concat(all_h)
-            close_prices = full_hist['close'].unstack(level=0).ffill()
+        if not all_h: return None
+        df_h = pd.concat(all_h)
+        prices = df_h['close'].unstack(level=0).ffill()
+        
+        ret_now = (prices.iloc[-1] / prices.iloc[0]) - 1
+        ret_3d = (prices.iloc[-4] / prices.iloc[0]) - 1
+        
+        res_df = pd.DataFrame({
+            'Price': prices.iloc[-1],
+            'RS_Now': (ret_now.rank(pct=True) * 98 + 1).fillna(0).astype(int),
+            'RS_3D': (ret_3d.rank(pct=True) * 98 + 1).fillna(0).astype(int)
+        })
+        res_df['RS_Change'] = res_df['RS_Now'] - res_df['RS_3D']
+
+        # --- 階段 3: 行業同步 (擴大掃描範圍) ---
+        # 這裡設定 limit=1500，這幾乎能覆蓋大部分市值 > 500M 且有成交量的股票
+        limit = 1500
+        status.write(f"🏢 階段 3: 正在深度抓取前 {limit} 隻強勢股的行業資料...")
+        top_list = res_df.sort_values('RS_Now', ascending=False).head(limit).index.tolist()
+        
+        sector_map = {}
+        sec_batch = 30 # 小批次以確保穩定
+        for i in range(0, len(top_list), sec_batch):
+            batch = top_list[i:i+sec_batch]
+            try:
+                # 使用 asset_profile 獲取精確行業
+                profiles = Ticker(batch).asset_profile
+                for s in batch:
+                    if isinstance(profiles, dict) and s in profiles:
+                        s_info = profiles[s]
+                        if isinstance(s_info, dict):
+                            sector_map[s] = s_info.get('sector', 'Unknown')
+            except: pass
+            # 加入微小延遲，防止 Yahoo 判定為惡意爬蟲
+            time.sleep(0.6)
+            status.update(label=f"行業抓取進度: {i+len(batch)} / {len(top_list)}")
             
-            # 3. 計算 RS 指標
-            ret_now = (close_prices.iloc[-1] / close_prices.iloc[0]) - 1
-            ret_3d = (close_prices.iloc[-4] / close_prices.iloc[0]) - 1
-            
-            df = pd.DataFrame({
-                'Symbol': close_prices.columns,
-                'Price': close_prices.iloc[-1],
-                'RS_Now': (ret_now.rank(pct=True) * 98 + 1).fillna(0).astype(int),
-                'RS_3D': (ret_3d.rank(pct=True) * 98 + 1).fillna(0).astype(int)
-            })
-            df['RS_Change'] = df['RS_Now'] - df['RS_3D']
-            
-            # 4. 行業抓取 (我們設定只抓 RS 前 500 隻的行業，其餘顯示為 'Pending')
-            # 這樣既能保證速度，又能讓你看到剩下的股票
-            top_tickers = df.sort_values(by='RS_Now', ascending=False)['Symbol'].tolist()
-            s_map = get_sectors_safely(top_tickers, status, limit=500)
-            df['Sector'] = df['Symbol'].map(s_map).fillna('Waiting Scan')
-            
-            # 5. 計算排名變動 (僅限有行業資料的)
-            valid = df[~df['Sector'].isin(['Waiting Scan', 'Unknown'])].copy()
-            if not valid.empty:
-                df['In_Sec_Rank_Now'] = valid.groupby('Sector')['RS_Now'].rank(ascending=False)
-                df['In_Sec_Rank_3D'] = valid.groupby('Sector')['RS_3D'].rank(ascending=False)
-                df['In_Sec_Rank_Chg'] = (df['In_Sec_Rank_3D'] - df['In_Sec_Rank_Now']).fillna(-999)
-            
-            # --- 最終顯示 (移除 head 限制) ---
-            # 排序：有行業變動的排前面，其餘按 RS 排序
-            final = df.sort_values(by=['In_Sec_Rank_Chg', 'RS_Now'], ascending=[False, False])
-            
-            st.divider()
-            st.subheader(f"🎯 全量結果清單 (共 {len(final)} 隻股票符合市值要求)")
-            
-            def arrow(v):
-                if v == -999 or pd.isna(v): return "-"
-                return f"▲ {int(v)}" if v > 0 else (f"▼ {abs(int(v))}" if v < 0 else "0")
-            
-            display_df = final[['Symbol', 'In_Sec_Rank_Chg', 'Sector', 'RS_Now', 'RS_Change', 'Price']].copy()
-            display_df['In_Sec_Rank_Chg'] = display_df['In_Sec_Rank_Chg'].apply(arrow)
-            display_df['RS_Change'] = display_df['RS_Change'].apply(arrow)
-            
-            st.dataframe(display_df, use_container_width=True, height=800)
-            st.success(f"⚡ 完成！顯示了所有 {len(final)} 隻符合條件的股票。")
+        res_df['Sector'] = res_df.index.map(sector_map).fillna("Outside Top 1500")
+        
+        # 行內排名運算
+        valid = res_df[~res_df['Sector'].isin(["Outside Top 1500", "Unknown"])].copy()
+        if not valid.empty:
+            res_df['In_Sec_Rank_Now'] = valid.groupby('Sector')['RS_Now'].rank(ascending=False)
+            res_df['In_Sec_Rank_3D'] = valid.groupby('Sector')['RS_3D'].rank(ascending=False)
+            res_df['In_Sec_Rank_Chg'] = (res_df['In_Sec_Rank_3D'] - res_df['In_Sec_Rank_Now']).fillna(-999)
+        
+        status.update(label="✅ 全市場分析完畢！", state="complete", expanded=False)
+        return res_df
+
+if st.button("🚀 啟動深度強化掃描"):
+    data = run_turbo_scan()
+    if data is not None:
+        st.divider()
+        # 排序邏輯：行內躍升名次越高越靠前
+        final = data.sort_values(['In_Sec_Rank_Chg', 'RS_Now'], ascending=[False, False])
+        
+        def arrow(v):
+            if v == -999 or pd.isna(v): return "-"
+            return f"▲ {int(v)}" if v > 0 else (f"▼ {abs(int(v))}" if v < 0 else "0")
+
+        display = final.reset_index().rename(columns={'index': 'Symbol'})
+        display['In_Sec_Rank_Chg'] = display['In_Sec_Rank_Chg'].apply(arrow)
+        display['RS_Change'] = display['RS_Change'].apply(arrow)
+        
+        st.dataframe(display[['Symbol', 'In_Sec_Rank_Chg', 'Sector', 'RS_Now', 'RS_Change', 'Price']], 
+                     use_container_width=True, height=800)
