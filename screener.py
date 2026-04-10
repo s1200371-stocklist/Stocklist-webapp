@@ -4,134 +4,104 @@ import pandas as pd
 import numpy as np
 import time
 
-st.set_page_config(page_title="RS 動能與行業矩陣", layout="wide")
-st.title("🦅 專業級 RS 動能與行業矩陣 (YahooQuery)")
+st.set_page_config(page_title="US Market Full Scanner", layout="wide")
+st.title("🦅 全美股 3,000 隻動能矩陣終端")
 
+# 獲取美股代碼（這裡建議自備或從穩定來源獲取，例如市值前 3000 的名單）
 @st.cache_data(ttl=86400)
-def get_sample_tickers():
-    # 測試用嘅多行業強勢股名單
-    return ["AAPL", "MSFT", "NVDA", "AVGO", "META", "GOOGL", "AMZN", "TSLA", "LLY", "UNH", 
-            "V", "JPM", "WMT", "MA", "PG", "JNJ", "XOM", "HD", "COST", "MRK",
-            "ABBV", "CVX", "CRM", "AMD", "BAC", "PEP", "KO", "TMO", "MCD", "ADBE"]
+def get_full_market_list():
+    url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
+    try:
+        tickers = pd.read_csv(url, header=None)[0].dropna().astype(str).tolist()
+        return [t.strip().upper() for t in tickers if len(t) <= 4][:3000] # 取前 3000 隻
+    except:
+        return ["AAPL", "NVDA", "MSFT", "TSLA", "AMD"]
 
-def calculate_advanced_rs(tickers):
-    st_msg = st.empty()
-    st_msg.text("🚀 正在通過 YahooQuery 批量獲取數據...")
+def run_full_scan(ticker_list):
+    progress_bar = st.progress(0)
+    status_msg = st.empty()
     
-    # 1. 獲取行業資料
-    t = Ticker(tickers, asynchronous=True)
-    profiles = t.summary_profile
-    sector_map = {}
-    for sym in tickers:
+    batch_size = 100
+    all_history = []
+    all_profiles = {}
+    
+    # --- 第一階段：批次獲取數據 ---
+    for i in range(0, len(ticker_list), batch_size):
+        batch = ticker_list[i:i+batch_size]
+        status_msg.text(f"📡 正在下載批次 {i//batch_size + 1}: {batch[0]}... ({i}/{len(ticker_list)})")
+        
+        t = Ticker(batch, asynchronous=True)
         try:
-            if isinstance(profiles, dict) and sym in profiles and isinstance(profiles[sym], dict):
-                sector_map[sym] = profiles[sym].get('sector', 'Unknown')
-            else:
-                sector_map[sym] = 'Unknown'
-        except:
-            sector_map[sym] = 'Unknown'
-
-    # 2. 獲取一年歷史數據
-    st_msg.text("📊 正在下載歷史股價並運算時間矩陣...")
-    hist = t.history(period="1y", interval="1d")
-    
-    if hist.empty:
-        st.error("無法獲取歷史數據")
-        return pd.DataFrame()
-
-    # 將數據表重組為 (日期 x 股票代碼) 格式
-    close_prices = hist['close'].unstack(level=0).ffill()
-    
-    if len(close_prices) < 130:
-        st.error("歷史數據不足半年，無法計算 RS")
-        return pd.DataFrame()
-
-    # --- 核心數據點 ---
-    p_today = close_prices.iloc[-1]           # 今日收市
-    p_3d_ago = close_prices.iloc[-4]          # 3日前收市
-    p_6m_today = close_prices.iloc[-126]      # 半年前 (以今日計)
-    p_6m_3d_ago = close_prices.iloc[-129]     # 半年前 (以3日前計)
-
-    # 過去 3 日最高價與最低價 (用來計算跌幅)
-    max_3d = close_prices.iloc[-4:].max()
-    min_3d = close_prices.iloc[-4:].min()
-    drop_3d = (min_3d - max_3d) / max_3d
-
-    # --- 回報率計算 ---
-    ret_today = (p_today - p_6m_today) / p_6m_today
-    ret_3d_ago = (p_3d_ago - p_6m_3d_ago) / p_6m_3d_ago
-
-    # 組合 DataFrame
-    df = pd.DataFrame({
-        '代碼': close_prices.columns,
-        '現價': p_today.values,
-        '行業': [sector_map.get(sym, 'Unknown') for sym in close_prices.columns],
-        'ret_today': ret_today.values,
-        'ret_3d_ago': ret_3d_ago.values,
-        'drop_3d': drop_3d.values
-    })
-
-    st_msg.text("🧮 正在進行市場與行業排名交叉分析...")
-
-    # --- 1 & 2. RS Rating (1-99) 及 3日變化 ---
-    df['RS_今日'] = (df['ret_today'].rank(pct=True) * 98 + 1).astype(int)
-    df['RS_3日前'] = (df['ret_3d_ago'].rank(pct=True) * 98 + 1).astype(int)
-    df['RS_3日變化'] = df['RS_今日'] - df['RS_3日前']
-
-    # --- 3. 過去3日股價下跌5%以內 ---
-    df['3日跌幅<5%'] = df['drop_3d'].apply(lambda x: "✅ 是" if x >= -0.05 else "❌ 否")
-
-    # --- 行業聚合運算 ---
-    sector_rs_today = df.groupby('行業')['RS_今日'].mean()
-    sector_rs_3d = df.groupby('行業')['RS_3日前'].mean()
-
-    # --- 5 & 7. 該行業在整個大市排名 及 3日變化 ---
-    sector_market_rank_today = (sector_rs_today.rank(pct=True) * 98 + 1).astype(int)
-    sector_market_rank_3d = (sector_rs_3d.rank(pct=True) * 98 + 1).astype(int)
-    
-    df['行業大市排名'] = df['行業'].map(sector_market_rank_today)
-    df['行業排名變化'] = df['行業大市排名'] - df['行業'].map(sector_market_rank_3d)
-    
-    # --- 4. 該股票在該行業是否領先 ---
-    df['行業平均RS'] = df['行業'].map(sector_rs_today)
-    df['行業領先?'] = df.apply(lambda row: "👑 是" if row['RS_今日'] > row['行業平均RS'] else "❌ 否", axis=1)
-
-    # --- 6. 該股票在該行業的變動排名 ---
-    # 先計今日行業內排名 (1為最好)
-    df['行內排名_今日'] = df.groupby('行業')['RS_今日'].rank(ascending=False).astype(int)
-    df['行內排名_3日前'] = df.groupby('行業')['RS_3日前'].rank(ascending=False).astype(int)
-    # 排名數字越細越好，所以變動 = 舊排名 - 新排名 (例如由第5升到第2，+3)
-    df['行內排名變化'] = df['行內排名_3日前'] - df['行內排名_今日']
-
-    # --- 整理最終顯示格式 ---
-    final_cols = [
-        '代碼', '行業', '現價', 'RS_今日', 'RS_3日變化', '3日跌幅<5%', 
-        '行業領先?', '行內排名變化', '行業大市排名', '行業排名變化'
-    ]
-    
-    final_df = df[final_cols].sort_values(by='RS_今日', ascending=False).reset_index(drop=True)
-    st_msg.text("✅ 運算完成！")
-    return final_df
-
-# --- 介面 ---
-limit = st.slider("掃描數量", 10, 30, 30)
-
-if st.button("🔥 執行 7 維度動能矩陣分析"):
-    start_t = time.time()
-    test_list = get_sample_tickers()[:limit]
-    res_df = calculate_advanced_rs(test_list)
-    
-    if not res_df.empty:
-        st.write(f"⏱️ 運算耗時: {round(time.time() - start_t, 2)} 秒")
-        
-        # 使用 Streamlit 內建的美化表格，為變化加上箭頭
-        def format_change(val):
-            if val > 0: return f"🟢 +{val}"
-            elif val < 0: return f"🔴 {val}"
-            return "➖ 0"
+            # 獲取歷史數據
+            h = t.history(period="1y", interval="1d")
+            if not h.empty:
+                all_history.append(h)
             
-        res_df['RS_3日變化'] = res_df['RS_3日變化'].apply(format_change)
-        res_df['行內排名變化'] = res_df['行內排名變化'].apply(format_change)
-        res_df['行業排名變化'] = res_df['行業排名變化'].apply(format_change)
+            # 獲取行業資料
+            prof = t.summary_profile
+            if isinstance(prof, dict):
+                all_profiles.update(prof)
+        except:
+            continue
         
-        st.dataframe(res_df, use_container_width=True)
+        progress_bar.progress(min((i + batch_size) / len(ticker_list), 1.0))
+
+    if not all_history:
+        st.error("無法獲取任何歷史數據。")
+        return pd.DataFrame()
+
+    # --- 第二階段：矩陣運算 ---
+    status_msg.text("🧮 正在計算全市場 RS 排名與 7 大指標...")
+    full_h = pd.concat(all_history)
+    close_prices = full_h['close'].unstack(level=0).ffill()
+    
+    # 計算漲幅與動能
+    ret_today = (close_prices.iloc[-1] / close_prices.iloc[-126]) - 1
+    ret_3d = (close_prices.iloc[-4] / close_prices.iloc[-129]) - 1
+    
+    # 3日跌幅 (計算最高點到最低點)
+    recent_3d = close_prices.iloc[-4:]
+    drop_3d = (recent_3d.min() - recent_3d.max()) / recent_3d.max()
+
+    # 建立主表
+    df = pd.DataFrame({
+        'Symbol': close_prices.columns,
+        'Price': close_prices.iloc[-1].values,
+        'Sector': [all_profiles.get(s, {}).get('sector', 'Unknown') for s in close_prices.columns],
+        'Ret_Now': ret_today.values,
+        'Ret_3d': ret_3d.values,
+        'Drop_3d': drop_3d.values
+    }).dropna()
+
+    # 指標 1 & 2: 全域 RS 及 3日變化
+    df['RS_Now'] = (df['Ret_Now'].rank(pct=True) * 98 + 1).astype(int)
+    df['RS_3d_Ago'] = (df['Ret_3d'].rank(pct=True) * 98 + 1).astype(int)
+    df['RS_Change'] = df['RS_Now'] - df['RS_3d_Ago']
+
+    # 指標 3: 3日緊湊度
+    df['Tightness'] = df['Drop_3d'].apply(lambda x: "✅" if x >= -0.05 else "❌")
+
+    # 行業聚合 (指標 5 & 7)
+    sec_rank = df.groupby('Sector')['RS_Now'].mean().rank(pct=True) * 98 + 1
+    sec_rank_3d = df.groupby('Sector')['RS_3d_Ago'].mean().rank(pct=True) * 98 + 1
+    
+    df['Sector_Rank'] = df['Sector'].map(sec_rank).fillna(0).astype(int)
+    df['Sector_Rank_Chg'] = df['Sector_Rank'] - df['Sector'].map(sec_rank_3d).fillna(0).astype(int)
+
+    # 指標 4 & 6: 行業領先與排名變化
+    df['Sector_Avg_RS'] = df['Sector'].map(df.groupby('Sector')['RS_Now'].mean())
+    df['Leader'] = df.apply(lambda r: "👑" if r['RS_Now'] > r['Sector_Avg_RS'] else "×", axis=1)
+    
+    # 行內排名變化
+    df['In_Sec_Rank_Now'] = df.groupby('Sector')['RS_Now'].rank(ascending=False)
+    df['In_Sec_Rank_3d'] = df.groupby('Sector')['RS_3d_Ago'].rank(ascending=False)
+    df['In_Sec_Rank_Chg'] = df['In_Sec_Rank_3d'] - df['In_Sec_Rank_Now']
+
+    status_msg.text("✅ 全美股掃描完成！")
+    return df.sort_values(by='RS_Now', ascending=False)
+
+# UI 觸發
+if st.button("🚀 開始 3,000 隻全市場深度掃描"):
+    tickers = get_full_market_list()
+    results = run_full_scan(tickers)
+    st.dataframe(results)
