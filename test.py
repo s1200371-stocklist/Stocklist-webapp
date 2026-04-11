@@ -54,11 +54,11 @@ def load_all_symbols(manual_tickers=""):
             
     return sorted(list(set(clean_symbols)))
 
-# --- 3. 核心抓取邏輯 ---
+# --- 3. 核心抓取邏輯 (防彈分拆版) ---
 @st.cache_data(ttl=3600)
 def fetch_data_pro(symbols, min_cap):
     results = []
-    batch_size = 50 # 兼顧速度與穩定性
+    batch_size = 50 
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -70,28 +70,38 @@ def fetch_data_pro(symbols, min_cap):
         
         try:
             t = Ticker(batch, asynchronous=True)
-            # 同時拿市值和公司資料
-            all_info = t.get_modules(['summaryDetail', 'assetProfile'])
+            
+            # 【關鍵修復】: 將市值同埋行業分開兩次獨立請求！互不拖累！
+            summary_data = t.summary_detail
+            profile_data = t.asset_profile
             
             for s in batch:
-                data = all_info.get(s)
-                if not isinstance(data, dict): continue
+                # 1. 處理市值數據
+                # 如果 Yahoo 回傳字串報錯，呢度會拎到字串；正常會拎到 dict
+                summary = summary_data.get(s) if isinstance(summary_data, dict) else {}
                 
-                summary = data.get('summaryDetail', {})
-                profile = data.get('assetProfile', {})
-                
+                if not isinstance(summary, dict):
+                    continue # 如果連市值都報錯，先至跳過
+                    
                 mkt_cap = summary.get('marketCap')
-                # 硬指標：市值必須達標
+                
+                # 市值達標，準備入選！
                 if isinstance(mkt_cap, (int, float)) and mkt_cap >= min_cap:
+                    
+                    # 2. 處理行業數據 (即使呢度 Yahoo 報錯變咗字串，都唔會踢走隻股票)
+                    profile = profile_data.get(s) if isinstance(profile_data, dict) else {}
+                    if not isinstance(profile, dict):
+                        profile = {} # 如果行業數據壞咗，當佢係空字典，等陣出 N/A
+                        
                     results.append({
                         "Symbol": s,
                         "Name": summary.get('shortName', s),
                         "MarketCap": mkt_cap,
                         "Price": summary.get('previousClose', 0.0),
-                        "Sector": profile.get('sector', 'N/A') if isinstance(profile, dict) else 'N/A',
-                        "Industry": profile.get('industry', 'N/A') if isinstance(profile, dict) else 'N/A'
+                        "Sector": profile.get('sector', 'N/A'),
+                        "Industry": profile.get('industry', 'N/A')
                     })
-        except:
+        except Exception:
             continue
             
     progress_bar.empty()
