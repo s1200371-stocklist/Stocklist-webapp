@@ -4,146 +4,143 @@ from yahooquery import Ticker
 import os
 import re
 
-# --- 1. 網頁配置 ---
-st.set_page_config(page_title="美股篩選除錯診斷工具", layout="wide")
+# --- 1. 網頁基本配置 ---
+st.set_page_config(page_title="美股專業篩選器 (Pro)", layout="wide", page_icon="📈")
 
-st.title("🔍 美股篩選：全流程除錯診斷版")
-st.markdown("""
-呢個版本專門用嚟排查點解股票數量變少。佢會話你知：
-1. **CSV 讀到幾多隻？**
-2. **Yahoo 認得幾多隻？**
-3. **最後過到市值門檻有幾多隻？**
-""")
+st.title("📈 全美股市值與行業篩選器 (Pro Version)")
+st.markdown("自動合併三大交易所名單，過濾無效代號，並抓取 Yahoo Finance 最新數據。")
 
-# --- 2. 數據源診斷 (CSV 讀取) ---
+# --- 2. 智能符號讀取與清洗 (終極修正版) ---
 @st.cache_data
-def load_and_diagnose_symbols():
+def load_and_clean_symbols():
     files = ['nasdaq-listed.csv', 'nyse-listed.csv', 'other-listed.csv']
-    diag_info = {}
-    all_raw_list = []
+    raw_symbols = []
     
+    # 讀取 CSV，自動適應逗號或 | 分隔符
     for f in files:
         if os.path.exists(f):
             try:
-                df = pd.read_csv(f)
-                cols = [c for c in df.columns if c.lower() in ['symbol', 'ticker']]
+                # engine='python' 和 sep=None 讓 Pandas 自動偵測分隔符
+                df = pd.read_csv(f, sep=None, engine='python')
+                # 模糊搜尋欄位：只要欄位名稱包含 symbol, ticker 或 act 就接受
+                cols = [c for c in df.columns if isinstance(c, str) and any(kw in c.lower() for kw in ['symbol', 'ticker', 'act'])]
                 if cols:
-                    s_list = df[cols[0]].dropna().astype(str).str.strip().unique().tolist()
-                    diag_info[f] = len(s_list)
-                    all_raw_list.extend(s_list)
-                else:
-                    diag_info[f] = "錯誤：找不到 Symbol 欄位"
+                    symbols = df[cols[0]].dropna().astype(str).str.strip().tolist()
+                    raw_symbols.extend(symbols)
             except Exception as e:
-                diag_info[f] = f"錯誤：{str(e)}"
-        else:
-            diag_info[f] = "不存在"
-
-    # 清洗格式
+                st.warning(f"讀取 {f} 時發生錯誤: {e}")
+                
     clean_symbols = []
-    for s in list(set(all_raw_list)):
+    # 符號清洗與嚴格過濾邏輯
+    for s in list(set(raw_symbols)):
+        # 將 . 和 / 替換為 Yahoo 支援的 - (解決 BRK.B 變 BRK-B 的問題)
         formatted_s = re.sub(r'[\./]', '-', s.upper())
-        if re.match(r'^[A-Z-]+$', formatted_s) and len(formatted_s) < 8:
+        
+        # 嚴格限制：只保留純英文字母和橫線，且長度在 1 到 5 之間 (過濾 Warrants 及垃圾代號)
+        if re.match(r'^[A-Z-]+$', formatted_s) and 1 <= len(formatted_s) <= 5:
             clean_symbols.append(formatted_s)
             
-    return sorted(clean_symbols), diag_info, len(set(all_raw_list))
+    return sorted(list(set(clean_symbols)))
 
-# --- 3. API 診斷 (數據抓取) ---
-@st.cache_data(ttl=3600)
-def fetch_with_diagnostics(symbols, min_cap):
+# --- 3. 數據抓取與篩選核心 (市值保證 + 行業補完) ---
+@st.cache_data(ttl=3600) # 快取 1 小時
+def fetch_and_screen_data(symbols, min_cap):
     results = []
-    log_data = {
-        "api_not_found": [],   # Yahoo 查無此人
-        "missing_mkt_cap": [], # 搵到股，但冇市值數據
-        "below_threshold": [], # 市值唔夠
-        "success": []          # 成功入選
-    }
+    batch_size = 50 # 每批 50 隻，確保 API 穩定性
     
-    batch_size = 100
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i:i+batch_size]
+        status_text.text(f"🚀 正在請求 Yahoo 數據: {i} / {len(symbols)}...")
         progress_bar.progress(min(i / len(symbols), 1.0))
         
         try:
             t = Ticker(batch, asynchronous=True)
-            data = t.summary_detail
+            # 同時抓取市值與公司簡介
+            all_data = t.get_modules(['summaryDetail', 'assetProfile'])
             
             for s in batch:
-                s_info = data.get(s)
-                
-                # 診斷 A: Yahoo 認唔認得
-                if not isinstance(s_info, dict) or not s_info:
-                    log_data["api_not_found"].append(s)
+                s_data = all_data.get(s)
+                if not isinstance(s_data, dict):
                     continue
                 
-                mkt_cap = s_info.get('marketCap')
+                summary = s_data.get('summaryDetail', {})
+                profile = s_data.get('assetProfile', {})
                 
-                # 診斷 B: 有冇市值數據
-                if not isinstance(mkt_cap, (int, float)):
-                    log_data["missing_mkt_cap"].append(s)
-                    continue
-                
-                # 診斷 C: 門檻檢查
-                if mkt_cap >= min_cap:
-                    log_data["success"].append(s)
-                    results.append({
-                        "Symbol": s,
-                        "Name": s_info.get('shortName', 'N/A'),
-                        "MarketCap": mkt_cap,
-                        "Price": s_info.get('previousClose', 0)
-                    })
-                else:
-                    log_data["below_threshold"].append(s)
+                if isinstance(summary, dict):
+                    mkt_cap = summary.get('marketCap')
                     
+                    # 只要市值過關，就記錄下來
+                    if isinstance(mkt_cap, (int, float)) and mkt_cap >= min_cap:
+                        results.append({
+                            "Symbol": s,
+                            "Name": summary.get('shortName', s),
+                            "MarketCap": mkt_cap,
+                            "Price": summary.get('previousClose', 0.0),
+                            "Sector": profile.get('sector', 'N/A') if isinstance(profile, dict) else 'N/A',
+                            "Industry": profile.get('industry', 'N/A') if isinstance(profile, dict) else 'N/A'
+                        })
         except Exception:
             continue
             
     progress_bar.empty()
-    return pd.DataFrame(results), log_data
+    status_text.empty()
+    return pd.DataFrame(results)
 
-# --- 4. 介面與顯示 ---
-target_cap = st.sidebar.number_input("最低市值門檻 (USD)", value=500_000_000, step=100_000_000)
+# --- 4. 側邊欄介面 ---
+st.sidebar.header("⚙️ 篩選設定")
+target_cap = st.sidebar.number_input("最低市值門檻 (USD)", value=500_000_000, step=100_000_000, format="%d")
 
-if st.button("🚀 開始全流程診斷"):
-    # 第一步：CSV 診斷
-    clean_list, csv_diag, raw_total = load_and_diagnose_symbols()
-    
-    st.subheader("第一階段：數據源 (CSV) 診斷")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("CSV 原始代號總數", raw_total)
-    col2.metric("清洗後有效格式", len(clean_list))
-    col3.metric("格式被篩走數量", raw_total - len(clean_list))
-    
-    with st.expander("查看各個 CSV 讀取詳情"):
-        st.write(csv_diag)
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **提示**\n\nETF 及部分基金可能不會顯示行業 (Industry) 及板塊 (Sector) 資料，會以 N/A 顯示。")
 
-    # 第二步：API 診斷
-    st.markdown("---")
-    st.subheader("第二階段：Yahoo API 抓取診斷")
-    
-    with st.spinner("正在逐一排查..."):
-        df_result, logs = fetch_with_diagnostics(clean_list, target_cap)
+# --- 5. 主程式執行邏輯 ---
+if st.button("🔍 開始掃描全市場", use_container_width=True):
+    try:
+        all_symbols = load_and_clean_symbols()
         
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("最終入選", len(logs["success"]), delta_color="normal")
-        c2.metric("Yahoo 查無此股", len(logs["api_not_found"]), delta="-❌")
-        c3.metric("缺失市值數據", len(logs["missing_mkt_cap"]), delta="-⚠️")
-        c4.metric("市值未達標", len(logs["below_threshold"]), delta="-📉")
-
-        # 顯示原因分析
-        st.info(f"💡 **診斷結論：** 你的 CSV 提供咗 {len(clean_list)} 隻股票，但 Yahoo 只認得其中 {len(clean_list) - len(logs['api_not_found'])} 隻。")
-
-        if not df_result.empty:
-            st.dataframe(df_result.sort_values("MarketCap", ascending=False), use_container_width=True)
-            
-            # 提供 Debug 詳細名單
-            with st.expander("查看『查無此股』嘅名單 (前 50 隻)"):
-                st.write(logs["api_not_found"][:50])
-            
-            with st.expander("查看『有股但冇市值數據』嘅名單 (前 50 隻)"):
-                st.write(logs["missing_mkt_cap"][:50])
+        if not all_symbols:
+            st.error("❌ 找不到任何有效的股票代號！請確認 CSV 檔案存在且格式正確。")
         else:
-            st.error("掃描結束，但沒有任何股票符合條件。")
+            with st.spinner(f"已成功載入 {len(all_symbols)} 隻有效股票代號，正在執行篩選..."):
+                df_result = fetch_and_screen_data(all_symbols, target_cap)
+                
+                if not df_result.empty:
+                    st.success(f"✅ 掃描完成！找到 **{len(df_result)}** 隻市值 > {target_cap/1e6:.0f}M 的股票。")
+                    st.balloons()
+                    
+                    # 顯示數據表格
+                    st.dataframe(
+                        df_result.sort_values("MarketCap", ascending=False),
+                        column_config={
+                            "Symbol": "代號",
+                            "Name": "公司名稱",
+                            "MarketCap": st.column_config.NumberColumn("市值 ($)", format="$%.2e"),
+                            "Price": st.column_config.NumberColumn("股價 ($)", format="$%.2f"),
+                            "Sector": "板塊",
+                            "Industry": "行業"
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                        height=600
+                    )
+                    
+                    # 提供 CSV 下載
+                    csv = df_result.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 下載篩選結果 (CSV)",
+                        data=csv,
+                        file_name="us_stocks_screened.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("⚠️ 沒有任何股票符合目前的篩選條件。")
+
+    except Exception as e:
+        st.error("🚨 程式運行出現非預期錯誤！")
+        st.exception(e)
 else:
-    st.info("請點擊按鈕開始執行診斷程序。")
+    st.info("👈 請點擊上方的「開始掃描全市場」按鈕。")
