@@ -155,3 +155,59 @@ if st.button("🔥 開始雙網全自動掃描", use_container_width=True):
             st.download_button("📥 下載完整 CSV 結果", csv_data, "stock_results_pro.csv", "text/csv")
         else:
             st.warning("符合條件的股票數量為 0。")
+
+# --- 4. 側邊欄與 UI ---
+st.sidebar.header("🔍 篩選與補底")
+target_cap = st.sidebar.number_input("最低市值門檻 (USD)", value=500_000_000, step=100_000_000)
+
+st.sidebar.subheader("📌 手動補底 (防止遺漏)")
+manual_input = st.sidebar.text_area("輸入想強制加入的代號 (用逗號隔開)", value="PLTR, NVDA, TSLA, AAPL", help="如果 CSV 太舊，可以在這裡手動輸入代號")
+
+# --- 5. 執行主邏輯 ---
+if st.button("🔥 開始全自動掃描篩選", use_container_width=True):
+    # 1. 加載名單
+    all_symbols = load_all_symbols(manual_input)
+    
+    if not all_symbols:
+        st.error("無法載入代號，請檢查 CSV 檔案路徑。")
+    else:
+        st.info(f"成功加載 {len(all_symbols)} 個有效代號，正在向 Yahoo Finance 請求數據...")
+        
+        # 2. 抓取數據
+        df = fetch_data_pro(all_symbols, target_cap)
+        
+        if not df.empty:
+            st.success(f"✅ 篩選完成！共找到 {len(df)} 隻符合條件股票。")
+            
+            # 數據分析小統計
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("平均市值", f"${df['MarketCap'].mean():,.0f}")
+            with col2:
+                top_sector = df['Sector'].value_counts().idxmax()
+                st.metric("最多的板塊", top_sector)
+
+            # 顯示表格
+            st.dataframe(
+                df.sort_values("MarketCap", ascending=False),
+                column_config={
+                    "MarketCap": st.column_config.NumberColumn("市值 ($)", format="$%.2e"),
+                    "Price": st.column_config.NumberColumn("股價 ($)", format="$%.2f")
+                },
+                use_container_width=True, hide_index=True, height=600
+            )
+            
+            # 下載按鈕
+            csv_data = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 下載完整 CSV 結果", csv_data, "stock_results.csv", "text/csv")
+        else:
+            st.warning("符合條件的股票數量為 0。請檢查市值設定。")
+
+# --- 補充小提示 ---
+st.divider()
+with st.expander("📝 關於搜尋不到特定股票的說明"):
+    st.write("""
+    1. **SNDK (SanDisk)**: 該公司已於 2016 年被 Western Digital (WDC) 收購並下市，因此無法搜到。
+    2. **PLTR (Palantir)**: 如果 CSV 沒更新可能遺漏。本版本已在左側加入『手動補底』功能，確保它能被掃描到。
+    3. **N/A 顯示**: ETF 或部分新上市公司在 Yahoo 數據庫中可能缺乏行業描述，這是正常現象。
+    """)
