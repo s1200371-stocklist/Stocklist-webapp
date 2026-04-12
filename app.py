@@ -5,17 +5,28 @@ import os
 import re
 import time
 
+# ==========================================
+# --- 1. 網頁基本配置 ---
+# ==========================================
 st.set_page_config(page_title="美股終極篩選器 (雙網版)", layout="wide", page_icon="🕸️")
 
-st.title("🕸️ 美股市值與行業篩選器 (雙網救援機制)")
-st.markdown("特設**「VIP 獨立狙擊機制」**：自動偵測喺批次中失蹤嘅熱門股（如 TSLA, PLTR），並作單獨重新抓取，保證零遺漏！")
+st.title("🕸️ 美股市值與行業篩選器 (雙網全能版)")
+st.markdown("""
+這個終極版本包含了：
+1. **最強 CSV 兼容**：自動識別不同格式，確保 NYSE 股票不遺漏。
+2. **雙網救援機制**：大批次掃描後，自動對失蹤股票（如 TSLA, PLTR）進行單獨狙擊。
+3. **系統重置功能**：一鍵清除快取，解決因 Yahoo API 斷線導致的「永久空表」問題。
+""")
 
-# --- 1. 讀取與清洗 (保持最強兼容) ---
+# ==========================================
+# --- 2. 智能讀取與清洗 ---
+# ==========================================
 @st.cache_data
 def load_all_symbols(manual_tickers=""):
     files = ['nasdaq-listed.csv', 'nyse-listed.csv', 'other-listed.csv']
     raw_list = []
     
+    # A. 讀取本地 CSV
     for f in files:
         if os.path.exists(f):
             try:
@@ -24,11 +35,14 @@ def load_all_symbols(manual_tickers=""):
                                any(kw in c.lower() for kw in ['symbol', 'ticker', 'act', 'sign'])]
                 if target_cols:
                     raw_list.extend(df[target_cols[0]].dropna().astype(str).str.strip().tolist())
-            except: continue
+            except:
+                continue
 
+    # B. 加入手動輸入的代號
     if manual_tickers:
         raw_list.extend([t.strip().upper() for t in manual_tickers.split(',') if t.strip()])
                 
+    # C. 清洗與過濾 (只保留正常美股代號)
     clean_symbols = []
     for s in list(set(raw_list)):
         s_clean = re.sub(r'[\./]', '-', s.upper())
@@ -37,17 +51,19 @@ def load_all_symbols(manual_tickers=""):
             
     return sorted(list(set(clean_symbols)))
 
-# --- 2. 核心抓取邏輯 (殺手鐧：雙網救援機制) ---
+# ==========================================
+# --- 3. 核心抓取邏輯 (雙網救援機制) ---
+# ==========================================
 @st.cache_data(ttl=3600)
 def fetch_data_pro(symbols, min_cap):
     results = []
-    missing_or_failed = [] # 收集所有失敗、無數據嘅代號
+    missing_or_failed = []
     batch_size = 50 
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # 網一：大批次極速掃描
+    # 【第一重網】：大批次極速掃描
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i:i+batch_size]
         status_text.text(f"🚀 第一階段 (極速掃描): {i} / {len(symbols)}...")
@@ -59,8 +75,6 @@ def fetch_data_pro(symbols, min_cap):
             
             for s in batch:
                 s_data = data.get(s)
-                
-                # 如果回傳字串報錯，或者根本唔係字典 -> 掟入重試名單
                 if not isinstance(s_data, dict):
                     missing_or_failed.append(s)
                     continue
@@ -68,7 +82,6 @@ def fetch_data_pro(symbols, min_cap):
                 summary = s_data.get('summaryDetail', {})
                 if isinstance(summary, dict):
                     mkt_cap = summary.get('marketCap')
-                    # 如果有市值
                     if isinstance(mkt_cap, (int, float)):
                         if mkt_cap >= min_cap:
                             profile = s_data.get('assetProfile', {})
@@ -81,25 +94,24 @@ def fetch_data_pro(symbols, min_cap):
                                 "Industry": profile.get('industry', 'N/A') if isinstance(profile, dict) else 'N/A'
                             })
                     else:
-                        missing_or_failed.append(s) # 搵唔到市值，可能係 API 未 load 完，重試！
+                        missing_or_failed.append(s)
                 else:
-                    missing_or_failed.append(s) # 冇 summaryDetail，重試！
+                    missing_or_failed.append(s)
         except Exception:
-            missing_or_failed.extend(batch) # 成個 Batch 冧咗，全部重試！
+            missing_or_failed.extend(batch)
 
-    # 網二：VIP 獨立狙擊 (單獨重試)
+    # 【第二重網】：VIP 單獨狙擊 (拯救漏網之魚)
     if missing_or_failed:
-        # 去除重複
         missing_or_failed = list(set(missing_or_failed))
-        st.toast(f"發現 {len(missing_or_failed)} 隻股票喺大批次中無回覆，正在啟動 VIP 獨立狙擊...", icon="🎯")
         
         for i, s in enumerate(missing_or_failed):
             status_text.text(f"🎯 第二階段 (VIP 補漏): 正在單獨拯救 {s} ({i+1}/{len(missing_or_failed)})...")
-            progress_bar.progress(min(i / len(missing_or_failed), 1.0))
+            # 確保進度條不會報錯
+            progress_val = min((i + 1) / max(len(missing_or_failed), 1), 1.0)
+            progress_bar.progress(progress_val)
             
             try:
-                # 殺手鐧：asynchronous=False (同步)，逐隻查，最慢但 100% 準確
-                t_single = Ticker(s, asynchronous=False)
+                t_single = Ticker(s, asynchronous=False) # 單獨同步抓取
                 s_data = t_single.get_modules(['summaryDetail', 'assetProfile']).get(s, {})
                 
                 if isinstance(s_data, dict):
@@ -117,97 +129,80 @@ def fetch_data_pro(symbols, min_cap):
                                 "Industry": profile.get('industry', 'N/A') if isinstance(profile, dict) else 'N/A'
                             })
             except Exception:
-                pass # 呢隻真係死股/退市股，可以徹底放棄
-            
-            # 畀少少休息時間 Yahoo，防止被 block
-            time.sleep(0.05)
+                pass 
+            time.sleep(0.05) # 防止被 Yahoo 封鎖
             
     progress_bar.empty()
     status_text.empty()
     return pd.DataFrame(results)
 
-# --- 3. 介面與執行 ---
-st.sidebar.header("🔍 篩選與補底")
+# ==========================================
+# --- 4. 側邊欄介面與設定 ---
+# ==========================================
+st.sidebar.header("⚙️ 篩選與系統設定")
 target_cap = st.sidebar.number_input("最低市值門檻 (USD)", value=500_000_000, step=100_000_000)
-manual_input = st.sidebar.text_area("輸入想強制加入的代號 (用逗號隔開)", value="PLTR, NVDA, TSLA, AAPL")
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📌 防漏補底名單")
+manual_input = st.sidebar.text_area(
+    "輸入想強制加入的代號 (用逗號隔開)", 
+    value="PLTR, NVDA, TSLA, AAPL",
+    help="即使 CSV 沒有這些股票，系統也會強制向 Yahoo 查詢"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛠️ 系統維護")
+st.sidebar.info("如果發現掃描結果為 0，請務必先點擊下方按鈕清除快取！")
+if st.sidebar.button("🧹 清除系統快取 (重置)"):
+    st.cache_data.clear()
+    st.sidebar.success("✅ 快取已完全清除！請重新點擊掃描按鈕。")
+
+# 安全測試開關
+is_test_mode = st.sidebar.checkbox("開啟測試模式 (只掃描首 30 隻股票，防止被 Block)", value=False)
+
+# ==========================================
+# --- 5. 主程式執行邏輯 ---
+# ==========================================
 if st.button("🔥 開始雙網全自動掃描", use_container_width=True):
     all_symbols = load_all_symbols(manual_input)
     
     if not all_symbols:
-        st.error("無法載入代號，請檢查 CSV。")
+        st.error("❌ 無法載入代號，請檢查 CSV 檔案是否存在及格式。")
     else:
-        st.info(f"成功加載 {len(all_symbols)} 個有效代號。開始執行...")
+        # 如果開啟了測試模式，就縮減名單
+        if is_test_mode:
+            st.warning("⚠️ 現正處於測試模式，只會掃描少量股票。")
+            target_symbols = all_symbols[:30] + [t.strip().upper() for t in manual_input.split(',') if t.strip()]
+            target_symbols = list(set(target_symbols))
+        else:
+            target_symbols = all_symbols
+
+        st.info(f"✅ 成功加載準備掃描。本次掃描數量：{len(target_symbols)} 隻。開始執行...")
         
-        df = fetch_data_pro(all_symbols, target_cap)
+        # 執行數據抓取
+        df = fetch_data_pro(target_symbols, target_cap)
         
+        # 顯示結果
         if not df.empty:
-            st.success(f"✅ 篩選完成！成功突破 Yahoo 限制，共找到 {len(df)} 隻股票。")
+            # 確保不會有重複出現的股票
+            df = df.drop_duplicates(subset=['Symbol'])
+            
+            st.success(f"🎉 篩選完成！成功突破限制，共找到 **{len(df)}** 隻符合條件的股票。")
             st.dataframe(
                 df.sort_values("MarketCap", ascending=False),
                 column_config={
+                    "Symbol": "代號",
+                    "Name": "公司名稱",
                     "MarketCap": st.column_config.NumberColumn("市值 ($)", format="$%.2e"),
-                    "Price": st.column_config.NumberColumn("股價 ($)", format="$%.2f")
+                    "Price": st.column_config.NumberColumn("股價 ($)", format="$%.2f"),
+                    "Sector": "板塊",
+                    "Industry": "行業"
                 },
                 use_container_width=True, hide_index=True, height=600
             )
+            
             csv_data = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 下載完整 CSV 結果", csv_data, "stock_results_pro.csv", "text/csv")
         else:
-            st.warning("符合條件的股票數量為 0。")
-
-# --- 4. 側邊欄與 UI ---
-st.sidebar.header("🔍 篩選與補底")
-target_cap = st.sidebar.number_input("最低市值門檻 (USD)", value=500_000_000, step=100_000_000)
-
-st.sidebar.subheader("📌 手動補底 (防止遺漏)")
-manual_input = st.sidebar.text_area("輸入想強制加入的代號 (用逗號隔開)", value="PLTR, NVDA, TSLA, AAPL", help="如果 CSV 太舊，可以在這裡手動輸入代號")
-
-# --- 5. 執行主邏輯 ---
-if st.button("🔥 開始全自動掃描篩選", use_container_width=True):
-    # 1. 加載名單
-    all_symbols = load_all_symbols(manual_input)
-    
-    if not all_symbols:
-        st.error("無法載入代號，請檢查 CSV 檔案路徑。")
-    else:
-        st.info(f"成功加載 {len(all_symbols)} 個有效代號，正在向 Yahoo Finance 請求數據...")
-        
-        # 2. 抓取數據
-        df = fetch_data_pro(all_symbols, target_cap)
-        
-        if not df.empty:
-            st.success(f"✅ 篩選完成！共找到 {len(df)} 隻符合條件股票。")
-            
-            # 數據分析小統計
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("平均市值", f"${df['MarketCap'].mean():,.0f}")
-            with col2:
-                top_sector = df['Sector'].value_counts().idxmax()
-                st.metric("最多的板塊", top_sector)
-
-            # 顯示表格
-            st.dataframe(
-                df.sort_values("MarketCap", ascending=False),
-                column_config={
-                    "MarketCap": st.column_config.NumberColumn("市值 ($)", format="$%.2e"),
-                    "Price": st.column_config.NumberColumn("股價 ($)", format="$%.2f")
-                },
-                use_container_width=True, hide_index=True, height=600
-            )
-            
-            # 下載按鈕
-            csv_data = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 下載完整 CSV 結果", csv_data, "stock_results.csv", "text/csv")
-        else:
-            st.warning("符合條件的股票數量為 0。請檢查市值設定。")
-
-# --- 補充小提示 ---
-st.divider()
-with st.expander("📝 關於搜尋不到特定股票的說明"):
-    st.write("""
-    1. **SNDK (SanDisk)**: 該公司已於 2016 年被 Western Digital (WDC) 收購並下市，因此無法搜到。
-    2. **PLTR (Palantir)**: 如果 CSV 沒更新可能遺漏。本版本已在左側加入『手動補底』功能，確保它能被掃描到。
-    3. **N/A 顯示**: ETF 或部分新上市公司在 Yahoo 數據庫中可能缺乏行業描述，這是正常現象。
-    """)
+            st.error("🚨 篩選結果依然為 0 隻！這通常是因為 Yahoo 暫時封鎖了你的 IP。")
+            st.write("💡 **解決建議**：請先點擊左側的「🧹 清除系統快取」，勾選「開啟測試模式」，然後再試一次。")
