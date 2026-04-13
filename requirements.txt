@@ -3,3 +3,4 @@ pandas>=2.0.0
 yahooquery>=2.3.0
 numpy
 finvizfinance
+yfinance
