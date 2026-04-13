@@ -1,204 +1,72 @@
 import streamlit as st
 import pandas as pd
-from yahooquery import Ticker
-import os
-import re
+from finvizfinance.screener.overview import Overview
+import datetime
 
-# --- 1. 網頁配置 ---
-st.set_page_config(page_title="美股終極篩選器", layout="wide", page_icon="💰")
+# --- 專業配置 ---
+st.set_page_config(page_title="美股 500M+ 市值掃描器", layout="wide")
 
-st.title("📈 美股市值與行業篩選器 (終極完美版)")
-st.markdown("""
-這個版本解決了：
-1. **CSV 格式不一**：自動偵測 `,` 或 `|` 分隔符。
-2. **欄位名稱混亂**：自動識別 `Symbol`, `Ticker`, `ACT Symbol` 等。
-3. **熱門股遺漏**：提供「手動追加」功能，確保 PLTR 等股票不失蹤。
-4. **數據穩定性**：保證市值優先，行業資料為輔。
-""")
+# 1. 強健的市值轉換函數 (Double Checked)
+def convert_mcap_to_float(val):
+    try:
+        if pd.isna(val) or val == '-':
+            return 0.0
+        val = str(val).upper().replace(',', '')
+        if 'B' in val:
+            return float(val.replace('B', '')) * 1000  # 轉為 Million
+        if 'M' in val:
+            return float(val.replace('M', ''))
+        return float(val)
+    except:
+        return 0.0
 
-# --- 2. 智能讀取與清洗功能 ---
-@st.cache_data
-def load_all_symbols(manual_tickers=""):
-    files = ['nasdaq-listed.csv', 'nyse-listed.csv', 'other-listed.csv']
-    raw_list = []
+# 2. 數據獲取 (加入快取與錯誤處理)
+@st.cache_data(ttl=1800)
+def fetch_stock_data():
+    try:
+        f_screener = Overview()
+        # 為了覆蓋 500M 以上，我們需要抓取 Small, Mid, Large 等區間
+        # 這裡示範抓取 Small ($300mln to $2bln)，如需更多可疊加或不設限
+        filters_dict = {'Market Cap.': 'Small ($300mln to $2bln)'}
+        f_screener.set_filter(filters_dict=filters_dict)
+        df = f_screener.screener_view()
+        return df
+    except Exception as e:
+        st.error(f"連線至 Finviz 失敗: {e}")
+        return pd.DataFrame()
+
+# --- UI 介面 ---
+st.title("🚀 專業股票掃描器 (Finviz 引擎)")
+st.caption(f"最後更新時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+with st.sidebar:
+    st.header("篩選參數")
+    min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
+    st.info("註：目前設定掃描範圍為 Finviz 'Small Cap' 區別 (300M - 2B)。")
+
+# 執行邏輯
+raw_data = fetch_stock_data()
+
+if not raw_data.empty:
+    # 複製一份進行處理
+    df_processed = raw_data.copy()
     
-    # A. 讀取 CSV
-    for f in files:
-        if os.path.exists(f):
-            try:
-                # sep=None, engine='python' 會自動偵測逗號或直線分隔符
-                df = pd.read_csv(f, sep=None, engine='python')
-                # 尋找包含 symbol / ticker / act 的欄位
-                target_cols = [c for c in df.columns if isinstance(c, str) and 
-                               any(kw in c.lower() for kw in ['symbol', 'ticker', 'act', 'sign'])]
-                
-                if target_cols:
-                    found_symbols = df[target_cols[0]].dropna().astype(str).str.strip().tolist()
-                    raw_list.extend(found_symbols)
-            except:
-                continue
-
-    # B. 處理手動追加的代號 (例如輸入 PLTR, NVDA)
-    if manual_tickers:
-        added_list = [t.strip().upper() for t in manual_tickers.split(',') if t.strip()]
-        raw_list.extend(added_list)
-                
-    # C. 格式清洗與過濾
-    clean_symbols = []
-    for s in list(set(raw_list)):
-        # 處理 Yahoo 格式：. 或 / 轉為 -
-        s_clean = re.sub(r'[\./]', '-', s.upper())
-        # 只保留 1-5 位的正規代號，剔除測試碼與權證
-        if re.match(r'^[A-Z-]+$', s_clean) and 1 <= len(s_clean) <= 5:
-            clean_symbols.append(s_clean)
-            
-    return sorted(list(set(clean_symbols)))
-
-# --- 3. 核心抓取邏輯 (防彈分拆版) ---
-@st.cache_data(ttl=3600)
-def fetch_data_pro(symbols, min_cap):
-    results = []
-    batch_size = 50 
+    # 轉換市值欄位供過濾使用
+    df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    # 執行過濾
+    final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].sort_values(by='Mcap_Numeric', ascending=False)
     
-    for i in range(0, len(symbols), batch_size):
-        batch = symbols[i:i+batch_size]
-        status_text.text(f"🚀 正在分析美股數據: {i} / {len(symbols)}...")
-        progress_bar.progress(min(i / len(symbols), 1.0))
-        
-        try:
-            t = Ticker(batch, asynchronous=True)
-            
-            # 【關鍵修復】: 將市值同埋行業分開兩次獨立請求！互不拖累！
-            summary_data = t.summary_detail
-            profile_data = t.asset_profile
-            
-            for s in batch:
-                # 1. 處理市值數據
-                # 如果 Yahoo 回傳字串報錯，呢度會拎到字串；正常會拎到 dict
-                summary = summary_data.get(s) if isinstance(summary_data, dict) else {}
-                
-                if not isinstance(summary, dict):
-                    continue # 如果連市值都報錯，先至跳過
-                    
-                mkt_cap = summary.get('marketCap')
-                
-                # 市值達標，準備入選！
-                if isinstance(mkt_cap, (int, float)) and mkt_cap >= min_cap:
-                    
-                    # 2. 處理行業數據 (即使呢度 Yahoo 報錯變咗字串，都唔會踢走隻股票)
-                    profile = profile_data.get(s) if isinstance(profile_data, dict) else {}
-                    if not isinstance(profile, dict):
-                        profile = {} # 如果行業數據壞咗，當佢係空字典，等陣出 N/A
-                        
-                    results.append({
-                        "Symbol": s,
-                        "Name": summary.get('shortName', s),
-                        "MarketCap": mkt_cap,
-                        "Price": summary.get('previousClose', 0.0),
-                        "Sector": profile.get('sector', 'N/A'),
-                        "Industry": profile.get('industry', 'N/A')
-                    })
-        except Exception:
-            continue
-            
-    progress_bar.empty()
-    status_text.empty()
-    return pd.DataFrame(results)
-
-# --- 4. 側邊欄與 UI ---
-st.sidebar.header("🔍 篩選與補底")
-target_cap = st.sidebar.number_input("最低市值門檻 (USD)", value=500_000_000, step=100_000_000)
-
-st.sidebar.subheader("📌 手動補底 (防止遺漏)")
-manual_input = st.sidebar.text_area("輸入想強制加入的代號 (用逗號隔開)", value="PLTR, NVDA, TSLA, AAPL", help="如果 CSV 太舊，可以在這裡手動輸入代號")
-
-# --- 5. 執行主邏輯 ---
-if st.button("🔥 開始全自動掃描篩選", use_container_width=True):
-    # 1. 加載名單
-    all_symbols = load_all_symbols(manual_input)
+    # 顯示結果
+    st.metric("符合條件股票數", len(final_df))
     
-    if not all_symbols:
-        st.error("無法載入代號，請檢查 CSV 檔案路徑。")
-    else:
-        st.info(f"成功加載 {len(all_symbols)} 個有效代號，正在向 Yahoo Finance 請求數據...")
-        
-        # 2. 抓取數據
-        df = fetch_data_pro(all_symbols, target_cap)
-        
-        if not df.empty:
-            st.success(f"✅ 篩選完成！共找到 {len(df)} 隻符合條件股票。")
-            
-            # 數據分析小統計
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("平均市值", f"${df['MarketCap'].mean():,.0f}")
-            with col2:
-                top_sector = df['Sector'].value_counts().idxmax()
-                st.metric("最多的板塊", top_sector)
+    # 移除輔助欄位後顯示
+    display_cols = [c for c in final_df.columns if c != 'Mcap_Numeric']
+    st.dataframe(final_df[display_cols], use_container_width=True)
+    
+    # 下載功能
+    csv = final_df.to_csv(index=False).encode('utf-8')
+    st.download_button("匯出數據 (CSV)", csv, "scanner_results.csv", "text/csv")
+else:
+    st.warning("未能獲取數據，請檢查 Finviz 是否封鎖了當前 IP。")
 
-            # 顯示表格
-            st.dataframe(
-                df.sort_values("MarketCap", ascending=False),
-                column_config={
-                    "MarketCap": st.column_config.NumberColumn("市值 ($)", format="$%.2e"),
-                    "Price": st.column_config.NumberColumn("股價 ($)", format="$%.2f")
-                },
-                use_container_width=True, hide_index=True, height=600
-            )
-            
-            # 下載按鈕
-            csv_data = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 下載完整 CSV 結果", csv_data, "stock_results.csv", "text/csv")
-        else:
-            st.warning("符合條件的股票數量為 0。請檢查市值設定。")
-
-# --- 補充小提示 ---
-st.divider()
-with st.expander("📝 關於搜尋不到特定股票的說明"):
-    st.write("""
-    1. **SNDK (SanDisk)**: 該公司已於 2016 年被 Western Digital (WDC) 收購並下市，因此無法搜到。
-    2. **PLTR (Palantir)**: 如果 CSV 沒更新可能遺漏。本版本已在左側加入『手動補底』功能，確保它能被掃描到。
-    3. **N/A 顯示**: ETF 或部分新上市公司在 Yahoo 數據庫中可能缺乏行業描述，這是正常現象。
-    """)
-
-
-st.markdown("---")
-st.header("🎯 失蹤股票狙擊手 (測試專用)")
-st.markdown("輸入你覺得「漏咗」嘅股票代號，睇下 Yahoo 到底回傳咗咩數據畀我哋。")
-
-test_symbol = st.text_input("輸入失蹤股票代號 (例如: BRK-B, TSM, BABA)", value="BRK-B")
-
-if st.button("🔍 狙擊這隻股票"):
-    with st.spinner("正在向 Yahoo 查閱內部數據..."):
-        try:
-            t_test = Ticker(test_symbol, asynchronous=False)
-            
-            # 一次過攞晒所有模組，睇下市值收埋喺邊
-            raw_summary = t_test.summary_detail.get(test_symbol, {})
-            raw_price = t_test.price.get(test_symbol, {})
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("1. 檢查 SummaryDetail 模組")
-                if isinstance(raw_summary, dict):
-                    mkt_cap_1 = raw_summary.get('marketCap', '找不到')
-                    st.write(f"**市值 (Market Cap):** {mkt_cap_1}")
-                    st.json(raw_summary) # 顯示原始數據
-                else:
-                    st.error("Yahoo 完全沒有這隻股票的 Summary 數據")
-                    
-            with col2:
-                st.subheader("2. 檢查 Price 模組")
-                if isinstance(raw_price, dict):
-                    mkt_cap_2 = raw_price.get('marketCap', '找不到')
-                    st.write(f"**市值 (Market Cap):** {mkt_cap_2}")
-                    st.json(raw_price) # 顯示原始數據
-                else:
-                    st.error("Yahoo 完全沒有這隻股票的 Price 數據")
-                    
-        except Exception as e:
-            st.error(f"查詢失敗: {e}")
