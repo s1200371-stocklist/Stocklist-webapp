@@ -3,13 +3,13 @@ import pandas as pd
 from finvizfinance.screener.overview import Overview
 import yfinance as yf
 import datetime
+import time
 
 # --- 1. 專業版面配置 ---
-st.set_page_config(page_title="美股 CAN SLIM 極速掃描器", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="美股全量動能掃描器", page_icon="📈", layout="wide")
 
-# --- 2. 工具函數 ---
+# --- 2. 數據轉換函數 ---
 def convert_mcap_to_float(val):
-    """清洗市值數據"""
     try:
         if pd.isna(val) or val == '-': return 0.0
         val = str(val).upper().replace(',', '')
@@ -19,9 +19,9 @@ def convert_mcap_to_float(val):
     except:
         return 0.0
 
+# --- 3. Finviz 數據獲取 ---
 @st.cache_data(ttl=1800)
 def fetch_finviz_data():
-    """第一階段：獲取基礎股票池 (>300M)"""
     try:
         f_screener = Overview()
         f_screener.set_filter(filters_dict={'Market Cap.': '+Small (over $300mln)'})
@@ -30,109 +30,105 @@ def fetch_finviz_data():
         st.error(f"連線至 Finviz 失敗: {e}")
         return pd.DataFrame()
 
-# --- 3. 核心升級：極速 RS 批量計算引擎 ---
-@st.cache_data(ttl=3600)
-def check_rs_signal_bulk(ticker_list, benchmark="^GSPC", period="6mo"):
-    """
-    極速版 RS 掃描器：使用批量下載與 Pandas 矩陣運算
-    """
-    try:
-        # A. 處理 Ticker 格式差異 (Finviz '.' -> Yahoo '-')
-        yf_tickers = [t.replace('.', '-') for t in ticker_list]
-        all_tickers = yf_tickers + [benchmark]
+# --- 4. yfinance 全量批量計算引擎 (加入分批與防禦機制) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def calculate_all_rs(tickers, benchmark="^GSPC", batch_size=500):
+    """將龐大名單分批下載，避免 Yahoo Finance 封鎖 IP"""
+    rs_signals = {}
+    
+    # 步驟一：先獨立下載基準指數 (如 S&P 500)
+    bench_data = yf.download(benchmark, period="3mo", progress=False)['Close']
+    if bench_data.empty: return rs_signals
+    bench_norm = bench_data / bench_data.iloc[0] # 基準標準化
+
+    # 步驟二：分批 (Chunking) 下載股票數據
+    total_batches = (len(tickers) // batch_size) + 1
+    
+    for i in range(0, len(tickers), batch_size):
+        batch_tickers = tickers[i:i+batch_size]
         
-        # B. 批量下載 (開啟多線程 threads=True)
-        data = yf.download(all_tickers, period=period, threads=True, progress=False)['Close']
+        # 批量下載 (關閉 progress bar 避免 UI 混亂)
+        data = yf.download(batch_tickers, period="3mo", progress=False)['Close']
         
-        if data.empty or benchmark not in data.columns:
-            return []
+        # 處理如果 batch 只有 1 隻股票時，yfinance 回傳 Series 而非 DataFrame 嘅情況
+        if isinstance(data, pd.Series):
+            data = data.to_frame(name=batch_tickers[0])
             
-        # C. 分離大盤與個股數據
-        bench_data = data[benchmark].ffill().dropna()
-        stock_data = data.drop(columns=[benchmark]).ffill().dropna(axis=1, how='all')
+        data = data.ffill().dropna(how='all')
         
-        # 將欄位名稱由 Yahoo 格式轉換返 Finviz 格式 (方便後續 Mapping)
-        stock_data.columns = [c.replace('-', '.') for c in stock_data.columns]
+        # 運算 RS
+        for ticker in batch_tickers:
+            if ticker in data.columns and not data[ticker].dropna().empty:
+                stock_price = data[ticker].dropna()
+                if len(stock_price) > 25:
+                    stock_norm = stock_price / stock_price.iloc[0]
+                    # 對齊交易日
+                    aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
+                    
+                    rs_line = stock_norm / aligned_bench * 100
+                    rs_ma_25 = rs_line.rolling(window=25).mean()
+                    
+                    latest_rs = rs_line.iloc[-1]
+                    latest_ma = rs_ma_25.iloc[-1]
+                    rs_signals[ticker] = latest_rs > latest_ma
+                else:
+                    rs_signals[ticker] = False
+            else:
+                rs_signals[ticker] = False
         
-        # D. 基準化 (第一日設為 100)
-        bench_norm = (bench_data / bench_data.iloc[0]) * 100
-        stock_norm = (stock_data / stock_data.iloc[0].values) * 100
+        # 【關鍵防禦】：每下載完 500 隻，強迫系統休息 1 秒，保護 IP 唔被封鎖
+        time.sleep(1)
         
-        # E. 矩陣運算：一次過計算所有股票的 RS Line 及 25D MA
-        rs_lines = stock_norm.div(bench_norm, axis=0)
-        rs_ma_25 = rs_lines.rolling(window=25).mean()
-        
-        # F. 生成訊號：最新一日 RS Line > 25D MA
-        latest_rs = rs_lines.iloc[-1]
-        latest_ma = rs_ma_25.iloc[-1]
-        
-        strong_condition = latest_rs > latest_ma
-        passed_tickers = strong_condition[strong_condition].index.tolist()
-        
-        return passed_tickers
+    return rs_signals
 
-    except Exception as e:
-        st.error(f"批量運算發生錯誤: {e}")
-        return []
-
-# --- 4. 主畫面 UI ---
-st.title("⚡ 美股 CAN SLIM 雙重極速掃描器")
+# --- 5. UI 介面 ---
+st.title("🚀 美股全量掃描器 (Finviz + RS 強勢濾網)")
 st.caption(f"數據最後更新時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 側邊欄設定
 with st.sidebar:
-    st.header("⚙️ 第一階段：基本面 (Finviz)")
+    st.header("⚙️ 第一層：基本面篩選")
     min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
     
-    st.header("🎯 第二階段：技術面 (RS 動能)")
-    # 注意：上限大幅提升至 1000 隻
-    scan_limit = st.slider("選擇要進行 RS 分析的股票數量", min_value=50, max_value=1000, value=500, step=50)
-    st.success("✅ 已啟用向量化引擎，支援 1000 隻股票極速掃描！")
+    st.markdown("---")
+    st.header("📈 第二層：技術面篩選 (RS 動能)")
+    enable_rs = st.checkbox("啟用 RS > 25D MA 全市場掃描", value=False)
+    
+    if enable_rs:
+        st.warning("⏳ **注意：全市場掃描模式已開啟。** 系統將運算超過數千隻股票，第一次執行可能需要 **2 至 5 分鐘**。請耐心等候，切勿重新整理網頁。")
 
-# --- 5. 執行邏輯 ---
-with st.spinner("正在獲取全市場基礎數據..."):
+# --- 6. 執行主邏輯 ---
+with st.spinner("正在從 Finviz 獲取基礎數據..."):
     raw_data = fetch_finviz_data()
 
 if not raw_data.empty:
     df_processed = raw_data.copy()
     df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
     
-    # 第一關：過濾市值並按市值排序
-    base_filtered_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].sort_values(by='Mcap_Numeric', ascending=False)
+    # 第一層過濾 (市值)
+    final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].sort_values(by='Mcap_Numeric', ascending=False)
     
-    st.subheader(f"📊 第一關：市值大於 {min_mcap}M 的股票 (總數: {len(base_filtered_df)})")
-    st.dataframe(base_filtered_df.drop(columns=['Mcap_Numeric']).head(100), height=300) 
-    st.caption("👆 上表僅預覽前 100 隻股票。")
-    
-    st.divider()
-    
-    # 第二關：RS 動能掃描區塊
-    st.subheader(f"🔥 第二關：RS 強度掃描 (針對前 {scan_limit} 大股票)")
-    
-    target_tickers = base_filtered_df['Ticker'].head(scan_limit).tolist()
-    
-    if st.button(f"🚀 立即執行極速 RS 掃描", type="primary"):
-        start_time = datetime.datetime.now()
+    # 第二層過濾 (全量 RS 均線)
+    if enable_rs:
+        target_tickers = final_df['Ticker'].tolist() # 攞取全部股票代號
         
-        with st.spinner(f"正在從 Yahoo Finance 批量下載 {scan_limit} 隻股票數據並進行矩陣運算..."):
-            # 執行極速版 RS 計算
-            strong_tickers = check_rs_signal_bulk(target_tickers)
+        with st.spinner(f"正在全速運算 {len(target_tickers)} 隻股票嘅 RS 動能... 預計需時數分鐘，請稍候 ☕"):
+            rs_results = calculate_all_rs(target_tickers)
             
-            end_time = datetime.datetime.now()
-            time_taken = (end_time - start_time).total_seconds()
+            # 將結果 Map 回 DataFrame
+            final_df['RS_Strong'] = final_df['Ticker'].map(rs_results)
             
-            if strong_tickers:
-                st.success(f"⚡ 掃描完成！耗時 {time_taken:.1f} 秒。在 {scan_limit} 隻股票中，有 {len(strong_tickers)} 隻突破 25 天 RS 均線。")
-                
-                # 提取強勢股完整數據
-                final_rs_df = base_filtered_df[base_filtered_df['Ticker'].isin(strong_tickers)]
-                
-                st.dataframe(final_rs_df.drop(columns=['Mcap_Numeric']), use_container_width=True, height=500)
-                
-                # 下載按鈕
-                csv = final_rs_df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 匯出強勢股清單 (CSV)", csv, "can_slim_strong_stocks.csv", "text/csv")
-            else:
-                st.warning("目前沒有符合條件的股票，可能大盤處於極度弱勢。")
+            # 過濾並剔除空值
+            final_df = final_df[final_df['RS_Strong'] == True]
+            st.success(f"✅ 全市場 RS 技術動能篩選完成！成功過濾出強勢股。")
+
+    # 顯示結果
+    st.metric(label="符合所有條件的強勢股數量", value=len(final_df))
+    
+    display_cols = [c for c in final_df.columns if c not in ['Mcap_Numeric', 'RS_Strong']]
+    st.dataframe(final_df[display_cols], use_container_width=True, height=600)
+    
+    csv = final_df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 匯出強勢股清單 (CSV)", data=csv, file_name="all_market_strong_stocks.csv", mime="text/csv")
+    
 else:
-    st.error("未能從 Finviz 獲取基礎數據。")
+    st.error("未能獲取初始數據。")
