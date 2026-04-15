@@ -6,7 +6,7 @@ import datetime
 import time
 
 # --- 1. 專業版面配置 ---
-st.set_page_config(page_title="🚀 美股終極動能掃描器", page_icon="📈", layout="wide")
+st.set_page_config(page_title="🚀 納指超級增長股掃描器", page_icon="📈", layout="wide")
 
 # --- 2. 數據清洗函數 ---
 def convert_mcap_to_float(val):
@@ -32,13 +32,13 @@ def fetch_finviz_data():
         st.error(f"連線至 Finviz 失敗，請稍後再試: {e}")
         return pd.DataFrame()
 
-# --- 4. yfinance 批量計算引擎 (🔥 終極防彈版) ---
+# --- 4. yfinance 批量計算引擎 (🔥 納指專用防彈版) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_all_rs(tickers, batch_size=200):
     rs_signals = {}
     
-    # 【防禦機制 A】：打不死的大盤基準下載器
-    benchmarks_to_try = ["SPY", "^GSPC", "QQQ", "DIA"]
+    # 【防禦機制 A】：納指專用基準輪換
+    benchmarks_to_try = ["QQQ", "^NDX", "QQQM"]
     bench_data = pd.DataFrame()
     used_bench = ""
 
@@ -58,7 +58,7 @@ def calculate_all_rs(tickers, batch_size=200):
             continue
             
     if bench_data.empty: 
-        st.error("⚠️ 嚴重錯誤：無法下載任何基準指數！Yahoo API 可能已暫時封鎖你的 IP，請休息 15 分鐘後再試。")
+        st.error("⚠️ 嚴重錯誤：無法下載任何納指基準 (QQQ/NDX)！Yahoo API 可能已暫時封鎖你的 IP，請休息 15 分鐘後再試。")
         return rs_signals
 
     # 【防禦機制 B】：強制消除基準數據時區
@@ -119,7 +119,7 @@ def calculate_all_rs(tickers, batch_size=200):
     return rs_signals
 
 # --- 5. UI 側邊欄 ---
-st.title("🚀 美股全量強勢股掃描器")
+st.title("🚀 美股納指增長股掃描器")
 st.caption(f"數據最後更新時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 with st.sidebar:
@@ -127,7 +127,7 @@ with st.sidebar:
     min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
     
     st.markdown("---")
-    enable_rs = st.checkbox("📈 啟用 RS > 25D MA 全市場掃描", value=False)
+    enable_rs = st.checkbox("📈 啟用 RS > 25D MA (對比納指)", value=False)
     
     if enable_rs:
         st.warning("⏳ 提示：首次運算需從 Yahoo 獲取數千隻股票數據，預計需時 2-5 分鐘，請耐心等候，切勿重新整理網頁。")
@@ -160,7 +160,7 @@ if not raw_data.empty:
             
             # 【偵錯漏斗 3】檢查 API 實際有幾多隻 True
             success_count = sum(1 for v in rs_results.values() if v is True)
-            st.info(f"📊 **第三關 (RS 動能運算)**：發現 {success_count} 隻強勢股")
+            st.info(f"📊 **第三關 (跑贏納指)**：發現 {success_count} 隻超級強勢股")
             
             final_df['RS_Strong'] = final_df['Ticker'].map(rs_results)
             
@@ -171,7 +171,7 @@ if not raw_data.empty:
             if len(final_df) > 0:
                 st.success("✅ 全市場技術掃描完成！")
             else:
-                st.warning("⚠️ 警告：目前沒有股票符合 RS 動能條件。")
+                st.warning("⚠️ 警告：目前沒有股票能跑贏納指。可能科技股極度強勢，其他板塊疲弱。")
 
     st.markdown("---")
     
@@ -185,7 +185,7 @@ if not raw_data.empty:
         
         # CSV 下載按鈕
         csv = final_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 匯出精選強勢股 (CSV)", data=csv, file_name="super_stocks.csv", mime="text/csv")
+        st.download_button("📥 匯出精選強勢股 (CSV)", data=csv, file_name="super_growth_stocks.csv", mime="text/csv")
         
 else:
     st.error("未能獲取初始數據，請檢查網絡連線或稍後再試。")
