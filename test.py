@@ -6,11 +6,11 @@ import datetime
 import time
 
 # --- 1. 專業版面配置 ---
-st.set_page_config(page_title="🚀 美股全量強勢股掃描器", page_icon="📈", layout="wide")
+st.set_page_config(page_title="🚀 美股終極動能掃描器", page_icon="📈", layout="wide")
 
-# --- 2. 強健的數據轉換函數 ---
+# --- 2. 數據清洗函數 ---
 def convert_mcap_to_float(val):
-    """將 Finviz 嘅字串市值轉換為浮點數 (單位：Million)"""
+    """將 Finviz 的市值轉換為浮點數 (單位：百萬美元)"""
     try:
         if pd.isna(val) or val == '-': return 0.0
         val = str(val).upper().replace(',', '')
@@ -20,57 +20,78 @@ def convert_mcap_to_float(val):
     except:
         return 0.0
 
-# --- 3. Finviz 數據獲取 (快取 1 小時) ---
+# --- 3. Finviz 基礎數據獲取 (快取 1 小時) ---
 @st.cache_data(ttl=3600)
 def fetch_finviz_data():
     try:
         f_screener = Overview()
-        # 抓取所有大於 3 億美金嘅股票，包攬巨型股
+        # 直接拿取 >300M 的股票，減輕後續運算壓力
         f_screener.set_filter(filters_dict={'Market Cap.': '+Small (over $300mln)'})
         return f_screener.screener_view()
     except Exception as e:
-        st.error(f"連線至 Finviz 失敗: {e}")
+        st.error(f"連線至 Finviz 失敗，請稍後再試: {e}")
         return pd.DataFrame()
 
-# --- 4. yfinance 批量計算引擎 (終極防禦版) ---
+# --- 4. yfinance 批量計算引擎 (🔥 終極防彈版) ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def calculate_all_rs(tickers, benchmark="SPY", batch_size=200):
-    """使用 SPY 代替 ^GSPC，加入時區修復與防封鎖機制"""
+def calculate_all_rs(tickers, batch_size=200):
     rs_signals = {}
     
-    # 步驟一：獨立下載基準指數
-    bench_data = yf.download(benchmark, period="3mo", progress=False)['Close']
+    # 【防禦機制 A】：打不死的大盤基準下載器
+    benchmarks_to_try = ["SPY", "^GSPC", "QQQ", "DIA"]
+    bench_data = pd.DataFrame()
+    used_bench = ""
+
+    for b in benchmarks_to_try:
+        try:
+            temp_data = yf.download(b, period="3mo", progress=False)
+            if not temp_data.empty and 'Close' in temp_data.columns:
+                close_data = temp_data['Close']
+                # 兼容 yfinance 不同版本的回傳格式
+                if isinstance(close_data, pd.Series):
+                    bench_data = close_data.to_frame(name=b)
+                else:
+                    bench_data = close_data
+                used_bench = b
+                break # 成功獲取即跳出迴圈
+        except Exception:
+            continue
+            
     if bench_data.empty: 
-        st.error(f"⚠️ 嚴重錯誤：無法下載基準指數 {benchmark}！請稍後再試。")
+        st.error("⚠️ 嚴重錯誤：無法下載任何基準指數！Yahoo API 可能已暫時封鎖你的 IP，請休息 15 分鐘後再試。")
         return rs_signals
-        
-    # 【關鍵防禦】：強制消除基準數據的時區，避免 Pandas 報錯
+
+    # 【防禦機制 B】：強制消除基準數據時區
     if bench_data.index.tz is not None:
         bench_data.index = bench_data.index.tz_localize(None)
         
-    bench_norm = bench_data / bench_data.iloc[0]
+    # 計算基準標準化
+    bench_norm = bench_data[used_bench] / bench_data[used_bench].iloc[0]
 
-    # 步驟二：分批處理股票
+    # 【防禦機制 C】：分批處理與限速
     for i in range(0, len(tickers), batch_size):
         batch_tickers = tickers[i:i+batch_size]
         
         try:
-            data = yf.download(batch_tickers, period="3mo", progress=False)['Close']
-            
-            # 處理單隻股票回傳 Series 的特例
-            if isinstance(data, pd.Series):
-                data = data.to_frame(name=batch_tickers[0])
+            data = yf.download(batch_tickers, period="3mo", progress=False)
+            if data.empty or 'Close' not in data.columns:
+                raise ValueError("No Close Data")
                 
-            data = data.ffill().dropna(how='all')
+            close_prices = data['Close']
+            if isinstance(close_prices, pd.Series):
+                close_prices = close_prices.to_frame(name=batch_tickers[0])
+                
+            close_prices = close_prices.ffill().dropna(how='all')
             
-            # 【關鍵防禦】：強制消除個股數據的時區
-            if data.index.tz is not None:
-                data.index = data.index.tz_localize(None)
+            # 【防禦機制 D】：強制消除個股數據時區
+            if close_prices.index.tz is not None:
+                close_prices.index = close_prices.index.tz_localize(None)
             
             # 運算 RS 動能
             for ticker in batch_tickers:
-                if ticker in data.columns and not data[ticker].dropna().empty:
-                    stock_price = data[ticker].dropna()
+                if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
+                    stock_price = close_prices[ticker].dropna()
+                    
                     if len(stock_price) > 25:
                         stock_norm = stock_price / stock_price.iloc[0]
                         # 確保日期完美對齊
@@ -79,7 +100,6 @@ def calculate_all_rs(tickers, benchmark="SPY", batch_size=200):
                         rs_line = stock_norm / aligned_bench * 100
                         rs_ma_25 = rs_line.rolling(window=25).mean()
                         
-                        # 強制轉換為標準 float 及 bool
                         latest_rs = float(rs_line.iloc[-1])
                         latest_ma = float(rs_ma_25.iloc[-1])
                         rs_signals[ticker] = bool(latest_rs > latest_ma)
@@ -87,8 +107,9 @@ def calculate_all_rs(tickers, benchmark="SPY", batch_size=200):
                         rs_signals[ticker] = False
                 else:
                     rs_signals[ticker] = False
+                    
         except Exception as e:
-            # 遇錯不崩潰，將該批次設為 False
+            # 遇錯不崩潰，跳過該批次
             for ticker in batch_tickers:
                 rs_signals[ticker] = False
                 
@@ -97,7 +118,7 @@ def calculate_all_rs(tickers, benchmark="SPY", batch_size=200):
         
     return rs_signals
 
-# --- 5. UI 介面配置 ---
+# --- 5. UI 側邊欄 ---
 st.title("🚀 美股全量強勢股掃描器")
 st.caption(f"數據最後更新時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -106,68 +127,65 @@ with st.sidebar:
     min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
     
     st.markdown("---")
-    enable_rs = st.checkbox("📈 啟用 RS > 25D MA 篩選", value=False)
+    enable_rs = st.checkbox("📈 啟用 RS > 25D MA 全市場掃描", value=False)
     
     if enable_rs:
-        st.warning("⏳ 提示：全市場掃描涉及數千隻股票。因伺服器限制，首次運算可能需時 2-5 分鐘。請耐心等候，**切勿重新整理網頁**。")
+        st.warning("⏳ 提示：首次運算需從 Yahoo 獲取數千隻股票數據，預計需時 2-5 分鐘，請耐心等候，切勿重新整理網頁。")
 
-# --- 6. 執行主邏輯與漏斗顯示 ---
-with st.spinner("正在從 Finviz 獲取並清洗基礎數據..."):
+# --- 6. 主程式邏輯與漏斗追蹤 ---
+with st.spinner("正在連接 Finviz 獲取基礎名單..."):
     raw_data = fetch_finviz_data()
 
 if not raw_data.empty:
     df_processed = raw_data.copy()
     df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
     
-    # [顯示] 初始獲取數量
-    st.markdown(f"**📊 第一關 (基礎名單)：** 成功從 Finviz 獲取 `{len(df_processed)}` 隻股票")
+    # 【偵錯漏斗 1】
+    st.info(f"📊 **第一關 (Finviz 基礎名單)**：獲取了 {len(df_processed)} 隻股票")
     
-    # 第一層：過濾市值
     final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].sort_values(by='Mcap_Numeric', ascending=False)
     
-    # [顯示] 市值過濾後數量
-    st.markdown(f"**📊 第二關 (市值 > {min_mcap}M)：** 剩餘 `{len(final_df)}` 隻股票")
+    # 【偵錯漏斗 2】
+    st.info(f"📊 **第二關 (市值 > {min_mcap}M)**：剩餘 {len(final_df)} 隻股票")
     
     if len(final_df) == 0:
-        st.error("⚠️ 錯誤：市值過濾後剩下 0 隻！請檢查 Finviz 網站是否更改了格式。")
+        st.error("⚠️ 錯誤：市值過濾後剩下 0 隻！")
         st.stop()
     
-    # 第二層：運算並過濾 RS 動能
     if enable_rs:
         target_tickers = final_df['Ticker'].tolist()
         
-        with st.spinner(f"正在全速運算 {len(target_tickers)} 隻股票嘅 RS 動能... ☕"):
+        with st.spinner(f"正在全速運算 {len(target_tickers)} 隻股票的 RS 動能... ☕"):
             rs_results = calculate_all_rs(target_tickers)
             
-            # 檢查運算結果
+            # 【偵錯漏斗 3】檢查 API 實際有幾多隻 True
             success_count = sum(1 for v in rs_results.values() if v is True)
-            st.markdown(f"**📊 第三關 (RS 動能突破)：** 尋找到 `{success_count}` 隻強勢股")
+            st.info(f"📊 **第三關 (RS 動能運算)**：發現 {success_count} 隻強勢股")
             
-            # 將結果寫入 DataFrame
             final_df['RS_Strong'] = final_df['Ticker'].map(rs_results)
             
-            # 【終極防禦】：解決 Boolean Ambiguity 報錯
+            # 【防禦機制 E】：完美處理 Pandas Boolean Ambiguity
             mask = final_df['RS_Strong'].fillna(False).astype(bool)
             final_df = final_df[mask]
             
             if len(final_df) > 0:
-                st.success("✅ 全市場篩選完成！")
+                st.success("✅ 全市場技術掃描完成！")
             else:
-                st.warning("⚠️ 警告：目前沒有股票符合 RS 動能條件。可能是大盤近期暴跌，覆巢之下無完卵。")
+                st.warning("⚠️ 警告：目前沒有股票符合 RS 動能條件。")
 
     st.markdown("---")
     
-    # 顯示結果與表格
+    # --- 7. 結果展示與匯出 ---
     if len(final_df) > 0:
-        st.subheader(f"🎯 最終符合條件的股票清單 (共 {len(final_df)} 隻)")
+        st.subheader(f"🎯 最終精選清單 (共 {len(final_df)} 隻)")
         
-        # 移除後台輔助欄位，讓畫面更乾淨
+        # 移除輔助運算的欄位，讓表格保持乾淨
         display_cols = [c for c in final_df.columns if c not in ['Mcap_Numeric', 'RS_Strong']]
         st.dataframe(final_df[display_cols], use_container_width=True, height=600)
         
-        # CSV 下載功能
+        # CSV 下載按鈕
         csv = final_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 匯出精選強勢股 (CSV)", data=csv, file_name="super_stocks_scan.csv", mime="text/csv")
+        st.download_button("📥 匯出精選強勢股 (CSV)", data=csv, file_name="super_stocks.csv", mime="text/csv")
         
 else:
     st.error("未能獲取初始數據，請檢查網絡連線或稍後再試。")
