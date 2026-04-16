@@ -87,7 +87,7 @@ def calculate_all_rs(tickers, batch_size=200):
                 if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
                     stock_price = close_prices[ticker].dropna()
                     
-                    # 確保有足夠日數計算 25MA 及獲取「昨日」數據
+                    # 確保有足夠日數計算 25MA 及獲取「昨日」數據 (最少 30 日防止新股報錯)
                     if len(stock_price) > 30: 
                         stock_norm = stock_price / stock_price.iloc[0]
                         aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
@@ -181,22 +181,25 @@ if not raw_data.empty:
 
     st.markdown("---")
     
-# --- 7. 結果展示與匯出 ---
+    # --- 7. 結果展示與匯出 ---
     if len(final_df) > 0:
         st.subheader(f"🎯 最終階段清單 (共 {len(final_df)} 隻)")
         
-        # 【修復 KeyError】：智能排序欄位
+        # 【完美避開 KeyError 嘅智能排序】
         cols = ['Ticker']
         
-        # 如果有開啟 RS 掃描，先至將 'RS_階段' 加入顯示名單
+        # 如果有開啟掃描先至加 'RS_階段' 入去
         if 'RS_階段' in final_df.columns:
             cols.append('RS_階段')
             
-        # 將其餘所有欄位加入去 (同時過濾走唔需要睇嘅 Mcap_Numeric)
+        # 將其餘欄位加入 (同時過濾走唔需要睇嘅 Mcap_Numeric 以及重複嘅 Ticker)
         cols += [c for c in final_df.columns if c not in cols and c != 'Mcap_Numeric']
         
-        # 顯示表格
+        # 使用自訂排序，讓表格更實用
         st.dataframe(final_df[cols], use_container_width=True, height=600)
         
         csv = final_df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 匯出狙擊清單 (CSV)", data=csv, file_name="rs_stages_stocks.csv", mime="text/csv")
+        
+else:
+    st.error("未能獲取初始數據，請檢查網絡連線或稍後再試。")
