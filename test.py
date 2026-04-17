@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 from finvizfinance.screener.overview import Overview
+from finvizfinance.quote import finvizfinance # 【新增】引入 Finviz 報價模組
 import yfinance as yf
 import datetime
 import time
 import concurrent.futures
-import requests
 
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title="🚀 美股 RS x MACD 動能狙擊手", page_icon="🎯", layout="wide")
@@ -121,73 +121,41 @@ def calculate_all_indicators(tickers, batch_size=200):
         
     return results
 
-# --- 5. 多執行緒獲取財報基本面數據 (終極防護版) ---
+# --- 5. 多執行緒獲取財報基本面數據 (完美替換為 Finviz 數據源) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(tickers):
-    # 建立自訂 Session 偽裝成真實瀏覽器，突破 Yahoo 防火牆
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
-
     def fetch_single(t):
+        time.sleep(0.3) # 基礎延遲，保護 Finviz 伺服器防封鎖
         for attempt in range(3):
             try:
                 if attempt > 0:
-                    time.sleep(2) # 失敗後等待較長時間再試
+                    time.sleep(1.5) # 失敗重試前再休息一陣
                 
-                # 傳入偽裝好的 session
-                ticker_obj = yf.Ticker(t, session=session)
-                info = ticker_obj.info
+                # 直接使用 Finviz 獲取該股票的所有基本面數據
+                stock = finvizfinance(t)
+                fund = stock.ticker_fundament()
                 
-                # Yahoo 有時會回傳極少欄位嘅廢數據，強制觸發重試
-                if not info or len(info) < 5:
-                    raise ValueError("Empty or incomplete info")
+                # 完美對應：Finviz 的 Q/Q 即代表最新季度的 YoY (Year-over-Year)
+                eps = fund.get('EPS (ttm)', 'N/A')
+                eps_growth = fund.get('EPS Q/Q', 'N/A')
+                sales = fund.get('Sales', 'N/A')
+                sales_growth = fund.get('Sales Q/Q', 'N/A')
                 
-                # 安全提取函數 (支援後備欄位 Fallback)
-                def safe_get(keys):
-                    for k in keys:
-                        if k in info and info[k] is not None:
-                            return info[k]
-                    return None
-                
-                # 獲取 EPS (TTM)
-                eps = safe_get(['trailingEps', 'forwardEps'])
-                eps_str = f"{float(eps):.2f}" if eps is not None else 'N/A'
-                
-                # 獲取 EPS Growth (YoY)
-                eps_growth = safe_get(['earningsQuarterlyGrowth', 'earningsGrowth'])
-                eps_growth_str = f"{float(eps_growth)*100:.2f}%" if eps_growth is not None else 'N/A'
-                
-                # 獲取 Sales (TTM)
-                sales = safe_get(['totalRevenue'])
-                if sales is not None:
-                    sales = float(sales)
-                    if sales >= 1e9: sales_str = f"{sales/1e9:.2f}B"
-                    elif sales >= 1e6: sales_str = f"{sales/1e6:.2f}M"
-                    else: sales_str = str(sales)
-                else: 
-                    sales_str = 'N/A'
-                
-                # 獲取 Sales Growth (YoY)
-                sales_growth = safe_get(['revenueGrowth'])
-                sales_growth_str = f"{float(sales_growth)*100:.2f}%" if sales_growth is not None else 'N/A'
-                    
                 return {
                     'Ticker': t, 
-                    'EPS (TTM)': eps_str, 
-                    'EPS Growth (YoY)': eps_growth_str, 
-                    'Sales (TTM)': sales_str, 
-                    'Sales Growth (YoY)': sales_growth_str
+                    'EPS (TTM)': eps, 
+                    'EPS Growth (Q/Q)': eps_growth, 
+                    'Sales (TTM)': sales, 
+                    'Sales Growth (Q/Q)': sales_growth
                 }
             except Exception:
                 pass
                 
-        # 3 次嘗試均失敗，才無奈回傳 N/A
-        return {'Ticker': t, 'EPS (TTM)': 'N/A', 'EPS Growth (YoY)': 'N/A', 'Sales (TTM)': 'N/A', 'Sales Growth (YoY)': 'N/A'}
+        # 3 次嘗試均失敗
+        return {'Ticker': t, 'EPS (TTM)': 'N/A', 'EPS Growth (Q/Q)': 'N/A', 'Sales (TTM)': 'N/A', 'Sales Growth (Q/Q)': 'N/A'}
 
     results = []
-    # 【關鍵求穩】：將 max_workers 降到 3，確保 Yahoo 唔會覺得我哋攻擊緊佢伺服器
+    # 使用 3 個 Worker 確保穩定性
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(fetch_single, t): t for t in tickers}
         for future in concurrent.futures.as_completed(futures):
@@ -252,8 +220,8 @@ if start_scan:
                 if len(final_df) > 0:
                     st.success(f"✅ 動能篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
                     
-                    # --- 【穩定版並發獲取基本面數據】 ---
-                    with st.spinner(f"正在穩定獲取 {len(final_df)} 隻股票的最新財報數據 (啟動防封鎖機制，請稍候)... 📊"):
+                    # --- 【切換為 Finviz 獲取基本面】 ---
+                    with st.spinner(f"正在獲取 {len(final_df)} 隻股票的最新財報數據 (使用 Finviz 報價源，請稍候)... 📊"):
                         fund_df = fetch_fundamentals(final_df['Ticker'].tolist())
                         final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
                         
@@ -271,8 +239,8 @@ if start_scan:
             if 'RS_階段' in final_df.columns: cols.append('RS_階段')
             if 'MACD_階段' in final_df.columns: cols.append('MACD_階段')
             
-            # 乾淨利落的基本面展示 (已移除 Price, Change, Volume)
-            other_cols = ['Company', 'Sector', 'Industry', 'EPS (TTM)', 'EPS Growth (YoY)', 'Sales (TTM)', 'Sales Growth (YoY)']
+            # 使用 Finviz 完美的數據格式展示
+            other_cols = ['Company', 'Sector', 'Industry', 'EPS (TTM)', 'EPS Growth (Q/Q)', 'Sales (TTM)', 'Sales Growth (Q/Q)']
             for oc in other_cols:
                 if oc in final_df.columns: cols.append(oc)
             
