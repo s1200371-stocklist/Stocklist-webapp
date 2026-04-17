@@ -120,47 +120,60 @@ def calculate_all_indicators(tickers, batch_size=200):
         
     return results
 
-# --- 5. 多執行緒獲取財報基本面數據 (EPS & Sales TTM) ---
+# --- 5. 多執行緒獲取財報基本面數據 (加入防封鎖與重試機制) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(tickers):
     def fetch_single(t):
-        try:
-            info = yf.Ticker(t).info
-            
-            # 獲取並格式化 EPS 及增長
-            eps = info.get('trailingEps', 'N/A')
-            eps_growth = info.get('earningsQuarterlyGrowth', 'N/A')
-            if eps_growth not in ['N/A', None]: 
-                eps_growth = f"{float(eps_growth)*100:.2f}%"
-            else: eps_growth = 'N/A'
-            
-            # 獲取並格式化 Sales 及增長 (轉化為 B 或 M 單位)
-            sales = info.get('totalRevenue', 'N/A')
-            if sales not in ['N/A', None]:
-                sales = float(sales)
-                if sales >= 1e9: sales_str = f"{sales/1e9:.2f}B"
-                elif sales >= 1e6: sales_str = f"{sales/1e6:.2f}M"
-                else: sales_str = str(sales)
-            else: sales_str = 'N/A'
-            
-            sales_growth = info.get('revenueGrowth', 'N/A')
-            if sales_growth not in ['N/A', None]: 
-                sales_growth = f"{float(sales_growth)*100:.2f}%"
-            else: sales_growth = 'N/A'
+        # 允許重試 3 次，防止 Yahoo 突然封鎖 IP
+        for attempt in range(3):
+            try:
+                # 若非第一次嘗試，休息 1 秒鐘
+                if attempt > 0:
+                    time.sleep(1)
                 
-            return {
-                'Ticker': t, 
-                'EPS (TTM)': eps, 
-                'EPS Growth (YoY)': eps_growth, 
-                'Sales (TTM)': sales_str, 
-                'Sales Growth (YoY)': sales_growth
-            }
-        except:
-            return {'Ticker': t, 'EPS (TTM)': 'N/A', 'EPS Growth (YoY)': 'N/A', 'Sales (TTM)': 'N/A', 'Sales Growth (YoY)': 'N/A'}
+                info = yf.Ticker(t).info
+                
+                # Yahoo Finance API 若拒絕請求，有時會回傳空字典
+                if not info or 'symbol' not in info:
+                    continue
+                
+                # 獲取並格式化 EPS 及增長
+                eps = info.get('trailingEps')
+                eps_str = round(float(eps), 2) if eps is not None else 'N/A'
+                
+                eps_growth = info.get('earningsQuarterlyGrowth')
+                eps_growth_str = f"{float(eps_growth)*100:.2f}%" if eps_growth is not None else 'N/A'
+                
+                # 獲取並格式化 Sales 及增長 (轉化為 B 或 M 單位)
+                sales = info.get('totalRevenue')
+                if sales is not None:
+                    sales = float(sales)
+                    if sales >= 1e9: sales_str = f"{sales/1e9:.2f}B"
+                    elif sales >= 1e6: sales_str = f"{sales/1e6:.2f}M"
+                    else: sales_str = str(sales)
+                else: 
+                    sales_str = 'N/A'
+                
+                sales_growth = info.get('revenueGrowth')
+                sales_growth_str = f"{float(sales_growth)*100:.2f}%" if sales_growth is not None else 'N/A'
+                    
+                return {
+                    'Ticker': t, 
+                    'EPS (TTM)': eps_str, 
+                    'EPS Growth (YoY)': eps_growth_str, 
+                    'Sales (TTM)': sales_str, 
+                    'Sales Growth (YoY)': sales_growth_str
+                }
+            except Exception:
+                # 發生錯誤時跳轉至下一次重試
+                pass
+                
+        # 3 次嘗試均失敗，回傳 N/A
+        return {'Ticker': t, 'EPS (TTM)': 'N/A', 'EPS Growth (YoY)': 'N/A', 'Sales (TTM)': 'N/A', 'Sales Growth (YoY)': 'N/A'}
 
     results = []
-    # 使用 10 個 Worker 進行並發抓取，大幅提升速度
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    # 【關鍵修復】：將 max_workers 從 10 降到 5。雖然慢幾秒，但可以有效防止大量 N/A。
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(fetch_single, t): t for t in tickers}
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
@@ -224,8 +237,8 @@ if start_scan:
                 if len(final_df) > 0:
                     st.success(f"✅ 動能篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
                     
-                    # --- 【全新：並發獲取基本面數據】 ---
-                    with st.spinner(f"正在透過多執行緒極速獲取 {len(final_df)} 隻股票的最新財報數據 (EPS, Sales TTM)... 📊"):
+                    # --- 【修復：安全並發獲取基本面數據】 ---
+                    with st.spinner(f"正在穩定獲取 {len(final_df)} 隻股票的最新財報數據 (避免 Yahoo 封鎖，請稍候)... 📊"):
                         fund_df = fetch_fundamentals(final_df['Ticker'].tolist())
                         # 將基本面數據合併到結果中
                         final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
