@@ -4,6 +4,7 @@ from finvizfinance.screener.overview import Overview
 import yfinance as yf
 import datetime
 import time
+import concurrent.futures
 
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title="🚀 美股 RS x MACD 動能狙擊手", page_icon="🎯", layout="wide")
@@ -33,17 +34,14 @@ def fetch_finviz_data():
 # --- 4. yfinance 批量計算引擎 (包含 RS, MACD 及 SMA 趨勢) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_all_indicators(tickers, batch_size=200):
-    """一次下載，同時計算 RS、MACD 及 SMA125 趨勢，確保極速且防封鎖"""
     results = {} 
     
-    # 【基準下載 (用於 RS)】
     benchmarks_to_try = ["QQQ", "^NDX", "QQQM"]
     bench_data = pd.DataFrame()
     used_bench = ""
 
     for b in benchmarks_to_try:
         try:
-            # 【升級】延長至 1y (一年)，確保有足夠日數計算 SMA125
             temp_data = yf.download(b, period="1y", progress=False)
             if not temp_data.empty and 'Close' in temp_data.columns:
                 close_data = temp_data['Close']
@@ -61,11 +59,9 @@ def calculate_all_indicators(tickers, batch_size=200):
         bench_data.index = bench_data.index.tz_localize(None)
     bench_norm = bench_data[used_bench] / bench_data[used_bench].iloc[0]
 
-    # 【分批下載與指標計算】
     for i in range(0, len(tickers), batch_size):
         batch_tickers = tickers[i:i+batch_size]
         try:
-            # 同樣延長至 1y
             data = yf.download(batch_tickers, period="1y", progress=False)
             if data.empty or 'Close' not in data.columns: raise ValueError("No Data")
             close_prices = data['Close']
@@ -74,18 +70,13 @@ def calculate_all_indicators(tickers, batch_size=200):
             if close_prices.index.tz is not None: close_prices.index = close_prices.index.tz_localize(None)
             
             for ticker in batch_tickers:
-                # 預設狀態為無 / 不符合
-                rs_stage = "無"
-                macd_stage = "無"
-                sma_trend = False
+                rs_stage, macd_stage, sma_trend = "無", "無", False
                 
                 if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
                     stock_price = close_prices[ticker].dropna()
                     
-                    # 確保有足夠數據 (需要最少 126 日來計算 SMA125 及比較)
                     if len(stock_price) > 126: 
-                        
-                        # --- 運算 1：RS 動能 ---
+                        # RS 動能
                         stock_norm = stock_price / stock_price.iloc[0]
                         aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
                         rs_line = stock_norm / aligned_bench * 100
@@ -99,7 +90,7 @@ def calculate_all_indicators(tickers, batch_size=200):
                             else: rs_stage = "🔥 已經突破"
                         elif latest_rs >= latest_rs_ma * 0.95: rs_stage = "🎯 即將突破 (<5%)"
                         
-                        # --- 運算 2：MACD ---
+                        # MACD
                         ema12 = stock_price.ewm(span=12, adjust=False).mean()
                         ema26 = stock_price.ewm(span=26, adjust=False).mean()
                         macd_line = ema12 - ema26
@@ -116,14 +107,10 @@ def calculate_all_indicators(tickers, batch_size=200):
                                 if abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05:
                                     macd_stage = "🎯 即將突破 (<5%)"
                                     
-                        # --- 運算 3：SMA 趨勢 (SMA25 > SMA125) ---
+                        # SMA 趨勢
                         sma25 = stock_price.rolling(window=25).mean()
                         sma125 = stock_price.rolling(window=125).mean()
-                        
-                        latest_sma25 = float(sma25.iloc[-1])
-                        latest_sma125 = float(sma125.iloc[-1])
-                        
-                        sma_trend = latest_sma25 > latest_sma125
+                        sma_trend = float(sma25.iloc[-1]) > float(sma125.iloc[-1])
                             
                 results[ticker] = {'RS': rs_stage, 'MACD': macd_stage, 'SMA_Trend': sma_trend}
                 
@@ -133,7 +120,54 @@ def calculate_all_indicators(tickers, batch_size=200):
         
     return results
 
-# --- 5. UI 側邊欄設計 ---
+# --- 5. 多執行緒獲取財報基本面數據 (EPS & Sales TTM) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_fundamentals(tickers):
+    def fetch_single(t):
+        try:
+            info = yf.Ticker(t).info
+            
+            # 獲取並格式化 EPS 及增長
+            eps = info.get('trailingEps', 'N/A')
+            eps_growth = info.get('earningsQuarterlyGrowth', 'N/A')
+            if eps_growth not in ['N/A', None]: 
+                eps_growth = f"{float(eps_growth)*100:.2f}%"
+            else: eps_growth = 'N/A'
+            
+            # 獲取並格式化 Sales 及增長 (轉化為 B 或 M 單位)
+            sales = info.get('totalRevenue', 'N/A')
+            if sales not in ['N/A', None]:
+                sales = float(sales)
+                if sales >= 1e9: sales_str = f"{sales/1e9:.2f}B"
+                elif sales >= 1e6: sales_str = f"{sales/1e6:.2f}M"
+                else: sales_str = str(sales)
+            else: sales_str = 'N/A'
+            
+            sales_growth = info.get('revenueGrowth', 'N/A')
+            if sales_growth not in ['N/A', None]: 
+                sales_growth = f"{float(sales_growth)*100:.2f}%"
+            else: sales_growth = 'N/A'
+                
+            return {
+                'Ticker': t, 
+                'EPS (TTM)': eps, 
+                'EPS Growth (YoY)': eps_growth, 
+                'Sales (TTM)': sales_str, 
+                'Sales Growth (YoY)': sales_growth
+            }
+        except:
+            return {'Ticker': t, 'EPS (TTM)': 'N/A', 'EPS Growth (YoY)': 'N/A', 'Sales (TTM)': 'N/A', 'Sales Growth (YoY)': 'N/A'}
+
+    results = []
+    # 使用 10 個 Worker 進行並發抓取，大幅提升速度
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_single, t): t for t in tickers}
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+            
+    return pd.DataFrame(results)
+
+# --- 6. UI 側邊欄設計 ---
 st.title("🎯 美股 RS x MACD x 趨勢 狙擊手")
 st.caption(f"最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -144,14 +178,11 @@ with st.sidebar:
     st.markdown("---")
     st.header("📈 指標過濾控制")
     
-    # 趨勢開關
     enable_sma = st.checkbox("啟動 【SMA25 > SMA125】 長線多頭過濾", value=True)
-    if enable_sma:
-        st.info("✅ 已啟用：只顯示中線趨勢強於長線趨勢的股票。")
+    if enable_sma: st.info("✅ 已啟用：只顯示中線趨勢強於長線趨勢的股票。")
         
     st.markdown("---")
     
-    # RS 開關與多選
     enable_rs = st.checkbox("啟動 【RS 對比納指】 過濾", value=True)
     if enable_rs:
         rs_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
@@ -159,7 +190,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # MACD 開關與多選
     enable_macd = st.checkbox("啟動 【MACD】 過濾", value=True)
     if enable_macd:
         macd_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
@@ -168,7 +198,7 @@ with st.sidebar:
     st.markdown("---")
     start_scan = st.button("🚀 執行全市場精確掃描", use_container_width=True, type="primary")
 
-# --- 6. 主程式邏輯 ---
+# --- 7. 主程式邏輯 ---
 if start_scan:
     with st.spinner("獲取 Finviz 基礎數據..."):
         raw_data = fetch_finviz_data()
@@ -183,43 +213,45 @@ if start_scan:
             with st.spinner(f"正在全速下載並運算 {len(target_tickers)} 隻股票的各項指標 (資料量增至 1 年)... 預計需時數分鐘 ☕"):
                 indicators_results = calculate_all_indicators(target_tickers)
                 
-                # 將結果 Map 回 DataFrame
                 final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('RS', '無'))
                 final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('MACD', '無'))
                 final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('SMA_Trend', False))
                 
-                # 根據用戶 UI 選擇進行嚴格過濾
-                if enable_sma:
-                    final_df = final_df[final_df['SMA多頭'] == True]
-                if enable_rs:
-                    final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
-                if enable_macd:
-                    final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
+                if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
+                if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
+                if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
                 
                 if len(final_df) > 0:
-                    st.success(f"✅ 篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
+                    st.success(f"✅ 動能篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
+                    
+                    # --- 【全新：並發獲取基本面數據】 ---
+                    with st.spinner(f"正在透過多執行緒極速獲取 {len(final_df)} 隻股票的最新財報數據 (EPS, Sales TTM)... 📊"):
+                        fund_df = fetch_fundamentals(final_df['Ticker'].tolist())
+                        # 將基本面數據合併到結果中
+                        final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
+                        
                 else:
                     st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
 
         st.markdown("---")
         
-        # --- 7. 結果展示與匯出 ---
+        # --- 8. 結果展示與匯出 ---
         if len(final_df) > 0:
             st.subheader("🎯 終極精選清單")
             
-            # 智能排版：將 Ticker, RS, MACD 放在最顯眼的最左側
+            # 智能排版：移除 Price, Change, Volume。加入 EPS 與 Sales 資訊。
             cols = ['Ticker']
             if 'RS_階段' in final_df.columns: cols.append('RS_階段')
             if 'MACD_階段' in final_df.columns: cols.append('MACD_階段')
             
-            # 加入基本面欄位，過濾掉輔助數值 (包括純布林值的 SMA多頭，因為已過濾)
-            other_cols = ['Company', 'Sector', 'Industry', 'Price', 'Change', 'Volume']
+            # 乾淨利落的基本面展示 (已移除 Price, Change, Volume)
+            other_cols = ['Company', 'Sector', 'Industry', 'EPS (TTM)', 'EPS Growth (YoY)', 'Sales (TTM)', 'Sales Growth (YoY)']
             for oc in other_cols:
                 if oc in final_df.columns: cols.append(oc)
             
             st.dataframe(final_df[cols], use_container_width=True, height=600)
             
-            csv = final_df.to_csv(index=False).encode('utf-8')
+            csv = final_df[cols].to_csv(index=False).encode('utf-8')
             st.download_button("📥 下載此終極清單 (CSV)", data=csv, file_name="rs_macd_trend_sniper.csv", mime="text/csv")
         elif not (enable_rs or enable_macd or enable_sma):
              st.info("請勾選至少一個指標，並點擊「執行全市場精確掃描」。")
