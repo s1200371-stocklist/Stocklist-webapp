@@ -2,3 +2,4 @@ streamlit
 pandas
 finvizfinance
 yfinance
+requests
