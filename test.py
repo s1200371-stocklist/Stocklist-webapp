@@ -7,7 +7,7 @@ import time
 import concurrent.futures
 
 # --- 1. 專業版面配置 ---
-st.set_page_config(page_title="🚀 美股 RS x MACD 動能狙擊手", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="🚀 美股量化篩選平台", page_icon="📈", layout="wide")
 
 # --- 2. 數據清洗函數 ---
 def convert_mcap_to_float(val):
@@ -214,89 +214,118 @@ def fetch_fundamentals(tickers):
             
     return pd.DataFrame(results)
 
-# --- 6. UI 側邊欄設計 ---
-st.title("🎯 美股 RS x MACD x 趨勢 狙擊手")
-st.caption(f"最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# --- 6. 全新 UI 佈局 (側邊欄為導航，主頁為篩選器) ---
 
+# 側邊欄：功能導航
 with st.sidebar:
-    st.header("⚙️ 基礎篩選")
-    min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
+    st.title("🧰 量化選股系統")
+    st.markdown("請選擇你要使用的篩選器：")
+    
+    # 預留空間俾未來新功能
+    app_mode = st.radio(
+        "可用模組", 
+        ["🎯 RS x MACD 動能狙擊手", "🚧 價值投資掃描器 (開發中)", "🚧 高息股探測器 (開發中)"]
+    )
     
     st.markdown("---")
-    st.header("📈 指標過濾控制")
+    st.info("💡 提示：所有篩選條件已經移至主頁面板，操作更直觀！")
+    st.caption(f"數據最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+# 主頁：根據選擇的模式顯示對應的內容
+if app_mode == "🎯 RS x MACD 動能狙擊手":
     
-    enable_sma = st.checkbox("啟動 【SMA25 > SMA125】 長線多頭過濾", value=True)
-    if enable_sma: st.info("✅ 已啟用：只顯示中線趨勢強於長線趨勢的股票。")
+    st.title("🎯 美股 RS x MACD x 趨勢 狙擊手")
+    st.markdown("尋找市場上動能最強、財報正在加速增長的潛力爆發股。")
+    
+    # 使用 st.expander 或 st.container 將篩選條件放在主頁
+    with st.expander("⚙️ 展開設定篩選參數", expanded=True):
+        # 使用 3 欄佈局讓畫面更整齊
+        col1, col2, col3 = st.columns(3)
         
-    st.markdown("---")
-    
-    enable_rs = st.checkbox("啟動 【RS 對比納指】 過濾", value=True)
-    if enable_rs:
-        rs_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
-        selected_rs = st.multiselect("顯示 RS 階段:", options=rs_options, default=["🚀 剛剛突破"])
-    
-    st.markdown("---")
-    
-    enable_macd = st.checkbox("啟動 【MACD】 過濾", value=True)
-    if enable_macd:
-        macd_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
-        selected_macd = st.multiselect("顯示 MACD 階段:", options=macd_options, default=["🚀 剛剛突破"])
-
-    st.markdown("---")
-    start_scan = st.button("🚀 執行全市場精確掃描", use_container_width=True, type="primary")
-
-# --- 7. 主程式邏輯 ---
-if start_scan:
-    with st.spinner("獲取 Finviz 基礎數據..."):
-        raw_data = fetch_finviz_data()
-
-    if not raw_data.empty:
-        df_processed = raw_data.copy()
-        df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
-        final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].copy()
-        
-        if enable_rs or enable_macd or enable_sma:
-            target_tickers = final_df['Ticker'].tolist()
-            with st.spinner(f"正在全速下載並運算 {len(target_tickers)} 隻股票的各項指標 (資料量增至 1 年)... 預計需時數分鐘 ☕"):
-                indicators_results = calculate_all_indicators(target_tickers)
+        with col1:
+            st.markdown("#### 1️⃣ 基礎與趨勢")
+            min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
+            enable_sma = st.checkbox("啟動 【SMA25 > SMA125】 過濾", value=True)
+            if enable_sma: st.caption("✅ 只保留中線趨勢強於長線的股票")
+            
+        with col2:
+            st.markdown("#### 2️⃣ RS 動能 (對比納指)")
+            enable_rs = st.checkbox("啟動 【RS】 過濾", value=True)
+            if enable_rs:
+                rs_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
+                selected_rs = st.multiselect("顯示 RS 階段:", options=rs_options, default=["🚀 剛剛突破"])
+            else:
+                selected_rs = []
                 
-                final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('RS', '無'))
-                final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('MACD', '無'))
-                final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('SMA_Trend', False))
+        with col3:
+            st.markdown("#### 3️⃣ MACD 爆發點")
+            enable_macd = st.checkbox("啟動 【MACD】 過濾", value=True)
+            if enable_macd:
+                macd_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
+                selected_macd = st.multiselect("顯示 MACD 階段:", options=macd_options, default=["🚀 剛剛突破"])
+            else:
+                selected_macd = []
                 
-                if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
-                if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
-                if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
-                
-                if len(final_df) > 0:
-                    st.success(f"✅ 動能篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
-                    
-                    # --- 【獲取 4 季歷史基本面】 ---
-                    with st.spinner(f"正在獲取 {len(final_df)} 隻股票的最新 4 季財報序列 (為防封鎖，預計需時 10-30 秒)... 📊"):
-                        fund_df = fetch_fundamentals(final_df['Ticker'].tolist())
-                        final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
-                        
-                else:
-                    st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
-
         st.markdown("---")
-        
-        # --- 8. 結果展示與匯出 ---
-        if len(final_df) > 0:
-            st.subheader("🎯 終極精選清單")
+        start_scan = st.button("🚀 執行全市場精確掃描", use_container_width=True, type="primary")
+
+    # --- 7. 主程式邏輯 (僅在點擊按鈕後執行) ---
+    if start_scan:
+        with st.spinner("獲取 Finviz 基礎數據..."):
+            raw_data = fetch_finviz_data()
+
+        if not raw_data.empty:
+            df_processed = raw_data.copy()
+            df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
+            final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].copy()
             
-            cols = ['Ticker']
-            if 'RS_階段' in final_df.columns: cols.append('RS_階段')
-            if 'MACD_階段' in final_df.columns: cols.append('MACD_階段')
+            if enable_rs or enable_macd or enable_sma:
+                target_tickers = final_df['Ticker'].tolist()
+                with st.spinner(f"正在全速下載並運算 {len(target_tickers)} 隻股票的各項指標 (資料量增至 1 年)... 預計需時數分鐘 ☕"):
+                    indicators_results = calculate_all_indicators(target_tickers)
+                    
+                    final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('RS', '無'))
+                    final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('MACD', '無'))
+                    final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('SMA_Trend', False))
+                    
+                    if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
+                    if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
+                    if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
+                    
+                    if len(final_df) > 0:
+                        st.success(f"✅ 動能篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
+                        
+                        # --- 【獲取 4 季歷史基本面】 ---
+                        with st.spinner(f"正在獲取 {len(final_df)} 隻股票的最新 4 季財報序列 (為防封鎖，預計需時 10-30 秒)... 📊"):
+                            fund_df = fetch_fundamentals(final_df['Ticker'].tolist())
+                            final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
+                            
+                    else:
+                        st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
+
+            st.markdown("---")
             
-            # 【新增 Market Cap，並排列最近 4 季數據】
-            other_cols = ['Company', 'Sector', 'Industry', 'Market Cap', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales (近4季)', 'Sales Growth (QoQ)']
-            for oc in other_cols:
-                if oc in final_df.columns: cols.append(oc)
-            
-            st.dataframe(final_df[cols], use_container_width=True, height=600)
-            
-            csv = final_df[cols].to_csv(index=False).encode('utf-8')
-            st.download_button("📥 下載此終極清單 (CSV)", data=csv, file_name="rs_macd_trend_sniper.csv", mime="text/csv")
-        elif not (enable_rs or enable_macd or enable_sma):
-             st.info("請勾選至少一個指標，並點擊「執行全市場精確掃描」。")
+            # --- 8. 結果展示與匯出 ---
+            if len(final_df) > 0:
+                st.subheader("🎯 終極精選清單")
+                
+                cols = ['Ticker']
+                if 'RS_階段' in final_df.columns: cols.append('RS_階段')
+                if 'MACD_階段' in final_df.columns: cols.append('MACD_階段')
+                
+                # 【Market Cap 與 最近 4 季數據】
+                other_cols = ['Company', 'Sector', 'Industry', 'Market Cap', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales (近4季)', 'Sales Growth (QoQ)']
+                for oc in other_cols:
+                    if oc in final_df.columns: cols.append(oc)
+                
+                st.dataframe(final_df[cols], use_container_width=True, height=600)
+                
+                csv = final_df[cols].to_csv(index=False).encode('utf-8')
+                st.download_button("📥 下載此終極清單 (CSV)", data=csv, file_name="rs_macd_trend_sniper.csv", mime="text/csv")
+            elif not (enable_rs or enable_macd or enable_sma):
+                 st.info("請勾選至少一個指標，並點擊「執行全市場精確掃描」。")
+
+else:
+    # 處理未來其他模組的畫面
+    st.title(app_mode)
+    st.info("這個強大的量化選股功能正在開發中，請先使用左側導航欄的「🎯 RS x MACD 動能狙擊手」！")
