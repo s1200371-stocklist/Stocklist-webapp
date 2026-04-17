@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from finvizfinance.screener.overview import Overview
-from finvizfinance.quote import finvizfinance # 【新增】引入 Finviz 報價模組
 import yfinance as yf
 import datetime
 import time
@@ -121,41 +120,93 @@ def calculate_all_indicators(tickers, batch_size=200):
         
     return results
 
-# --- 5. 多執行緒獲取財報基本面數據 (完美替換為 Finviz 數據源) ---
+# --- 5. 多執行緒獲取 4 季財報序列數據 (穩定版 API) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(tickers):
     def fetch_single(t):
-        time.sleep(0.3) # 基礎延遲，保護 Finviz 伺服器防封鎖
+        time.sleep(0.5) # 保護機制
         for attempt in range(3):
             try:
-                if attempt > 0:
-                    time.sleep(1.5) # 失敗重試前再休息一陣
+                if attempt > 0: time.sleep(1.5)
                 
-                # 直接使用 Finviz 獲取該股票的所有基本面數據
-                stock = finvizfinance(t)
-                fund = stock.ticker_fundament()
+                tkr = yf.Ticker(t)
+                q_inc = tkr.quarterly_financials
+                if q_inc is None or q_inc.empty:
+                    q_inc = tkr.quarterly_income_stmt # 後備屬性
                 
-                # 完美對應：Finviz 的 Q/Q 即代表最新季度的 YoY (Year-over-Year)
-                eps = fund.get('EPS (ttm)', 'N/A')
-                eps_growth = fund.get('EPS Q/Q', 'N/A')
-                sales = fund.get('Sales', 'N/A')
-                sales_growth = fund.get('Sales Q/Q', 'N/A')
+                if q_inc is None or q_inc.empty:
+                    continue # 觸發重試
+                    
+                # 篩選出日期欄位，並將最近 4 季排序 (由舊至新)
+                cols = sorted([c for c in q_inc.columns if isinstance(c, pd.Timestamp)])
+                cols = cols[-4:]
+                if not cols: continue
                 
+                eps_vals, sales_vals = [], []
+                
+                # 尋找 EPS 行
+                eps_row = None
+                for r in ['Diluted EPS', 'Basic EPS', 'Normalized EPS']:
+                    if r in q_inc.index:
+                        eps_row = q_inc.loc[r]
+                        break
+                        
+                # 尋找 Sales 行
+                sales_row = None
+                for r in ['Total Revenue', 'Operating Revenue']:
+                    if r in q_inc.index:
+                        sales_row = q_inc.loc[r]
+                        break
+                        
+                # 提取這 4 季的數據
+                for c in cols:
+                    eps_vals.append(float(eps_row[c]) if eps_row is not None and pd.notna(eps_row[c]) else None)
+                    sales_vals.append(float(sales_row[c]) if sales_row is not None and pd.notna(sales_row[c]) else None)
+                    
+                # 格式化數值陣列 (以 | 分隔)
+                def fmt_val(vals, is_sales=False):
+                    res = []
+                    for v in vals:
+                        if v is None: res.append("-")
+                        else:
+                            if is_sales:
+                                if v >= 1e9: res.append(f"{v/1e9:.2f}B")
+                                elif v >= 1e6: res.append(f"{v/1e6:.2f}M")
+                                else: res.append(f"{v:.0f}")
+                            else:
+                                res.append(f"{v:.2f}")
+                    return " | ".join(res)
+                    
+                # 計算 QoQ 按季增長陣列
+                def fmt_growth(vals):
+                    res = ["-"] # 最舊的一季沒有更早的數據對比
+                    for i in range(1, len(vals)):
+                        curr, prev = vals[i], vals[i-1]
+                        if curr is None or prev is None or prev == 0:
+                            res.append("-")
+                        else:
+                            g = (curr - prev) / abs(prev) * 100
+                            res.append(f"{g:+.1f}%")
+                    return " | ".join(res)
+                    
                 return {
-                    'Ticker': t, 
-                    'EPS (TTM)': eps, 
-                    'EPS Growth (Q/Q)': eps_growth, 
-                    'Sales (TTM)': sales, 
-                    'Sales Growth (Q/Q)': sales_growth
+                    'Ticker': t,
+                    'EPS (近4季)': fmt_val(eps_vals, False),
+                    'EPS Growth (QoQ)': fmt_growth(eps_vals),
+                    'Sales (近4季)': fmt_val(sales_vals, True),
+                    'Sales Growth (QoQ)': fmt_growth(sales_vals)
                 }
             except Exception:
                 pass
                 
         # 3 次嘗試均失敗
-        return {'Ticker': t, 'EPS (TTM)': 'N/A', 'EPS Growth (Q/Q)': 'N/A', 'Sales (TTM)': 'N/A', 'Sales Growth (Q/Q)': 'N/A'}
+        return {
+            'Ticker': t, 'EPS (近4季)': 'N/A', 'EPS Growth (QoQ)': 'N/A', 
+            'Sales (近4季)': 'N/A', 'Sales Growth (QoQ)': 'N/A'
+        }
 
     results = []
-    # 使用 3 個 Worker 確保穩定性
+    # 使用 3 個 Worker 確保 Yahoo 唔會封鎖
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(fetch_single, t): t for t in tickers}
         for future in concurrent.futures.as_completed(futures):
@@ -220,8 +271,8 @@ if start_scan:
                 if len(final_df) > 0:
                     st.success(f"✅ 動能篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
                     
-                    # --- 【切換為 Finviz 獲取基本面】 ---
-                    with st.spinner(f"正在獲取 {len(final_df)} 隻股票的最新財報數據 (使用 Finviz 報價源，請稍候)... 📊"):
+                    # --- 【獲取 4 季歷史基本面】 ---
+                    with st.spinner(f"正在獲取 {len(final_df)} 隻股票的最新 4 季財報序列 (為防封鎖，預計需時 10-30 秒)... 📊"):
                         fund_df = fetch_fundamentals(final_df['Ticker'].tolist())
                         final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
                         
@@ -234,13 +285,12 @@ if start_scan:
         if len(final_df) > 0:
             st.subheader("🎯 終極精選清單")
             
-            # 智能排版：移除 Price, Change, Volume。加入 EPS 與 Sales 資訊。
             cols = ['Ticker']
             if 'RS_階段' in final_df.columns: cols.append('RS_階段')
             if 'MACD_階段' in final_df.columns: cols.append('MACD_階段')
             
-            # 使用 Finviz 完美的數據格式展示
-            other_cols = ['Company', 'Sector', 'Industry', 'EPS (TTM)', 'EPS Growth (Q/Q)', 'Sales (TTM)', 'Sales Growth (Q/Q)']
+            # 【新增 Market Cap，並排列最近 4 季數據】
+            other_cols = ['Company', 'Sector', 'Industry', 'Market Cap', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales (近4季)', 'Sales Growth (QoQ)']
             for oc in other_cols:
                 if oc in final_df.columns: cols.append(oc)
             
