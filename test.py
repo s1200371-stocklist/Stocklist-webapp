@@ -6,7 +6,7 @@ import datetime
 import time
 
 # --- 1. 專業版面配置 ---
-st.set_page_config(page_title="🚀 美股全階段動能狙擊手", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="🚀 美股 RS x MACD 動能狙擊手", page_icon="🎯", layout="wide")
 
 # --- 2. 數據清洗函數 ---
 def convert_mcap_to_float(val):
@@ -30,41 +30,42 @@ def fetch_finviz_data():
         st.error(f"連線至 Finviz 失敗，請稍後再試: {e}")
         return pd.DataFrame()
 
-# --- 4. yfinance 批量計算引擎 ---
+# --- 4. yfinance 雙指標 (RS + MACD) 批量計算引擎 ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def calculate_all_rs(tickers, batch_size=200):
-    rs_signals = {} 
+def calculate_all_indicators(tickers, batch_size=200):
+    """一次下載，同時計算 RS 與 MACD，確保極速且防封鎖"""
+    results = {} 
     
+    # 【基準下載 (用於 RS)】
     benchmarks_to_try = ["QQQ", "^NDX", "QQQM"]
     bench_data = pd.DataFrame()
     used_bench = ""
 
     for b in benchmarks_to_try:
         try:
-            temp_data = yf.download(b, period="3mo", progress=False)
+            # 延長至 6mo 確保 MACD 的 EMA 運算精準
+            temp_data = yf.download(b, period="6mo", progress=False)
             if not temp_data.empty and 'Close' in temp_data.columns:
                 close_data = temp_data['Close']
-                if isinstance(close_data, pd.Series):
-                    bench_data = close_data.to_frame(name=b)
-                else:
-                    bench_data = close_data
+                if isinstance(close_data, pd.Series): bench_data = close_data.to_frame(name=b)
+                else: bench_data = close_data
                 used_bench = b
                 break 
         except Exception: continue
             
     if bench_data.empty: 
         st.error("⚠️ 無法下載納指基準，請稍後再試。")
-        return rs_signals
+        return results
 
     if bench_data.index.tz is not None:
         bench_data.index = bench_data.index.tz_localize(None)
-        
     bench_norm = bench_data[used_bench] / bench_data[used_bench].iloc[0]
 
+    # 【分批下載與指標計算】
     for i in range(0, len(tickers), batch_size):
         batch_tickers = tickers[i:i+batch_size]
         try:
-            data = yf.download(batch_tickers, period="3mo", progress=False)
+            data = yf.download(batch_tickers, period="6mo", progress=False)
             if data.empty or 'Close' not in data.columns: raise ValueError("No Data")
             close_prices = data['Close']
             if isinstance(close_prices, pd.Series): close_prices = close_prices.to_frame(name=batch_tickers[0])
@@ -72,91 +73,133 @@ def calculate_all_rs(tickers, batch_size=200):
             if close_prices.index.tz is not None: close_prices.index = close_prices.index.tz_localize(None)
             
             for ticker in batch_tickers:
+                # 預設狀態為無
+                rs_stage = "無"
+                macd_stage = "無"
+                
                 if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
                     stock_price = close_prices[ticker].dropna()
-                    if len(stock_price) > 30: 
+                    
+                    # 確保有足夠數據 (MACD 需要最少 26+9 日)
+                    if len(stock_price) > 40: 
+                        
+                        # --- 運算 1：RS 動能 ---
                         stock_norm = stock_price / stock_price.iloc[0]
                         aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
                         rs_line = stock_norm / aligned_bench * 100
                         rs_ma_25 = rs_line.rolling(window=25).mean()
                         
-                        latest_rs = float(rs_line.iloc[-1])
-                        latest_ma = float(rs_ma_25.iloc[-1])
-                        prev_rs = float(rs_line.iloc[-2])
-                        prev_ma = float(rs_ma_25.iloc[-2])
+                        latest_rs, prev_rs = float(rs_line.iloc[-1]), float(rs_line.iloc[-2])
+                        latest_rs_ma, prev_rs_ma = float(rs_ma_25.iloc[-1]), float(rs_ma_25.iloc[-2])
                         
-                        if latest_rs > latest_ma:
-                            if prev_rs <= prev_ma: rs_signals[ticker] = "🚀 剛剛突破"
-                            else: rs_signals[ticker] = "🔥 已經突破"
-                        elif latest_rs >= latest_ma * 0.95: rs_signals[ticker] = "🎯 即將突破 (<5%)"
-                        else: rs_signals[ticker] = "無"
-                    else: rs_signals[ticker] = "無"
-                else: rs_signals[ticker] = "無"
-        except:
-            for t in batch_tickers: rs_signals[t] = "無"
+                        if latest_rs > latest_rs_ma:
+                            if prev_rs <= prev_rs_ma: rs_stage = "🚀 剛剛突破"
+                            else: rs_stage = "🔥 已經突破"
+                        elif latest_rs >= latest_rs_ma * 0.95: rs_stage = "🎯 即將突破 (<5%)"
+                        
+                        # --- 運算 2：MACD ---
+                        ema12 = stock_price.ewm(span=12, adjust=False).mean()
+                        ema26 = stock_price.ewm(span=26, adjust=False).mean()
+                        macd_line = ema12 - ema26
+                        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                        
+                        latest_macd, prev_macd = float(macd_line.iloc[-1]), float(macd_line.iloc[-2])
+                        latest_sig, prev_sig = float(signal_line.iloc[-1]), float(signal_line.iloc[-2])
+                        
+                        if latest_macd > latest_sig:
+                            if prev_macd <= prev_sig: macd_stage = "🚀 剛剛突破"
+                            else: macd_stage = "🔥 已經突破"
+                        else:
+                            # 嚴格數學防禦：當 Signal 接近 0 時的 5% 距離算法
+                            if abs(latest_sig) > 0.0001:
+                                if abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05:
+                                    macd_stage = "🎯 即將突破 (<5%)"
+                            
+                results[ticker] = {'RS': rs_stage, 'MACD': macd_stage}
+                
+        except Exception as e:
+            for t in batch_tickers: results[t] = {'RS': "無", 'MACD': "無"}
         time.sleep(0.5) 
-    return rs_signals
+        
+    return results
 
-# --- 5. UI 側邊欄 ---
-st.title("🎯 美股納指動能過濾器")
+# --- 5. UI 側邊欄設計 ---
+st.title("🎯 美股 RS x MACD 雙動能過濾器")
 st.caption(f"最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 with st.sidebar:
-    st.header("⚙️ 篩選與顯示控制")
+    st.header("⚙️ 基礎篩選")
     min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
     
     st.markdown("---")
-    # 【新增功能】：選擇顯示的突破類型
-    st.subheader("📊 顯示過濾")
-    stage_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
-    selected_stages = st.multiselect("選擇要顯示的階段:", options=stage_options, default=stage_options)
+    st.header("📈 指標過濾控制")
     
-    enable_rs = st.checkbox("📈 執行全市場動能掃描", value=False)
+    # RS 開關與多選
+    enable_rs = st.checkbox("啟動 【RS 對比納指】 過濾", value=True)
     if enable_rs:
-        st.warning("⏳ 掃描中，請勿重新整理網頁。")
-
-# --- 6. 主程式邏輯 ---
-with st.spinner("獲取 Finviz 數據..."):
-    raw_data = fetch_finviz_data()
-
-if not raw_data.empty:
-    df_processed = raw_data.copy()
-    df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
-    final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].copy()
+        rs_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
+        selected_rs = st.multiselect("顯示 RS 階段:", options=rs_options, default=["🚀 剛剛突破"])
     
-    if enable_rs:
-        target_tickers = final_df['Ticker'].tolist()
-        with st.spinner(f"正在分析 {len(target_tickers)} 隻股票..."):
-            rs_results = calculate_all_rs(target_tickers)
-            final_df['RS_階段'] = final_df['Ticker'].map(rs_results).fillna("無")
-            
-            # 【核心過濾代碼】：根據 UI 選擇過濾 DataFrame
-            final_df = final_df[final_df['RS_階段'].isin(selected_stages)]
-            
-            if len(final_df) > 0:
-                st.success(f"✅ 篩選完成：找到 {len(final_df)} 隻符合條件的股票。")
-            else:
-                st.warning("⚠️ 沒有股票符合所選的突破階段。")
-
     st.markdown("---")
     
-    # --- 7. 結果展示與匯出 ---
-    if len(final_df) > 0:
-        st.subheader("🎯 掃描清單")
+    # MACD 開關與多選
+    enable_macd = st.checkbox("啟動 【MACD】 過濾", value=True)
+    if enable_macd:
+        macd_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
+        selected_macd = st.multiselect("顯示 MACD 階段:", options=macd_options, default=["🚀 剛剛突破"])
+
+    st.markdown("---")
+    start_scan = st.button("🚀 執行全市場精確掃描", use_container_width=True, type="primary")
+
+# --- 6. 主程式邏輯 ---
+if start_scan:
+    with st.spinner("獲取 Finviz 基礎數據..."):
+        raw_data = fetch_finviz_data()
+
+    if not raw_data.empty:
+        df_processed = raw_data.copy()
+        df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
+        final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].copy()
         
-        # 智能排版欄位
-        cols = ['Ticker']
-        if 'RS_階段' in final_df.columns:
-            cols.append('RS_階段')
+        if enable_rs or enable_macd:
+            target_tickers = final_df['Ticker'].tolist()
+            with st.spinner(f"正在全速下載並運算 {len(target_tickers)} 隻股票的 RS 與 MACD... 預計需時數分鐘 ☕"):
+                indicators_results = calculate_all_indicators(target_tickers)
+                
+                # 將結果 Map 回 DataFrame
+                final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('RS', '無'))
+                final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('MACD', '無'))
+                
+                # 根據用戶 UI 選擇進行嚴格過濾
+                if enable_rs:
+                    final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
+                if enable_macd:
+                    final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
+                
+                if len(final_df) > 0:
+                    st.success(f"✅ 篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
+                else:
+                    st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
+
+        st.markdown("---")
         
-        # 加入其他重要欄位
-        other_cols = ['Company', 'Sector', 'Industry', 'Price', 'Change', 'Volume']
-        for oc in other_cols:
-            if oc in final_df.columns: cols.append(oc)
-        
-        st.dataframe(final_df[cols], use_container_width=True, height=600)
-        
-        csv = final_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 下載此清單 (CSV)", data=csv, file_name="momentum_scan.csv", mime="text/csv")
-    else:
-        st.info("目前沒有符合篩選條件的股票。請調整左側「最低市值」或確保已勾選「執行掃描」。")
+        # --- 7. 結果展示與匯出 ---
+        if len(final_df) > 0:
+            st.subheader("🎯 終極精選清單")
+            
+            # 智能排版：將 Ticker, RS, MACD 放在最顯眼的最左側
+            cols = ['Ticker']
+            if 'RS_階段' in final_df.columns: cols.append('RS_階段')
+            if 'MACD_階段' in final_df.columns: cols.append('MACD_階段')
+            
+            # 加入基本面欄位，過濾掉輔助數值
+            other_cols = ['Company', 'Sector', 'Industry', 'Price', 'Change', 'Volume']
+            for oc in other_cols:
+                if oc in final_df.columns: cols.append(oc)
+            
+            st.dataframe(final_df[cols], use_container_width=True, height=600)
+            
+            csv = final_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 下載此終極清單 (CSV)", data=csv, file_name="rs_macd_sniper.csv", mime="text/csv")
+        elif not (enable_rs or enable_macd):
+             st.info("請勾選至少一個指標（RS 或 MACD），並點擊「執行全市場精確掃描」。")
