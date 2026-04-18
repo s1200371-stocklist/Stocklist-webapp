@@ -85,8 +85,13 @@ def calculate_all_indicators(tickers, sma_short, sma_long, batch_size=200, _prog
                 if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
                     stock_price = close_prices[ticker].dropna()
                     
-                    # 確保有足夠長度的數據來計算使用者選擇的長期 SMA
-                    if len(stock_price) > sma_long + 1: 
+                    # 判斷所需的最低數據天數
+                    required_len_short = 1 if sma_short == "Close" else sma_short
+                    required_len_long = 1 if sma_long == "Close" else sma_long
+                    max_req_len = max(required_len_short, required_len_long)
+                    
+                    # 確保有足夠長度的數據來計算使用者選擇的指標
+                    if len(stock_price) > max_req_len + 1: 
                         # RS 動能
                         stock_norm = stock_price / stock_price.iloc[0]
                         aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
@@ -118,9 +123,17 @@ def calculate_all_indicators(tickers, sma_short, sma_long, batch_size=200, _prog
                                 if abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05:
                                     macd_stage = "🎯 即將突破 (<5%)"
                                     
-                        # 動態 SMA 趨勢判斷
-                        sma_s_line = stock_price.rolling(window=sma_short).mean()
-                        sma_l_line = stock_price.rolling(window=sma_long).mean()
+                        # 動態 SMA 趨勢判斷 (支援 Close)
+                        if sma_short == "Close":
+                            sma_s_line = stock_price
+                        else:
+                            sma_s_line = stock_price.rolling(window=sma_short).mean()
+                            
+                        if sma_long == "Close":
+                            sma_l_line = stock_price
+                        else:
+                            sma_l_line = stock_price.rolling(window=sma_long).mean()
+                            
                         sma_trend = float(sma_s_line.iloc[-1]) > float(sma_l_line.iloc[-1])
                             
                 results[ticker] = {'RS': rs_stage, 'MACD': macd_stage, 'SMA_Trend': sma_trend}
@@ -253,13 +266,13 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
             st.markdown("#### 1️⃣ 基礎與趨勢")
             min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
             
-            enable_sma = st.checkbox("啟動 【短期 > 長期】 均線過濾", value=True)
+            enable_sma = st.checkbox("啟動 【短期 > 長期】 趨勢過濾", value=True)
             if enable_sma:
-                # 使用 sub-columns 讓參數選擇更緊湊
+                # 使用 sub-columns 讓參數選擇更緊湊，並加入 Close
                 sub1, sub2 = st.columns(2)
-                sma_short = sub1.selectbox("短期 SMA", [10, 20, 25, 50], index=2)
-                sma_long = sub2.selectbox("長期 SMA", [50, 100, 125, 150, 200], index=2)
-                st.caption(f"✅ 條件：SMA `{sma_short}` 必須高於 SMA `{sma_long}`")
+                sma_short = sub1.selectbox("短期指標", ["Close", 10, 20, 25, 50], index=3) # 預設 25
+                sma_long = sub2.selectbox("長期指標", ["Close", 50, 100, 125, 150, 200], index=3) # 預設 125
+                st.caption(f"✅ 條件：`{sma_short}` 必須高於 `{sma_long}`")
             else:
                 sma_short, sma_long = 25, 125 # 預設值以防出錯
             
