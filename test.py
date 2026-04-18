@@ -31,9 +31,10 @@ def fetch_finviz_data():
         st.error(f"連線至 Finviz 失敗，請稍後再試: {e}")
         return pd.DataFrame()
 
-# --- 4. yfinance 批量計算引擎 (包含 RS, MACD 及 SMA 趨勢) ---
+# --- 4. yfinance 批量計算引擎 (包含 RS, MACD 及自訂 SMA 趨勢) ---
+# 注意：加入底線 _ 開頭的變數，不會被 Streamlit cache 追蹤，容許我們傳入 UI 元件
 @st.cache_data(ttl=3600, show_spinner=False)
-def calculate_all_indicators(tickers, batch_size=200):
+def calculate_all_indicators(tickers, sma_short, sma_long, batch_size=200, _progress_bar=None, _status_text=None):
     results = {} 
     
     benchmarks_to_try = ["QQQ", "^NDX", "QQQM"]
@@ -42,7 +43,8 @@ def calculate_all_indicators(tickers, batch_size=200):
 
     for b in benchmarks_to_try:
         try:
-            temp_data = yf.download(b, period="1y", progress=False)
+            # 延長至 2y 確保可以準確計算高達 SMA 200 的指標
+            temp_data = yf.download(b, period="2y", progress=False)
             if not temp_data.empty and 'Close' in temp_data.columns:
                 close_data = temp_data['Close']
                 if isinstance(close_data, pd.Series): bench_data = close_data.to_frame(name=b)
@@ -59,10 +61,18 @@ def calculate_all_indicators(tickers, batch_size=200):
         bench_data.index = bench_data.index.tz_localize(None)
     bench_norm = bench_data[used_bench] / bench_data[used_bench].iloc[0]
 
-    for i in range(0, len(tickers), batch_size):
+    total_tickers = len(tickers)
+    for i in range(0, total_tickers, batch_size):
         batch_tickers = tickers[i:i+batch_size]
+        
+        # --- UI 進度更新 ---
+        if _status_text:
+            _status_text.markdown(f"**階段 2/3**: 正在下載並運算技術指標... (`{min(i+batch_size, total_tickers)}` / `{total_tickers}`)")
+        if _progress_bar:
+            _progress_bar.progress(min(1.0, (i + batch_size) / total_tickers))
+            
         try:
-            data = yf.download(batch_tickers, period="1y", progress=False)
+            data = yf.download(batch_tickers, period="2y", progress=False)
             if data.empty or 'Close' not in data.columns: raise ValueError("No Data")
             close_prices = data['Close']
             if isinstance(close_prices, pd.Series): close_prices = close_prices.to_frame(name=batch_tickers[0])
@@ -75,7 +85,8 @@ def calculate_all_indicators(tickers, batch_size=200):
                 if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
                     stock_price = close_prices[ticker].dropna()
                     
-                    if len(stock_price) > 126: 
+                    # 確保有足夠長度的數據來計算使用者選擇的長期 SMA
+                    if len(stock_price) > sma_long + 1: 
                         # RS 動能
                         stock_norm = stock_price / stock_price.iloc[0]
                         aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
@@ -107,10 +118,10 @@ def calculate_all_indicators(tickers, batch_size=200):
                                 if abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05:
                                     macd_stage = "🎯 即將突破 (<5%)"
                                     
-                        # SMA 趨勢
-                        sma25 = stock_price.rolling(window=25).mean()
-                        sma125 = stock_price.rolling(window=125).mean()
-                        sma_trend = float(sma25.iloc[-1]) > float(sma125.iloc[-1])
+                        # 動態 SMA 趨勢判斷
+                        sma_s_line = stock_price.rolling(window=sma_short).mean()
+                        sma_l_line = stock_price.rolling(window=sma_long).mean()
+                        sma_trend = float(sma_s_line.iloc[-1]) > float(sma_l_line.iloc[-1])
                             
                 results[ticker] = {'RS': rs_stage, 'MACD': macd_stage, 'SMA_Trend': sma_trend}
                 
@@ -122,7 +133,7 @@ def calculate_all_indicators(tickers, batch_size=200):
 
 # --- 5. 多執行緒獲取 4 季財報序列數據 (穩定版 API) ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_fundamentals(tickers):
+def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
     def fetch_single(t):
         time.sleep(0.5) # 保護機制
         for attempt in range(3):
@@ -137,33 +148,28 @@ def fetch_fundamentals(tickers):
                 if q_inc is None or q_inc.empty:
                     continue # 觸發重試
                     
-                # 篩選出日期欄位，並將最近 4 季排序 (由舊至新)
                 cols = sorted([c for c in q_inc.columns if isinstance(c, pd.Timestamp)])
                 cols = cols[-4:]
                 if not cols: continue
                 
                 eps_vals, sales_vals = [], []
                 
-                # 尋找 EPS 行
                 eps_row = None
                 for r in ['Diluted EPS', 'Basic EPS', 'Normalized EPS']:
                     if r in q_inc.index:
                         eps_row = q_inc.loc[r]
                         break
                         
-                # 尋找 Sales 行
                 sales_row = None
                 for r in ['Total Revenue', 'Operating Revenue']:
                     if r in q_inc.index:
                         sales_row = q_inc.loc[r]
                         break
                         
-                # 提取這 4 季的數據
                 for c in cols:
                     eps_vals.append(float(eps_row[c]) if eps_row is not None and pd.notna(eps_row[c]) else None)
                     sales_vals.append(float(sales_row[c]) if sales_row is not None and pd.notna(sales_row[c]) else None)
                     
-                # 格式化數值陣列 (以 | 分隔)
                 def fmt_val(vals, is_sales=False):
                     res = []
                     for v in vals:
@@ -173,17 +179,14 @@ def fetch_fundamentals(tickers):
                                 if v >= 1e9: res.append(f"{v/1e9:.2f}B")
                                 elif v >= 1e6: res.append(f"{v/1e6:.2f}M")
                                 else: res.append(f"{v:.0f}")
-                            else:
-                                res.append(f"{v:.2f}")
+                            else: res.append(f"{v:.2f}")
                     return " | ".join(res)
                     
-                # 計算 QoQ 按季增長陣列
                 def fmt_growth(vals):
-                    res = ["-"] # 最舊的一季沒有更早的數據對比
+                    res = ["-"] 
                     for i in range(1, len(vals)):
                         curr, prev = vals[i], vals[i-1]
-                        if curr is None or prev is None or prev == 0:
-                            res.append("-")
+                        if curr is None or prev is None or prev == 0: res.append("-")
                         else:
                             g = (curr - prev) / abs(prev) * 100
                             res.append(f"{g:+.1f}%")
@@ -198,20 +201,27 @@ def fetch_fundamentals(tickers):
                 }
             except Exception:
                 pass
-                
-        # 3 次嘗試均失敗
         return {
             'Ticker': t, 'EPS (近4季)': 'N/A', 'EPS Growth (QoQ)': 'N/A', 
             'Sales (近4季)': 'N/A', 'Sales Growth (QoQ)': 'N/A'
         }
 
     results = []
-    # 使用 3 個 Worker 確保 Yahoo 唔會封鎖
+    total_tickers = len(tickers)
+    completed = 0
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(fetch_single, t): t for t in tickers}
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
+            completed += 1
             
+            # --- UI 進度更新 ---
+            if _status_text:
+                _status_text.markdown(f"**階段 3/3**: 正在獲取最新財報數據... (`{completed}` / `{total_tickers}`)")
+            if _progress_bar:
+                _progress_bar.progress(min(1.0, completed / total_tickers))
+                
     return pd.DataFrame(results)
 
 # --- 6. 全新 UI 佈局 (側邊欄為導航，主頁為篩選器) ---
@@ -221,7 +231,6 @@ with st.sidebar:
     st.title("🧰 量化選股系統")
     st.markdown("請選擇你要使用的篩選器：")
     
-    # 預留空間俾未來新功能
     app_mode = st.radio(
         "可用模組", 
         ["🎯 RS x MACD 動能狙擊手", "🚧 價值投資掃描器 (開發中)", "🚧 高息股探測器 (開發中)"]
@@ -237,16 +246,22 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
     st.title("🎯 美股 RS x MACD x 趨勢 狙擊手")
     st.markdown("尋找市場上動能最強、財報正在加速增長的潛力爆發股。")
     
-    # 使用 st.expander 或 st.container 將篩選條件放在主頁
     with st.expander("⚙️ 展開設定篩選參數", expanded=True):
-        # 使用 3 欄佈局讓畫面更整齊
         col1, col2, col3 = st.columns(3)
         
         with col1:
             st.markdown("#### 1️⃣ 基礎與趨勢")
             min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
-            enable_sma = st.checkbox("啟動 【SMA25 > SMA125】 過濾", value=True)
-            if enable_sma: st.caption("✅ 只保留中線趨勢強於長線的股票")
+            
+            enable_sma = st.checkbox("啟動 【短期 > 長期】 均線過濾", value=True)
+            if enable_sma:
+                # 使用 sub-columns 讓參數選擇更緊湊
+                sub1, sub2 = st.columns(2)
+                sma_short = sub1.selectbox("短期 SMA", [10, 20, 25, 50], index=2)
+                sma_long = sub2.selectbox("長期 SMA", [50, 100, 125, 150, 200], index=2)
+                st.caption(f"✅ 條件：SMA `{sma_short}` 必須高於 SMA `{sma_long}`")
+            else:
+                sma_short, sma_long = 25, 125 # 預設值以防出錯
             
         with col2:
             st.markdown("#### 2️⃣ RS 動能 (對比納指)")
@@ -269,11 +284,18 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
         st.markdown("---")
         start_scan = st.button("🚀 執行全市場精確掃描", use_container_width=True, type="primary")
 
-    # --- 7. 主程式邏輯 (僅在點擊按鈕後執行) ---
+    # --- 7. 主程式邏輯與進度條 ---
     if start_scan:
-        with st.spinner("獲取 Finviz 基礎數據..."):
-            raw_data = fetch_finviz_data()
+        st.markdown("### ⏳ 系統運算進度")
+        
+        # 建立 UI 空白容器，用於動態顯示進度和文字
+        status_text = st.empty()
+        progress_bar = st.progress(0)
 
+        status_text.markdown("**階段 1/3**: 正在連接 Finviz 獲取基礎股票名單...")
+        raw_data = fetch_finviz_data()
+        progress_bar.progress(100) # 完成階段 1
+        
         if not raw_data.empty:
             df_processed = raw_data.copy()
             df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
@@ -281,27 +303,43 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
             
             if enable_rs or enable_macd or enable_sma:
                 target_tickers = final_df['Ticker'].tolist()
-                with st.spinner(f"正在全速下載並運算 {len(target_tickers)} 隻股票的各項指標 (資料量增至 1 年)... 預計需時數分鐘 ☕"):
-                    indicators_results = calculate_all_indicators(target_tickers)
+                
+                # 重置進度條進入階段 2
+                progress_bar.progress(0)
+                indicators_results = calculate_all_indicators(
+                    target_tickers, 
+                    sma_short, 
+                    sma_long, 
+                    _progress_bar=progress_bar, 
+                    _status_text=status_text
+                )
+                
+                final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('RS', '無'))
+                final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('MACD', '無'))
+                final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('SMA_Trend', False))
+                
+                # 過濾邏輯
+                if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
+                if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
+                if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
+                
+                if len(final_df) > 0:
+                    # 重置進度條進入階段 3
+                    progress_bar.progress(0)
+                    fund_df = fetch_fundamentals(
+                        final_df['Ticker'].tolist(), 
+                        _progress_bar=progress_bar, 
+                        _status_text=status_text
+                    )
+                    final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
                     
-                    final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('RS', '無'))
-                    final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('MACD', '無'))
-                    final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('SMA_Trend', False))
-                    
-                    if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
-                    if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
-                    if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
-                    
-                    if len(final_df) > 0:
-                        st.success(f"✅ 動能篩選完成！成功尋找到 {len(final_df)} 隻符合你完美設定的股票。")
-                        
-                        # --- 【獲取 4 季歷史基本面】 ---
-                        with st.spinner(f"正在獲取 {len(final_df)} 隻股票的最新 4 季財報序列 (為防封鎖，預計需時 10-30 秒)... 📊"):
-                            fund_df = fetch_fundamentals(final_df['Ticker'].tolist())
-                            final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
-                            
-                    else:
-                        st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
+                    status_text.markdown("✅ **全市場掃描與過濾完成！**")
+                    progress_bar.progress(100)
+                    st.success(f"成功尋找到 {len(final_df)} 隻符合你完美設定的潛力股票。")
+                else:
+                    status_text.markdown("✅ **全市場掃描完成！**")
+                    progress_bar.progress(100)
+                    st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
 
             st.markdown("---")
             
