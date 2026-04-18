@@ -34,7 +34,7 @@ def fetch_finviz_data():
 # --- 4. yfinance 批量計算引擎 (包含 RS, MACD 及自訂 SMA 趨勢) ---
 # 注意：加入底線 _ 開頭的變數，不會被 Streamlit cache 追蹤，容許我們傳入 UI 元件
 @st.cache_data(ttl=3600, show_spinner=False)
-def calculate_all_indicators(tickers, sma_short, sma_long, batch_size=200, _progress_bar=None, _status_text=None):
+def calculate_all_indicators(tickers, sma_short, sma_long, require_close, batch_size=200, _progress_bar=None, _status_text=None):
     results = {} 
     
     benchmarks_to_try = ["QQQ", "^NDX", "QQQM"]
@@ -86,9 +86,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, batch_size=200, _prog
                     stock_price = close_prices[ticker].dropna()
                     
                     # 判斷所需的最低數據天數
-                    required_len_short = 1 if sma_short == "Close" else sma_short
-                    required_len_long = 1 if sma_long == "Close" else sma_long
-                    max_req_len = max(required_len_short, required_len_long)
+                    max_req_len = max(sma_short, sma_long)
                     
                     # 確保有足夠長度的數據來計算使用者選擇的指標
                     if len(stock_price) > max_req_len + 1: 
@@ -123,18 +121,22 @@ def calculate_all_indicators(tickers, sma_short, sma_long, batch_size=200, _prog
                                 if abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05:
                                     macd_stage = "🎯 即將突破 (<5%)"
                                     
-                        # 動態 SMA 趨勢判斷 (支援 Close)
-                        if sma_short == "Close":
-                            sma_s_line = stock_price
-                        else:
-                            sma_s_line = stock_price.rolling(window=sma_short).mean()
+                        # 動態 SMA 趨勢判斷 (支援獨立 Close 條件)
+                        sma_s_line = stock_price.rolling(window=sma_short).mean()
+                        sma_l_line = stock_price.rolling(window=sma_long).mean()
+                        
+                        latest_close = float(stock_price.iloc[-1])
+                        latest_sma_s = float(sma_s_line.iloc[-1])
+                        latest_sma_l = float(sma_l_line.iloc[-1])
+                        
+                        # 基礎條件：短期均線 > 長期均線
+                        trend_ok = latest_sma_s > latest_sma_l
+                        
+                        # 疊加條件：若勾選了要求 Close，則最新股價必須高於短期均線
+                        if require_close:
+                            trend_ok = trend_ok and (latest_close > latest_sma_s)
                             
-                        if sma_long == "Close":
-                            sma_l_line = stock_price
-                        else:
-                            sma_l_line = stock_price.rolling(window=sma_long).mean()
-                            
-                        sma_trend = float(sma_s_line.iloc[-1]) > float(sma_l_line.iloc[-1])
+                        sma_trend = trend_ok
                             
                 results[ticker] = {'RS': rs_stage, 'MACD': macd_stage, 'SMA_Trend': sma_trend}
                 
@@ -266,15 +268,23 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
             st.markdown("#### 1️⃣ 基礎與趨勢")
             min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
             
-            enable_sma = st.checkbox("啟動 【短期 > 長期】 趨勢過濾", value=True)
+            enable_sma = st.checkbox("啟動 【趨勢排列】 過濾", value=True)
             if enable_sma:
-                # 使用 sub-columns 讓參數選擇更緊湊，並加入 Close
+                # 分離 SMA 與 Close，讓邏輯更清晰
                 sub1, sub2 = st.columns(2)
-                sma_short = sub1.selectbox("短期指標", ["Close", 10, 20, 25, 50], index=3) # 預設 25
-                sma_long = sub2.selectbox("長期指標", ["Close", 50, 100, 125, 150, 200], index=3) # 預設 125
-                st.caption(f"✅ 條件：`{sma_short}` 必須高於 `{sma_long}`")
+                sma_short = sub1.selectbox("短期 SMA", [10, 20, 25, 50], index=2) # 預設 25
+                sma_long = sub2.selectbox("長期 SMA", [50, 100, 125, 150, 200], index=2) # 預設 125
+                
+                # 獨立的 Close 過濾開關
+                require_close = st.checkbox("要求 Close > 短期 SMA", value=True)
+                
+                # 動態顯示文字狀態
+                if require_close:
+                    st.caption(f"✅ 條件：`Close` > SMA `{sma_short}` > SMA `{sma_long}`")
+                else:
+                    st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}`")
             else:
-                sma_short, sma_long = 25, 125 # 預設值以防出錯
+                sma_short, sma_long, require_close = 25, 125, False # 預設值以防出錯
             
         with col2:
             st.markdown("#### 2️⃣ RS 動能 (對比納指)")
@@ -323,6 +333,7 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
                     target_tickers, 
                     sma_short, 
                     sma_long, 
+                    require_close, # 新增傳入的 Close 條件
                     _progress_bar=progress_bar, 
                     _status_text=status_text
                 )
