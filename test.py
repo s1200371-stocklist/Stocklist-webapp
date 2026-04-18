@@ -34,7 +34,7 @@ def fetch_finviz_data():
 # --- 4. yfinance 批量計算引擎 (包含 RS, MACD 及自訂 SMA 趨勢) ---
 # 注意：加入底線 _ 開頭的變數，不會被 Streamlit cache 追蹤，容許我們傳入 UI 元件
 @st.cache_data(ttl=3600, show_spinner=False)
-def calculate_all_indicators(tickers, sma_short, sma_long, require_close, batch_size=200, _progress_bar=None, _status_text=None):
+def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batch_size=200, _progress_bar=None, _status_text=None):
     results = {} 
     
     benchmarks_to_try = ["QQQ", "^NDX", "QQQM"]
@@ -121,7 +121,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, require_close, batch_
                                 if abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05:
                                     macd_stage = "🎯 即將突破 (<5%)"
                                     
-                        # 動態 SMA 趨勢判斷 (支援獨立 Close 條件)
+                        # 動態 SMA 趨勢判斷
                         sma_s_line = stock_price.rolling(window=sma_short).mean()
                         sma_l_line = stock_price.rolling(window=sma_long).mean()
                         
@@ -132,9 +132,13 @@ def calculate_all_indicators(tickers, sma_short, sma_long, require_close, batch_
                         # 基礎條件：短期均線 > 長期均線
                         trend_ok = latest_sma_s > latest_sma_l
                         
-                        # 疊加條件：若勾選了要求 Close，則最新股價必須高於短期均線
-                        if require_close:
+                        # 疊加條件：根據用戶選擇的 Close 條件進行過濾
+                        if close_condition == "Close > 短期 SMA":
                             trend_ok = trend_ok and (latest_close > latest_sma_s)
+                        elif close_condition == "Close > 長期 SMA":
+                            trend_ok = trend_ok and (latest_close > latest_sma_l)
+                        elif close_condition == "Close > 短期及長期 SMA":
+                            trend_ok = trend_ok and (latest_close > latest_sma_s) and (latest_close > latest_sma_l)
                             
                         sma_trend = trend_ok
                             
@@ -275,16 +279,21 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
                 sma_short = sub1.selectbox("短期 SMA", [10, 20, 25, 50], index=2) # 預設 25
                 sma_long = sub2.selectbox("長期 SMA", [50, 100, 125, 150, 200], index=2) # 預設 125
                 
-                # 獨立的 Close 過濾開關
-                require_close = st.checkbox("要求 Close > 短期 SMA", value=True)
+                # 自由選擇 Close 條件
+                close_options = ["不選擇", "Close > 短期 SMA", "Close > 長期 SMA", "Close > 短期及長期 SMA"]
+                close_condition = st.selectbox("額外 Close 條件", options=close_options, index=1)
                 
                 # 動態顯示文字狀態
-                if require_close:
-                    st.caption(f"✅ 條件：`Close` > SMA `{sma_short}` > SMA `{sma_long}`")
-                else:
+                if close_condition == "不選擇":
                     st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}`")
+                elif close_condition == "Close > 短期 SMA":
+                    st.caption(f"✅ 條件：`Close` > SMA `{sma_short}` > SMA `{sma_long}`")
+                elif close_condition == "Close > 長期 SMA":
+                    st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}` 且 `Close` > SMA `{sma_long}`")
+                elif close_condition == "Close > 短期及長期 SMA":
+                    st.caption(f"✅ 條件：`Close` > SMA `{sma_short}` > SMA `{sma_long}` 且 `Close` > 雙均線")
             else:
-                sma_short, sma_long, require_close = 25, 125, False # 預設值以防出錯
+                sma_short, sma_long, close_condition = 25, 125, "不選擇" # 預設值以防出錯
             
         with col2:
             st.markdown("#### 2️⃣ RS 動能 (對比納指)")
@@ -333,7 +342,7 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
                     target_tickers, 
                     sma_short, 
                     sma_long, 
-                    require_close, # 新增傳入的 Close 條件
+                    close_condition, # 新增傳入的自由選擇 Close 條件
                     _progress_bar=progress_bar, 
                     _status_text=status_text
                 )
