@@ -3,3 +3,4 @@ pandas
 finvizfinance
 yfinance
 requests
+duckduckgo-search
