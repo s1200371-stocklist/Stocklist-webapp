@@ -5,7 +5,7 @@ import yfinance as yf
 import datetime
 import time
 import concurrent.futures
-from duckduckgo_search import DDGS
+import requests # 新增 requests 用於穩定調用免費 AI API
 
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title="🚀 美股量化與 AI 分析平台", page_icon="📈", layout="wide")
@@ -229,22 +229,37 @@ def fetch_top_news():
         if spy.news: news_items.extend(spy.news[:6])
         if qqq.news: news_items.extend(qqq.news[:6])
             
-        seen_links = set()
+        seen_titles = set()
         formatted_news = ""
+        
         for item in news_items:
-            link = item.get('link', '')
-            if link not in seen_links:
-                seen_links.add(link)
-                title = item.get('title', '無標題')
-                publisher = item.get('publisher', '未知來源')
+            # 【修復 Error 2】兼容 yfinance 最新版的嵌套 content 格式
+            title = item.get('title', '')
+            publisher = item.get('publisher', '')
+            
+            if 'content' in item:
+                content = item['content']
+                title = content.get('title', title)
+                provider = content.get('provider', {})
+                if isinstance(provider, dict):
+                    publisher = provider.get('displayName', publisher)
+                elif isinstance(provider, str):
+                    publisher = provider
+                    
+            title = title or '無標題'
+            publisher = publisher or '未知來源'
+            
+            if title not in seen_titles and title != '無標題':
+                seen_titles.add(title)
                 formatted_news += f"- [{publisher}] {title}\n"
+                
         return formatted_news
     except Exception as e:
-        return ""
+        return f"新聞獲取錯誤: {e}"
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_with_free_ai(news_text):
-    """調用 DuckDuckGo Search 的免費 LLM 接口進行語意分析與繁體中文總結"""
+    """調用 Pollinations AI 免費接口，穩定解決 DuckDuckGo 經常失效的問題"""
     prompt = f"""
     你是華爾街的頂級分析師。請閱讀以下今日美股新聞標題：
     
@@ -255,10 +270,26 @@ def analyze_with_free_ai(news_text):
     2. 【🚀 潛力股觀察】：列出 3 隻從新聞中發現的最具潛力股票代號 (Ticker)，並用一句話解釋看好理由。若無明確個股，請推斷板塊龍頭。
     """
     try:
-        with DDGS() as ddgs:
-            return ddgs.chat(prompt, model='gpt-4o-mini')
+        # 【修復 Error 1】徹底替換不穩定的 DDGS，改用完全免費且免 API Key 的 Pollinations 接口
+        response = requests.post(
+            "https://text.pollinations.ai/",
+            json={
+                "messages": [
+                    {"role": "system", "content": "You are a professional Wall Street analyst. Please always output in Traditional Chinese (繁體中文)."},
+                    {"role": "user", "content": prompt}
+                ],
+                "model": "openai" # 預設調用穩定的 OpenAI 系列模型
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            return response.text
+        else:
+            return f"⚠️ 免費 AI 接口狀態異常 (HTTP {response.status_code})，請稍後再試。"
+            
     except Exception as e:
-        return f"⚠️ AI 分析暫時無法使用，請稍後再試。錯誤資訊: {e}"
+        return f"⚠️ AI 分析發生錯誤，請檢查網路狀態。錯誤資訊: {e}"
 
 
 # --- 7. UI 側邊欄與導航 ---
@@ -389,7 +420,7 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
 # 【功能 B：AI 新聞分析】
 elif app_mode == "📰 每日 AI 新聞潛力分析":
     st.title("📰 每日 AI 新聞潛力分析")
-    st.markdown("利用零成本的 AI 模型，自動為你閱讀並解讀今日華爾街最熱門的財經新聞，提煉核心市場敘事，並為你發掘 **Top 3 潛力爆發股**！")
+    st.markdown("利用穩定且零成本的 AI 模型接口，自動為你閱讀並解讀今日華爾街最熱門的財經新聞，提煉核心市場敘事，並為你發掘 **Top 3 潛力爆發股**！")
     st.info("💡 運作邏輯：系統會實時抓取 SPY (標普) 與 QQQ (納指) 的最新動態，交由 AI 進行全繁體中文的深層語意分析。")
     
     if st.button("🚀 獲取今日 AI 洞察", type="primary", use_container_width=True):
@@ -401,7 +432,7 @@ elif app_mode == "📰 每日 AI 新聞潛力分析":
             with st.expander("📄 點擊查看 AI 正在閱讀的英文原生新聞標題"):
                 st.markdown(news_data)
                 
-            with st.spinner("🧠 AI 正在進行深層語意分析與繁體中文總結... (預計需時 10-20 秒)"):
+            with st.spinner("🧠 AI 正在進行深層語意分析與繁體中文總結... (預計需時 5-15 秒)"):
                 ai_result = analyze_with_free_ai(news_data)
                 
             st.markdown("---")
