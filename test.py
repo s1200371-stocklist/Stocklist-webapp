@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
 from finvizfinance.screener.overview import Overview
+from finvizfinance.quote import finvizfinance
 import yfinance as yf
 import datetime
 import time
 import concurrent.futures
-import requests # 新增 requests 用於穩定調用免費 AI API
+import requests
+import random
 
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title="🚀 美股量化與 AI 分析平台", page_icon="📈", layout="wide")
@@ -138,7 +140,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                 
         except Exception as e:
             for t in batch_tickers: results[t] = {'RS': "無", 'MACD': "無", 'SMA_Trend': False}
-        time.sleep(0.5) 
+        time.sleep(1 + random.random()) # 增加隨機延遲避免被封
         
     return results
 
@@ -146,7 +148,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
     def fetch_single(t):
-        time.sleep(0.5)
+        time.sleep(0.5 + random.random())
         for attempt in range(3):
             try:
                 if attempt > 0: time.sleep(1.5)
@@ -222,44 +224,54 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
 # --- 6. AI 引擎：新聞獲取與免費 LLM 分析 ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_top_news():
-    """從 yfinance 抓取大盤 (SPY, QQQ) 的最新熱門新聞"""
+    """從 yfinance 抓取新聞，若被 Rate Limited 則嘗試 Finviz 備援"""
+    news_items = []
+    seen_titles = set()
+    formatted_news = ""
+    
+    # 嘗試 1: yfinance
     try:
-        spy, qqq = yf.Ticker("SPY"), yf.Ticker("QQQ")
-        news_items = []
-        if spy.news: news_items.extend(spy.news[:6])
-        if qqq.news: news_items.extend(qqq.news[:6])
-            
-        seen_titles = set()
-        formatted_news = ""
-        
-        for item in news_items:
-            # 【修復 Error 2】兼容 yfinance 最新版的嵌套 content 格式
-            title = item.get('title', '')
-            publisher = item.get('publisher', '')
-            
-            if 'content' in item:
-                content = item['content']
-                title = content.get('title', title)
-                provider = content.get('provider', {})
-                if isinstance(provider, dict):
-                    publisher = provider.get('displayName', publisher)
-                elif isinstance(provider, str):
-                    publisher = provider
-                    
-            title = title or '無標題'
-            publisher = publisher or '未知來源'
-            
-            if title not in seen_titles and title != '無標題':
-                seen_titles.add(title)
-                formatted_news += f"- [{publisher}] {title}\n"
-                
-        return formatted_news
+        tickers_to_check = ["SPY", "QQQ"]
+        for t in tickers_to_check:
+            tkr = yf.Ticker(t)
+            if tkr.news:
+                for item in tkr.news[:5]:
+                    title = item.get('title', '')
+                    if 'content' in item:
+                        title = item['content'].get('title', title)
+                    if title and title not in seen_titles:
+                        publisher = item.get('publisher', 'Finance News')
+                        seen_titles.add(title)
+                        news_items.append(f"- [{publisher}] {title}")
     except Exception as e:
-        return f"新聞獲取錯誤: {e}"
+        if "Too Many Requests" in str(e):
+            st.warning("⚠️ Yahoo Finance 目前限制訪問，正在切換至 Finviz 備援新聞源...")
+        
+    # 嘗試 2: Finviz 備援 (如果 yfinance 資料不足)
+    if len(news_items) < 3:
+        try:
+            for t in ["SPY", "QQQ"]:
+                stock = finvizfinance(t)
+                news = stock.ticker_news()
+                if not news.empty:
+                    for _, row in news.head(5).iterrows():
+                        title = row['Title']
+                        if title not in seen_titles:
+                            seen_titles.add(title)
+                            news_items.append(f"- [{row['Source']}] {title}")
+        except Exception:
+            pass
+
+    if news_items:
+        return "\n".join(news_items)
+    return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_with_free_ai(news_text):
-    """調用 Pollinations AI 免費接口，穩定解決 DuckDuckGo 經常失效的問題"""
+    """調用 Pollinations AI 免費接口"""
+    if not news_text:
+        return "⚠️ 目前無法獲取新聞數據（速率限制中）。建議您稍後再試，或手動貼入感興趣的新聞標題進行分析。"
+
     prompt = f"""
     你是華爾街的頂級分析師。請閱讀以下今日美股新聞標題：
     
@@ -270,7 +282,6 @@ def analyze_with_free_ai(news_text):
     2. 【🚀 潛力股觀察】：列出 3 隻從新聞中發現的最具潛力股票代號 (Ticker)，並用一句話解釋看好理由。若無明確個股，請推斷板塊龍頭。
     """
     try:
-        # 【修復 Error 1】徹底替換不穩定的 DDGS，改用完全免費且免 API Key 的 Pollinations 接口
         response = requests.post(
             "https://text.pollinations.ai/",
             json={
@@ -278,7 +289,7 @@ def analyze_with_free_ai(news_text):
                     {"role": "system", "content": "You are a professional Wall Street analyst. Please always output in Traditional Chinese (繁體中文)."},
                     {"role": "user", "content": prompt}
                 ],
-                "model": "openai" # 預設調用穩定的 OpenAI 系列模型
+                "model": "openai"
             },
             timeout=30
         )
@@ -289,7 +300,7 @@ def analyze_with_free_ai(news_text):
             return f"⚠️ 免費 AI 接口狀態異常 (HTTP {response.status_code})，請稍後再試。"
             
     except Exception as e:
-        return f"⚠️ AI 分析發生錯誤，請檢查網路狀態。錯誤資訊: {e}"
+        return f"⚠️ AI 分析發生錯誤。錯誤資訊: {e}"
 
 
 # --- 7. UI 側邊欄與導航 ---
@@ -420,30 +431,28 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
 # 【功能 B：AI 新聞分析】
 elif app_mode == "📰 每日 AI 新聞潛力分析":
     st.title("📰 每日 AI 新聞潛力分析")
-    st.markdown("利用穩定且零成本的 AI 模型接口，自動為你閱讀並解讀今日華爾街最熱門的財經新聞，提煉核心市場敘事，並為你發掘 **Top 3 潛力爆發股**！")
-    st.info("💡 運作邏輯：系統會實時抓取 SPY (標普) 與 QQQ (納指) 的最新動態，交由 AI 進行全繁體中文的深層語意分析。")
+    st.markdown("自動閱讀並解讀今日華爾街最熱門的新聞。")
     
     if st.button("🚀 獲取今日 AI 洞察", type="primary", use_container_width=True):
-        with st.spinner("⏳ 正在從 Yahoo Finance 抓取全球最新金融頭條..."):
+        with st.spinner("⏳ 正在嘗試從多個渠道獲取最新財經頭條..."):
             news_data = fetch_top_news()
             
         if news_data:
-            st.success("✅ 成功獲取最新華爾街財經資訊！")
-            with st.expander("📄 點擊查看 AI 正在閱讀的英文原生新聞標題"):
+            st.success("✅ 成功獲取最新財經資訊！")
+            with st.expander("📄 查看新聞標題"):
                 st.markdown(news_data)
                 
-            with st.spinner("🧠 AI 正在進行深層語意分析與繁體中文總結... (預計需時 5-15 秒)"):
+            with st.spinner("🧠 AI 正在進行深層語意分析..."):
                 ai_result = analyze_with_free_ai(news_data)
                 
             st.markdown("---")
             st.markdown("### 🤖 華爾街 AI 洞察報告")
             with st.container(border=True):
                 st.markdown(ai_result)
-            st.caption("聲明：以上分析由免費 AI 模型生成，僅供觀察市場熱點參考，不構成任何投資建議。")
         else:
-            st.error("❌ 未能獲取最新新聞數據，請稍後再試。")
+            st.error("❌ 目前所有新聞源均返回速率限制 (Too Many Requests)。這通常發生在交易時段頻繁請求時，請於 10-15 分鐘後再試。")
 
 # 【功能 C：開發中】
 else:
     st.title(app_mode)
-    st.info("這個強大的量化選股功能正在開發中，請先使用左側導航欄的「🎯 RS x MACD 動能狙擊手」或「📰 每日 AI 新聞潛力分析」！")
+    st.info("功能開發中，請先使用其他可用模組。")
