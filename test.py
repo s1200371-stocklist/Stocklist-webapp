@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import pandas as pd
 from finvizfinance.screener.overview import Overview
@@ -499,4 +499,4 @@ elif app_mode == "🕵️ 另類數據雷達":
                     st.markdown(res)
 
 
-```
+
