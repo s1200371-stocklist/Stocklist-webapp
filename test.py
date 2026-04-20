@@ -20,9 +20,14 @@ def get_headers():
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0'
     ]
-    return {'User-Agent': random.choice(user_agents)}
+    return {
+        'User-Agent': random.choice(user_agents),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    }
 
 def convert_mcap_to_float(val):
     try:
@@ -62,21 +67,51 @@ def clean_ai_response(text):
     return text.strip()
 
 # ==========================================
-#        模組 C：另類數據雷達 (防封鎖修復版)
+#        模組 C：另類數據雷達 (雙重防封鎖修復版)
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
-    """抓取 Reddit WSB 熱門股票 (加入重試與 Header)"""
+    """抓取 Reddit WSB 熱門股票 (主 API + 原生 Reddit 備援)"""
+    
+    # 嘗試 1: Tradestie API
     url = "https://tradestie.com/api/v1/apps/reddit"
-    for _ in range(3):
+    for _ in range(2):
         try:
-            response = requests.get(url, headers=get_headers(), timeout=15)
+            response = requests.get(url, headers=get_headers(), timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if isinstance(data, list) and len(data) > 0:
                     return pd.DataFrame(data)
             time.sleep(1)
         except: continue
+        
+    # 嘗試 2: 原生 Reddit JSON 解析 (最強備援方案)
+    try:
+        reddit_url = "https://www.reddit.com/r/wallstreetbets/hot.json?limit=50"
+        res = requests.get(reddit_url, headers=get_headers(), timeout=15)
+        if res.status_code == 200:
+            posts = res.json().get('data', {}).get('children', [])
+            tickers = {}
+            ignore_words = {'WSB', 'YOLO', 'MOON', 'HOLD', 'PUMP', 'DROP', 'CALL', 'PUTS', 'EDIT', 'LOSS', 'GAIN', 'BULL', 'BEAR'}
+            
+            for p in posts:
+                title = p.get('data', {}).get('title', '')
+                # 簡單提取 $TICKER 或 3-4 個大楷字母嘅字作為股票代號
+                words = re.findall(r'\$?[A-Z]{3,4}\b', title)
+                for w in words:
+                    clean_w = w.replace('$', '')
+                    if clean_w not in ignore_words:
+                        tickers[clean_w] = tickers.get(clean_w, 0) + 1
+            
+            if tickers:
+                # 將結果轉換成類似 Tradestie 嘅格式
+                df_fallback = pd.DataFrame([
+                    {'ticker': k, 'sentiment': 'Bullish' if v > 1 else 'Neutral', 'no_of_comments': v * 25}
+                    for k, v in sorted(tickers.items(), key=lambda item: item[1], reverse=True)[:15]
+                ])
+                return df_fallback
+    except: pass
+    
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -530,7 +565,7 @@ elif app_mode == "🕵️ 另類數據雷達":
             r_df = fetch_reddit_sentiment()
         if not r_df.empty:
             st.dataframe(r_df[['ticker', 'sentiment', 'no_of_comments']].head(15), use_container_width=True, hide_index=True)
-        else: st.warning("⚠️ Reddit API 暫時拒絕連線，請稍後再試。")
+        else: st.warning("⚠️ 暫時攞唔到 Reddit 數據。系統已經為你開啟原生 JSON 備援方案。")
             
     with col_r:
         st.subheader("🏛️ 近期高層 Insider 真金白銀買入")
