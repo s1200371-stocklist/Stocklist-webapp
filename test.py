@@ -27,10 +27,10 @@ def convert_mcap_to_float(val):
         return 0.0
 
 def clean_ai_response(text):
-    """終極 AI 輸出清洗器：過濾所有 JSON 格式、英文思考過程與代碼殘留"""
+    """終極 AI 輸出清洗器：物理截斷所有自言自語、JSON 同英文草稿"""
     if not isinstance(text, str): return str(text)
     
-    # 1. 如果 AI 回傳了 JSON 結構，嘗試提取內容
+    # 1. 嘗試解析 JSON (防禦 API 回傳原始 JSON)
     text = text.strip()
     if text.startswith('{'):
         try:
@@ -39,13 +39,21 @@ def clean_ai_response(text):
             elif 'choices' in parsed: text = parsed['choices'][0]['message']['content']
         except: pass
 
-    # 2. 移除新一代推理模型 (如 R1) 的 <think> 思考標籤
+    # 2. 移除 <think> 標籤
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     
-    # 3. 移除殘留的 JSON 字符串特徵 (例如 {"role":"assistant","reasoning_content":...)
-    text = re.sub(r'^\{"role":"assistant","reasoning_content":".*?","content":"', '', text, flags=re.DOTALL)
+    # 3. 【終極物理截斷】：尋找報告嘅真正起點，將前面所有廢話 (Count, Write, Let's 等) 刪除
+    marker_1 = "【📉"
+    marker_2 = "【近月市場"
+    
+    if marker_1 in text:
+        text = text[text.find(marker_1):]
+    elif marker_2 in text:
+        text = text[text.find(marker_2):]
+        
+    # 移除可能殘留嘅 JSON 結尾符號
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
-    text = text.replace('\\n', '\n').replace('\\"', '"') # 修復轉義字符
+    text = text.replace('\\n', '\n').replace('\\"', '"') 
     
     return text.strip()
 
@@ -57,7 +65,7 @@ def fetch_finviz_data():
         f_screener.set_filter(filters_dict={'Market Cap.': '+Small (over $300mln)'})
         return f_screener.screener_view()
     except Exception as e:
-        st.error(f"連線至 Finviz 失敗，請稍後再試: {e}")
+        st.error(f"⚠️ 連唔到 Finviz，請陣間再試: {e}")
         return pd.DataFrame()
 
 # --- 4. 量化引擎：批量計算 (RS, MACD, SMA, Close) ---
@@ -80,7 +88,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
         except Exception: continue
             
     if bench_data.empty: 
-        st.error("⚠️ 無法下載納指基準，請稍後再試。")
+        st.error("⚠️ 下載唔到納指基準數據，請檢查網絡。")
         return results
 
     if bench_data.index.tz is not None:
@@ -91,7 +99,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
     for i in range(0, total_tickers, batch_size):
         batch_tickers = tickers[i:i+batch_size]
         
-        if _status_text: _status_text.markdown(f"**階段 2/3**: 正在下載並運算技術指標... (`{min(i+batch_size, total_tickers)}` / `{total_tickers}`)")
+        if _status_text: _status_text.markdown(f"**階段 2/3**: 計緊技術指標... (`{min(i+batch_size, total_tickers)}` / `{total_tickers}`)")
         if _progress_bar: _progress_bar.progress(min(1.0, (i + batch_size) / total_tickers))
             
         try:
@@ -116,8 +124,8 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                         
                         latest_rs, prev_rs = float(rs_line.iloc[-1]), float(rs_line.iloc[-2])
                         latest_rs_ma, prev_rs_ma = float(rs_ma_25.iloc[-1]), float(rs_ma_25.iloc[-2])
-                        if latest_rs > latest_rs_ma: rs_stage = "🚀 剛剛突破" if prev_rs <= prev_rs_ma else "🔥 已經突破"
-                        elif latest_rs >= latest_rs_ma * 0.95: rs_stage = "🎯 即將突破 (<5%)"
+                        if latest_rs > latest_rs_ma: rs_stage = "🚀 啱啱突破" if prev_rs <= prev_rs_ma else "🔥 已經突破"
+                        elif latest_rs >= latest_rs_ma * 0.95: rs_stage = "🎯 就快突破 (<5%)"
                         
                         ema12 = stock_price.ewm(span=12, adjust=False).mean()
                         ema26 = stock_price.ewm(span=26, adjust=False).mean()
@@ -127,9 +135,9 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                         latest_macd, prev_macd = float(macd_line.iloc[-1]), float(macd_line.iloc[-2])
                         latest_sig, prev_sig = float(signal_line.iloc[-1]), float(signal_line.iloc[-2])
                         
-                        if latest_macd > latest_sig: macd_stage = "🚀 剛剛突破" if prev_macd <= prev_sig else "🔥 已經突破"
+                        if latest_macd > latest_sig: macd_stage = "🚀 啱啱突破" if prev_macd <= prev_sig else "🔥 已經突破"
                         else:
-                            if abs(latest_sig) > 0.0001 and abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05: macd_stage = "🎯 即將突破 (<5%)"
+                            if abs(latest_sig) > 0.0001 and abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05: macd_stage = "🎯 就快突破 (<5%)"
                                     
                         sma_s_line = stock_price.rolling(window=sma_short).mean()
                         sma_l_line = stock_price.rolling(window=sma_long).mean()
@@ -215,7 +223,7 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
             res = future.result()
             if res: results.append(res)
             completed += 1
-            if _status_text: _status_text.markdown(f"**階段 3/3**: 正在獲取最新財報數據... (`{completed}` / `{total_tickers}`)")
+            if _status_text: _status_text.markdown(f"**階段 3/3**: 攞緊最新財報數據... (`{completed}` / `{total_tickers}`)")
             if _progress_bar: _progress_bar.progress(min(1.0, completed / total_tickers))
     
     if not results: return empty_df            
@@ -224,11 +232,11 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
 # --- 6. AI 引擎：深度內文新聞獲取與清洗 ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_top_news():
-    """獲取新聞並提取【標題 + 摘要內文】，返回可作為 UI 表格的 list of dicts"""
+    """獲取新聞並提取【標題 + 摘要內文】，返回 list of dicts"""
     news_items = []
     seen_titles = set()
     
-    # 來源 1: Finviz (只有標題)
+    # 來源 1: Finviz
     try:
         for t in ["SPY", "QQQ"]:
             stock = finvizfinance(t)
@@ -238,18 +246,18 @@ def fetch_top_news():
                     title = row['Title']
                     if title not in seen_titles:
                         seen_titles.add(title)
-                        news_items.append({"來源": row['Source'], "新聞標題": title, "內文摘要": "純標題 (來源自 Finviz)"})
+                        news_items.append({"來源": row['Source'], "新聞標題": title, "內文摘要": "（來自 Finviz 標題）"})
     except Exception: pass
 
     # 來源 2: yfinance (提取深度摘要)
     try:
-        tickers_to_check = ["SPY", "QQQ", "NVDA", "AAPL"] # 增加科技龍頭擴大視野
+        tickers_to_check = ["SPY", "QQQ", "NVDA", "AAPL"]
         for t in tickers_to_check:
             tkr = yf.Ticker(t)
             if tkr.news:
                 for item in tkr.news[:6]:
                     title = item.get('title', '')
-                    summary = item.get('summary', '') # 提取摘要
+                    summary = item.get('summary', '') 
                     publisher = item.get('publisher', 'Finance News')
                     
                     if 'content' in item:
@@ -263,43 +271,41 @@ def fetch_top_news():
                             
                     if title and title not in seen_titles:
                         seen_titles.add(title)
-                        clean_summary = summary.replace('\n', ' ')[:200] + "..." if len(summary) > 200 else summary
+                        clean_summary = summary.replace('\n', ' ')[:250] + "..." if len(summary) > 250 else summary
                         news_items.append({"來源": publisher, "新聞標題": title, "內文摘要": clean_summary if clean_summary else "無提供內文"})
     except Exception as e:
         if "Too Many Requests" in str(e):
-            st.warning("⚠️ Yahoo Finance 限制訪問，目前已盡力調用 Finviz 新聞庫。")
+            st.warning("⚠️ Yahoo Finance 限制咗訪問，目前盡力用緊 Finviz 新聞庫。")
 
-    return news_items # 回傳 List[Dict] 以便製作靚 UI
+    return news_items
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_with_free_ai(news_list):
-    """將含有【內文】的新聞餵給 AI，並嚴格清洗輸出"""
+    """將含有【內文】的新聞餵給 AI，並嚴格要求廣東話輸出"""
     if not news_list:
-        return "⚠️ 目前無法獲取新聞數據。請稍後再試。"
+        return "⚠️ 目前攞唔到新聞數據，請遲啲再試下。"
 
-    # 將 List[Dict] 轉換為給 AI 讀的純文字
     news_text = ""
     for idx, item in enumerate(news_list):
         news_text += f"{idx+1}. [{item['來源']}] 標題：{item['新聞標題']}\n摘要：{item['內文摘要']}\n\n"
 
-    # 強制性的鐵血指令，防止任何 JSON 洩漏
     system_prompt = """
-    你是華爾街頂級金融分析師。
+    你係一位身處香港中環嘅頂級金融分析師。
     【絕對強制規範】：
-    1. 你只能輸出繁體中文 (Traditional Chinese)。
-    2. 絕對禁止輸出任何 JSON、字典、編程代碼或 `{}` 括號結構。
-    3. 絕對禁止輸出你的思考過程或英文自言自語 (例如 'Let's analyze', 'reasoning_content')。
-    4. 請直接且僅僅輸出 Markdown 排版格式的分析報告。
+    1. 你必須用「香港廣東話口語（Cantonese）」寫呢份報告（例如用「啲」、「嘅」、「咁」、「升市」、「大戶」等字眼）。
+    2. 絕對唔可以輸出任何 JSON、字典、編程代碼、或者 `{}` 括號結構。
+    3. 絕對唔可以輸出你嘅思考過程、英文草稿 (例如 'Let's analyze', 'Write:', 'Count:', 'reasoning_content')。
+    4. 請直接輸出 Markdown 排版格式嘅分析報告，開頭第一句必須準確無誤地寫上：「【📉 近月市場焦點總結】」。
     """
     
     user_prompt = f"""
-    請閱讀以下包含「標題與內文摘要」的近月美股新聞：
+    請睇下呢堆近月嘅美股新聞同內文摘要：
     
     {news_text}
     
-    請以專業、精煉的口吻完成：
-    1. 【📉 近月市場焦點總結】：綜合新聞內文，用 150-200 字總結大盤走勢與核心情緒驅動因素。
-    2. 【🚀 潛在機會股票全面掃描】：根據新聞內文提到的基本面或消息面，列出「所有」具備潛力或轉機的股票代號 (Ticker)。請為每一隻股票用 1-2 句話解釋看好理由。
+    請用專業又貼地嘅廣東話完成：
+    1. 【📉 近月市場焦點總結】：綜合新聞內文，用大概 150-200 字總結大市走勢同埋背後嘅情緒驅動因素。
+    2. 【🚀 潛力爆發股全面掃描】：根據新聞提到嘅基本面或消息，搵出「所有」有潛力、有炒作藉口或者有轉機嘅股票代號 (Ticker)。請為每一隻股票用 1-2 句廣東話解釋點解睇好佢。
     """
     try:
         response = requests.post(
@@ -316,39 +322,38 @@ def analyze_with_free_ai(news_list):
         
         if response.status_code == 200:
             raw_text = response.text
-            clean_text = clean_ai_response(raw_text) # 調用終極清洗器
+            clean_text = clean_ai_response(raw_text) # 調用終極物理清洗器
             return clean_text
         else:
-            return f"⚠️ 免費 AI 接口狀態異常 (HTTP {response.status_code})，請稍後再試。"
+            return f"⚠️ 免費 AI 接口狀態異常 (HTTP {response.status_code})，請遲啲再試。"
             
     except Exception as e:
         return f"⚠️ AI 分析發生錯誤。錯誤資訊: {e}"
 
 # --- 7. UI 側邊欄與導航 ---
 with st.sidebar:
-    st.title("🧰 量化選股與 AI 系統")
-    st.markdown("請選擇你要使用的功能：")
+    st.title("🧰 投資雙引擎")
+    st.markdown("揀個你想用嘅模組：")
     
     app_mode = st.radio(
         "可用模組", 
-        ["🎯 RS x MACD 動能狙擊手", "📰 近月 AI 新聞潛力分析", "🚧 價值投資掃描器 (開發中)"]
+        ["🎯 RS x MACD 動能狙擊手", "📰 近月 AI 洞察 (廣東話版)", "🚧 價值投資掃描器 (開發中)"]
     )
     st.markdown("---")
     st.caption(f"數據最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 # --- 8. 主頁面：功能切換邏輯 ---
 
-# 【功能 A：量化篩選器】
 if app_mode == "🎯 RS x MACD 動能狙擊手":
     st.title("🎯 美股 RS x MACD x 趨勢 狙擊手")
-    st.markdown("尋找市場上動能最強、財報正在加速增長的潛力爆發股。")
+    st.markdown("幫你搵市場上動能最強、財報增長緊嘅爆發潛力股。")
     
     with st.expander("⚙️ 展開設定篩選參數", expanded=True):
         col1, col2, col3 = st.columns(3)
         
         with col1:
             st.markdown("#### 1️⃣ 基礎與趨勢")
-            min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
+            min_mcap = st.number_input("最低市值 (百萬 USD)", min_value=0.0, value=500.0, step=50.0)
             
             enable_sma = st.checkbox("啟動 【趨勢排列】 過濾", value=True)
             if enable_sma:
@@ -356,41 +361,41 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
                 sma_short = sub1.selectbox("短期 SMA", [10, 20, 25, 50], index=2)
                 sma_long = sub2.selectbox("長期 SMA", [50, 100, 125, 150, 200], index=2)
                 
-                close_options = ["不選擇", "Close > 短期 SMA", "Close > 長期 SMA", "Close > 短期及長期 SMA"]
+                close_options = ["唔揀", "Close > 短期 SMA", "Close > 長期 SMA", "Close > 短期及長期 SMA"]
                 close_condition = st.selectbox("額外 Close 條件", options=close_options, index=1)
                 
-                if close_condition == "不選擇": st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}`")
+                if close_condition == "唔揀": st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}`")
                 elif close_condition == "Close > 短期 SMA": st.caption(f"✅ 條件：`Close` > SMA `{sma_short}` > SMA `{sma_long}`")
                 elif close_condition == "Close > 長期 SMA": st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}` 且 `Close` > SMA `{sma_long}`")
                 elif close_condition == "Close > 短期及長期 SMA": st.caption(f"✅ 條件：`Close` > 雙均線，且短線高於長線")
             else:
-                sma_short, sma_long, close_condition = 25, 125, "不選擇"
+                sma_short, sma_long, close_condition = 25, 125, "唔揀"
             
         with col2:
             st.markdown("#### 2️⃣ RS 動能 (對比納指)")
             enable_rs = st.checkbox("啟動 【RS】 過濾", value=True)
             if enable_rs:
-                rs_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
-                selected_rs = st.multiselect("顯示 RS 階段:", options=rs_options, default=["🚀 剛剛突破"])
+                rs_options = ["🚀 啱啱突破", "🔥 已經突破", "🎯 就快突破 (<5%)"]
+                selected_rs = st.multiselect("顯示 RS 階段:", options=rs_options, default=["🚀 啱啱突破"])
             else: selected_rs = []
                 
         with col3:
             st.markdown("#### 3️⃣ MACD 爆發點")
             enable_macd = st.checkbox("啟動 【MACD】 過濾", value=True)
             if enable_macd:
-                macd_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
-                selected_macd = st.multiselect("顯示 MACD 階段:", options=macd_options, default=["🚀 剛剛突破"])
+                macd_options = ["🚀 啱啱突破", "🔥 已經突破", "🎯 就快突破 (<5%)"]
+                selected_macd = st.multiselect("顯示 MACD 階段:", options=macd_options, default=["🚀 啱啱突破"])
             else: selected_macd = []
                 
         st.markdown("---")
-        start_scan = st.button("🚀 執行全市場精確掃描", use_container_width=True, type="primary")
+        start_scan = st.button("🚀 開始全市場精確掃描", use_container_width=True, type="primary")
 
     if start_scan:
         st.markdown("### ⏳ 系統運算進度")
         status_text = st.empty()
         progress_bar = st.progress(0)
 
-        status_text.markdown("**階段 1/3**: 正在連接 Finviz 獲取基礎股票名單...")
+        status_text.markdown("**階段 1/3**: 搵緊 Finviz 基礎股票名單...")
         raw_data = fetch_finviz_data()
         progress_bar.progress(100)
         
@@ -423,13 +428,13 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
                     )
                     final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
                     
-                    status_text.markdown("✅ **全市場掃描與過濾完成！**")
+                    status_text.markdown("✅ **全市場掃描同過濾搞掂！**")
                     progress_bar.progress(100)
-                    st.success(f"成功尋找到 {len(final_df)} 隻符合你完美設定的潛力股票。")
+                    st.success(f"成功搵到 {len(final_df)} 隻符合你完美設定嘅潛力股票。")
                 else:
-                    status_text.markdown("✅ **全市場掃描完成！**")
+                    status_text.markdown("✅ **全市場掃描搞掂！**")
                     progress_bar.progress(100)
-                    st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
+                    st.warning("⚠️ 掃描完成，但搵唔到股票同時滿足你嘅嚴格條件。")
 
             st.markdown("---")
             if len(final_df) > 0:
@@ -444,28 +449,31 @@ if app_mode == "🎯 RS x MACD 動能狙擊手":
                 
                 st.dataframe(final_df[cols], use_container_width=True, height=600)
                 csv = final_df[cols].to_csv(index=False).encode('utf-8')
-                st.download_button("📥 下載此終極清單 (CSV)", data=csv, file_name="rs_macd_trend_sniper.csv", mime="text/csv")
+                st.download_button("📥 下載呢份終極清單 (CSV)", data=csv, file_name="rs_macd_trend_sniper.csv", mime="text/csv")
             elif not (enable_rs or enable_macd or enable_sma):
-                 st.info("請勾選至少一個指標，並點擊「執行全市場精確掃描」。")
+                 st.info("請剔最少一個指標，然後撳「開始全市場精確掃描」。")
 
-# 【功能 B：AI 新聞分析】
-elif app_mode == "📰 近月 AI 新聞潛力分析":
+elif app_mode == "📰 近月 AI 洞察 (廣東話版)":
     st.title("📰 近月 AI 新聞深度分析")
-    st.markdown("系統自動抓取涵蓋近一個月的熱門財經新聞 **(包含標題與內文摘要)**，交由 AI 全面掃描市場熱點與所有具備潛在爆發機會的股票！")
+    st.markdown("系統自動爬取近一個月嘅財經熱門新聞 **(包埋標題同內文摘要)**，交俾 AI 用廣東話幫你全面掃描大市熱點同潛力股！")
     
-    if st.button("🚀 執行 AI 深度分析", type="primary", use_container_width=True):
-        with st.spinner("⏳ 正在嘗試從多個渠道獲取歷史財經頭條與內文摘要..."):
+    if st.button("🚀 攞今日 AI 報告", type="primary", use_container_width=True):
+        with st.spinner("⏳ 嘗試緊從多個渠道攞歷史財經頭條同摘要..."):
             news_list = fetch_top_news()
             
         if news_list:
-            st.success(f"✅ 成功獲取 {len(news_list)} 條近期華爾街財經資訊！")
+            st.success(f"✅ 成功攞到 {len(news_list)} 條近期華爾街財經資訊！")
             
-            # 【升級 UI】原始新聞變成整齊的 DataFrame 數據表
-            with st.expander("📄 查看 AI 正在分析的原始新聞資料庫 (包含內文摘要)"):
-                df_news = pd.DataFrame(news_list)
-                st.dataframe(df_news, use_container_width=True, hide_index=True)
+            # 【全新靚仔 UI】將新聞變成一張張卡片格式
+            with st.expander("📄 撳開睇下 AI 讀緊咩原始新聞 (包內文摘要)"):
+                st.markdown("---")
+                for idx, item in enumerate(news_list):
+                    st.markdown(f"**{idx+1}. {item['新聞標題']}**")
+                    st.caption(f"📰 來源: `{item['來源']}`")
+                    st.write(f"📝 摘要: *{item['內文摘要']}*")
+                    st.markdown("---")
                 
-            with st.spinner("🧠 AI 正在深入閱讀新聞內文，掃描所有潛力股票... (需時 15-30 秒)"):
+            with st.spinner("🧠 AI 認真睇緊內文，掃描所有潛力股票... (要等大概 15-30 秒)"):
                 ai_result = analyze_with_free_ai(news_list)
                 
             st.markdown("---")
@@ -473,11 +481,10 @@ elif app_mode == "📰 近月 AI 新聞潛力分析":
             with st.container(border=True):
                 st.markdown(ai_result)
         else:
-            st.error("❌ 目前所有新聞源均返回速率限制 (Too Many Requests)。請於 10-15 分鐘後再試。")
+            st.error("❌ 攞唔到新聞，可能俾伺服器 Block 咗 (Too Many Requests)。請等 10 分鐘後再試下。")
 
-# 【功能 C：開發中】
 else:
     st.title(app_mode)
-    st.info("功能開發中，請先使用其他可用模組。")
+    st.info("呢個功能仲開發緊，請先用其他模組啦。")
 
 
