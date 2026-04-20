@@ -9,11 +9,13 @@ import time
 import concurrent.futures
 import requests
 import random
+import re
+import json
 
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title="🚀 美股量化與 AI 分析平台", page_icon="📈", layout="wide")
 
-# --- 2. 數據清洗函數 ---
+# --- 2. 輔助/清洗函數 ---
 def convert_mcap_to_float(val):
     try:
         if pd.isna(val) or val == '-': return 0.0
@@ -23,6 +25,29 @@ def convert_mcap_to_float(val):
         return float(val)
     except:
         return 0.0
+
+def clean_ai_response(text):
+    """終極 AI 輸出清洗器：過濾所有 JSON 格式、英文思考過程與代碼殘留"""
+    if not isinstance(text, str): return str(text)
+    
+    # 1. 如果 AI 回傳了 JSON 結構，嘗試提取內容
+    text = text.strip()
+    if text.startswith('{'):
+        try:
+            parsed = json.loads(text)
+            if 'content' in parsed: text = parsed['content']
+            elif 'choices' in parsed: text = parsed['choices'][0]['message']['content']
+        except: pass
+
+    # 2. 移除新一代推理模型 (如 R1) 的 <think> 思考標籤
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    
+    # 3. 移除殘留的 JSON 字符串特徵 (例如 {"role":"assistant","reasoning_content":...)
+    text = re.sub(r'^\{"role":"assistant","reasoning_content":".*?","content":"', '', text, flags=re.DOTALL)
+    text = re.sub(r'","tool_calls":\[\]\}$', '', text)
+    text = text.replace('\\n', '\n').replace('\\"', '"') # 修復轉義字符
+    
+    return text.strip()
 
 # --- 3. 量化引擎：Finviz 基礎數據獲取 ---
 @st.cache_data(ttl=3600)
@@ -55,7 +80,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
         except Exception: continue
             
     if bench_data.empty: 
-        st.error("⚠️ 無法下載基準數據。")
+        st.error("⚠️ 無法下載納指基準，請稍後再試。")
         return results
 
     if bench_data.index.tz is not None:
@@ -65,7 +90,8 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
     total_tickers = len(tickers)
     for i in range(0, total_tickers, batch_size):
         batch_tickers = tickers[i:i+batch_size]
-        if _status_text: _status_text.markdown(f"**階段 2/3**: 運算中... (`{min(i+batch_size, total_tickers)}` / `{total_tickers}`)")
+        
+        if _status_text: _status_text.markdown(f"**階段 2/3**: 正在下載並運算技術指標... (`{min(i+batch_size, total_tickers)}` / `{total_tickers}`)")
         if _progress_bar: _progress_bar.progress(min(1.0, (i + batch_size) / total_tickers))
             
         try:
@@ -80,7 +106,9 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                 rs_stage, macd_stage, sma_trend = "無", "無", False
                 if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
                     stock_price = close_prices[ticker].dropna()
-                    if len(stock_price) > max(sma_short, sma_long, 30): 
+                    max_req_len = max(sma_short, sma_long)
+                    
+                    if len(stock_price) > max_req_len + 1: 
                         stock_norm = stock_price / stock_price.iloc[0]
                         aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
                         rs_line = stock_norm / aligned_bench * 100
@@ -91,72 +119,94 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                         if latest_rs > latest_rs_ma: rs_stage = "🚀 剛剛突破" if prev_rs <= prev_rs_ma else "🔥 已經突破"
                         elif latest_rs >= latest_rs_ma * 0.95: rs_stage = "🎯 即將突破 (<5%)"
                         
-                        ema12, ema26 = stock_price.ewm(span=12, adjust=False).mean(), stock_price.ewm(span=26, adjust=False).mean()
-                        macd_line, signal_line = ema12 - ema26, (ema12 - ema26).ewm(span=9, adjust=False).mean()
+                        ema12 = stock_price.ewm(span=12, adjust=False).mean()
+                        ema26 = stock_price.ewm(span=26, adjust=False).mean()
+                        macd_line = ema12 - ema26
+                        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                        
                         latest_macd, prev_macd = float(macd_line.iloc[-1]), float(macd_line.iloc[-2])
                         latest_sig, prev_sig = float(signal_line.iloc[-1]), float(signal_line.iloc[-2])
+                        
                         if latest_macd > latest_sig: macd_stage = "🚀 剛剛突破" if prev_macd <= prev_sig else "🔥 已經突破"
-                        elif abs(latest_sig) > 0.0001 and abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05: macd_stage = "🎯 即將突破 (<5%)"
+                        else:
+                            if abs(latest_sig) > 0.0001 and abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05: macd_stage = "🎯 即將突破 (<5%)"
                                     
-                        sma_s, sma_l = stock_price.rolling(window=sma_short).mean().iloc[-1], stock_price.rolling(window=sma_long).mean().iloc[-1]
+                        sma_s_line = stock_price.rolling(window=sma_short).mean()
+                        sma_l_line = stock_price.rolling(window=sma_long).mean()
+                        
                         latest_close = float(stock_price.iloc[-1])
-                        trend_ok = sma_s > sma_l
-                        if close_condition == "Close > 短期 SMA": trend_ok &= (latest_close > sma_s)
-                        elif close_condition == "Close > 長期 SMA": trend_ok &= (latest_close > sma_l)
-                        elif close_condition == "Close > 短期及長期 SMA": trend_ok &= (latest_close > sma_s and latest_close > sma_l)
+                        latest_sma_s = float(sma_s_line.iloc[-1])
+                        latest_sma_l = float(sma_l_line.iloc[-1])
+                        
+                        trend_ok = latest_sma_s > latest_sma_l
+                        if close_condition == "Close > 短期 SMA": trend_ok = trend_ok and (latest_close > latest_sma_s)
+                        elif close_condition == "Close > 長期 SMA": trend_ok = trend_ok and (latest_close > latest_sma_l)
+                        elif close_condition == "Close > 短期及長期 SMA": trend_ok = trend_ok and (latest_close > latest_sma_s) and (latest_close > latest_sma_l)
                         sma_trend = trend_ok
+                            
                 results[ticker] = {'RS': rs_stage, 'MACD': macd_stage, 'SMA_Trend': sma_trend}
-        except Exception:
+        except Exception as e:
             for t in batch_tickers: results[t] = {'RS': "無", 'MACD': "無", 'SMA_Trend': False}
         time.sleep(0.5 + random.random() * 0.5) 
     return results
 
-# --- 5. 量化引擎：財報數據抓取 ---
+# --- 5. 量化引擎：多執行緒獲取 4 季財報序列數據 ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
     def fetch_single(t):
-        time.sleep(0.3 + random.random() * 0.5)
-        try:
-            tkr = yf.Ticker(t)
-            q_inc = tkr.quarterly_financials
-            if q_inc is None or q_inc.empty: q_inc = tkr.quarterly_income_stmt
-            if q_inc is None or q_inc.empty: return None
-            cols = sorted(list(q_inc.columns))[-4:]
-            if not cols: return None
-            eps_row = next((q_inc.loc[r] for r in ['Diluted EPS', 'Basic EPS'] if r in q_inc.index), None)
-            sales_row = next((q_inc.loc[r] for r in ['Total Revenue', 'Operating Revenue'] if r in q_inc.index), None)
-            eps_vals = [float(eps_row[c]) if eps_row is not None and pd.notna(eps_row[c]) else None for c in cols]
-            sales_vals = [float(sales_row[c]) if sales_row is not None and pd.notna(sales_row[c]) else None for c in cols]
-            
-            def fmt_val(vals, is_sales=False):
-                res = []
-                for v in vals:
-                    if v is None: res.append("-")
-                    else:
-                        if is_sales:
-                            if v >= 1e9: res.append(f"{v/1e9:.1f}B")
-                            elif v >= 1e6: res.append(f"{v/1e6:.1f}M")
-                            else: res.append(f"{v:.0f}")
-                        else: res.append(f"{v:.2f}")
-                return " | ".join(res)
-            
-            def fmt_growth(vals):
-                res = ["-"] 
-                for i in range(1, len(vals)):
-                    if vals[i] is None or vals[i-1] is None or vals[i-1] == 0: res.append("-")
-                    else: res.append(f"{(vals[i]-vals[i-1])/abs(vals[i-1])*100:+.1f}%")
-                return " | ".join(res)
+        time.sleep(0.5 + random.random())
+        for attempt in range(3):
+            try:
+                if attempt > 0: time.sleep(1.5)
+                tkr = yf.Ticker(t)
+                q_inc = tkr.quarterly_financials
+                if q_inc is None or q_inc.empty: q_inc = tkr.quarterly_income_stmt
+                if q_inc is None or q_inc.empty: continue
                 
-            return {
-                'Ticker': t, 'EPS (近4季)': fmt_val(eps_vals), 'EPS Growth (QoQ)': fmt_growth(eps_vals),
-                'Sales (近4季)': fmt_val(sales_vals, True), 'Sales Growth (QoQ)': fmt_growth(sales_vals)
-            }
-        except: return None
+                cols = list(q_inc.columns)[:4]
+                try: cols = sorted(cols)
+                except: cols = cols[::-1]
+                if not cols: continue
+                
+                eps_row, sales_row = None, None
+                for r in ['Diluted EPS', 'Basic EPS', 'Normalized EPS']:
+                    if r in q_inc.index: eps_row = q_inc.loc[r]; break
+                for r in ['Total Revenue', 'Operating Revenue']:
+                    if r in q_inc.index: sales_row = q_inc.loc[r]; break
+                        
+                eps_vals = [float(eps_row[c]) if eps_row is not None and pd.notna(eps_row[c]) else None for c in cols]
+                sales_vals = [float(sales_row[c]) if sales_row is not None and pd.notna(sales_row[c]) else None for c in cols]
+                    
+                def fmt_val(vals, is_sales=False):
+                    res = []
+                    for v in vals:
+                        if v is None: res.append("-")
+                        else:
+                            if is_sales:
+                                if v >= 1e9: res.append(f"{v/1e9:.2f}B")
+                                elif v >= 1e6: res.append(f"{v/1e6:.2f}M")
+                                else: res.append(f"{v:.0f}")
+                            else: res.append(f"{v:.2f}")
+                    return " | ".join(res)
+                    
+                def fmt_growth(vals):
+                    res = ["-"] 
+                    for i in range(1, len(vals)):
+                        if vals[i] is None or vals[i-1] is None or vals[i-1] == 0: res.append("-")
+                        else: res.append(f"{(vals[i] - vals[i-1]) / abs(vals[i-1]) * 100:+.1f}%")
+                    return " | ".join(res)
+                    
+                return {
+                    'Ticker': t, 'EPS (近4季)': fmt_val(eps_vals, False), 'EPS Growth (QoQ)': fmt_growth(eps_vals),
+                    'Sales (近4季)': fmt_val(sales_vals, True), 'Sales Growth (QoQ)': fmt_growth(sales_vals)
+                }
+            except Exception: pass
+        return {'Ticker': t, 'EPS (近4季)': 'N/A', 'EPS Growth (QoQ)': 'N/A', 'Sales (近4季)': 'N/A', 'Sales Growth (QoQ)': 'N/A'}
 
     results = []
-    total = len(tickers)
+    total_tickers = len(tickers)
     empty_df = pd.DataFrame(columns=['Ticker', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales (近4季)', 'Sales Growth (QoQ)'])
-    if total == 0: return empty_df
+    if total_tickers == 0: return empty_df
 
     completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
@@ -165,50 +215,93 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
             res = future.result()
             if res: results.append(res)
             completed += 1
-            if _status_text: _status_text.markdown(f"**階段 3/3**: 財報獲取中... (`{completed}` / `{total}`)")
-            if _progress_bar: _progress_bar.progress(completed / total)
-    return pd.DataFrame(results) if results else empty_df
+            if _status_text: _status_text.markdown(f"**階段 3/3**: 正在獲取最新財報數據... (`{completed}` / `{total_tickers}`)")
+            if _progress_bar: _progress_bar.progress(min(1.0, completed / total_tickers))
+    
+    if not results: return empty_df            
+    return pd.DataFrame(results)
 
-# --- 6. AI 引擎：新聞掃描與洞察 ---
+# --- 6. AI 引擎：深度內文新聞獲取與清洗 ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_top_news():
-    news_items, seen = [], set()
+    """獲取新聞並提取【標題 + 摘要內文】，返回可作為 UI 表格的 list of dicts"""
+    news_items = []
+    seen_titles = set()
+    
+    # 來源 1: Finviz (只有標題)
     try:
         for t in ["SPY", "QQQ"]:
-            news = finvizfinance(t).ticker_news()
+            stock = finvizfinance(t)
+            news = stock.ticker_news()
             if not news.empty:
-                for _, row in news.head(35).iterrows():
-                    if row['Title'] not in seen:
-                        seen.add(row['Title'])
-                        news_items.append(f"- [{row['Source']}] {row['Title']}")
-    except: pass
-    return "\n".join(news_items) if news_items else None
+                for _, row in news.head(20).iterrows():
+                    title = row['Title']
+                    if title not in seen_titles:
+                        seen_titles.add(title)
+                        news_items.append({"來源": row['Source'], "新聞標題": title, "內文摘要": "純標題 (來源自 Finviz)"})
+    except Exception: pass
+
+    # 來源 2: yfinance (提取深度摘要)
+    try:
+        tickers_to_check = ["SPY", "QQQ", "NVDA", "AAPL"] # 增加科技龍頭擴大視野
+        for t in tickers_to_check:
+            tkr = yf.Ticker(t)
+            if tkr.news:
+                for item in tkr.news[:6]:
+                    title = item.get('title', '')
+                    summary = item.get('summary', '') # 提取摘要
+                    publisher = item.get('publisher', 'Finance News')
+                    
+                    if 'content' in item:
+                        content = item['content']
+                        title = content.get('title', title)
+                        summary = content.get('summary', summary)
+                        
+                        provider = content.get('provider', {})
+                        if isinstance(provider, dict): publisher = provider.get('displayName', publisher)
+                        elif isinstance(provider, str): publisher = provider
+                            
+                    if title and title not in seen_titles:
+                        seen_titles.add(title)
+                        clean_summary = summary.replace('\n', ' ')[:200] + "..." if len(summary) > 200 else summary
+                        news_items.append({"來源": publisher, "新聞標題": title, "內文摘要": clean_summary if clean_summary else "無提供內文"})
+    except Exception as e:
+        if "Too Many Requests" in str(e):
+            st.warning("⚠️ Yahoo Finance 限制訪問，目前已盡力調用 Finviz 新聞庫。")
+
+    return news_items # 回傳 List[Dict] 以便製作靚 UI
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def analyze_with_ai(news_text):
-    if not news_text: return "⚠️ 目前無法獲取新聞數據，請稍後再試。"
-    
-    # 【修復】強制 AI 的行為準則，禁止輸出英文和思考過程
+def analyze_with_free_ai(news_list):
+    """將含有【內文】的新聞餵給 AI，並嚴格清洗輸出"""
+    if not news_list:
+        return "⚠️ 目前無法獲取新聞數據。請稍後再試。"
+
+    # 將 List[Dict] 轉換為給 AI 讀的純文字
+    news_text = ""
+    for idx, item in enumerate(news_list):
+        news_text += f"{idx+1}. [{item['來源']}] 標題：{item['新聞標題']}\n摘要：{item['內文摘要']}\n\n"
+
+    # 強制性的鐵血指令，防止任何 JSON 洩漏
     system_prompt = """
-    你是一位專業的華爾街金融分析師。
-    【絕對要求】：
+    你是華爾街頂級金融分析師。
+    【絕對強制規範】：
     1. 你只能輸出繁體中文 (Traditional Chinese)。
-    2. 絕對禁止輸出任何英文思考過程 (例如 'Let's compile...', 'Ok do answer' 等)。
-    3. 絕對禁止輸出任何程式碼或 JSON 格式。
-    4. 直接輸出最終的 Markdown 排版分析報告。
+    2. 絕對禁止輸出任何 JSON、字典、編程代碼或 `{}` 括號結構。
+    3. 絕對禁止輸出你的思考過程或英文自言自語 (例如 'Let's analyze', 'reasoning_content')。
+    4. 請直接且僅僅輸出 Markdown 排版格式的分析報告。
     """
     
     user_prompt = f"""
-    請閱讀以下近一個月的美股新聞：
+    請閱讀以下包含「標題與內文摘要」的近月美股新聞：
+    
     {news_text}
     
-    請以專業口吻完成：
-    1. 【📉 近月市場焦點總結】：150-200字精煉總結大盤走勢與核心情緒。
-    2. 【🚀 潛在機會股票掃描】：列出新聞中所有具備潛力或轉機的股票代號 (Ticker)，不限數量。並用1句話解釋看好理由。
+    請以專業、精煉的口吻完成：
+    1. 【📉 近月市場焦點總結】：綜合新聞內文，用 150-200 字總結大盤走勢與核心情緒驅動因素。
+    2. 【🚀 潛在機會股票全面掃描】：根據新聞內文提到的基本面或消息面，列出「所有」具備潛力或轉機的股票代號 (Ticker)。請為每一隻股票用 1-2 句話解釋看好理由。
     """
-    
     try:
-        # 強制指定 model="openai" 確保調用高智商模型
         response = requests.post(
             "https://text.pollinations.ai/",
             json={
@@ -216,98 +309,175 @@ def analyze_with_ai(news_text):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                "model": "openai" 
+                "model": "openai"
             },
             timeout=40
         )
+        
         if response.status_code == 200:
-            return response.text
-        else: return "⚠️ AI 接口暫時異常，請稍後再試。"
-    except: return "⚠️ AI 分析連線錯誤。"
+            raw_text = response.text
+            clean_text = clean_ai_response(raw_text) # 調用終極清洗器
+            return clean_text
+        else:
+            return f"⚠️ 免費 AI 接口狀態異常 (HTTP {response.status_code})，請稍後再試。"
+            
+    except Exception as e:
+        return f"⚠️ AI 分析發生錯誤。錯誤資訊: {e}"
 
-# --- 7. UI 控制與功能切換 ---
+# --- 7. UI 側邊欄與導航 ---
 with st.sidebar:
-    st.title("🧰 投資雙引擎")
-    app_mode = st.radio("選擇模組", ["🎯 動能狙擊手", "📰 近月 AI 洞察"])
+    st.title("🧰 量化選股與 AI 系統")
+    st.markdown("請選擇你要使用的功能：")
+    
+    app_mode = st.radio(
+        "可用模組", 
+        ["🎯 RS x MACD 動能狙擊手", "📰 近月 AI 新聞潛力分析", "🚧 價值投資掃描器 (開發中)"]
+    )
     st.markdown("---")
-    st.caption(f"最後更新: {datetime.datetime.now().strftime('%H:%M')}")
+    st.caption(f"數據最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-if app_mode == "🎯 動能狙擊手":
-    st.title("🎯 RS x MACD x 趨勢排列 狙擊手")
-    with st.expander("⚙️ 篩選設定", expanded=True):
+# --- 8. 主頁面：功能切換邏輯 ---
+
+# 【功能 A：量化篩選器】
+if app_mode == "🎯 RS x MACD 動能狙擊手":
+    st.title("🎯 美股 RS x MACD x 趨勢 狙擊手")
+    st.markdown("尋找市場上動能最強、財報正在加速增長的潛力爆發股。")
+    
+    with st.expander("⚙️ 展開設定篩選參數", expanded=True):
         col1, col2, col3 = st.columns(3)
-        min_mcap = col1.number_input("最低市值 (M USD)", value=500.0)
         
-        enable_sma = col1.checkbox("啟動 【趨勢排列】 過濾", value=True)
-        if enable_sma:
-            sub1, sub2 = col1.columns(2)
-            sma_short = sub1.selectbox("短期 SMA", [10, 20, 25, 50], index=2)
-            sma_long = sub2.selectbox("長期 SMA", [50, 100, 125, 150, 200], index=2)
-            close_condition = col1.selectbox("Close 條件", ["不選擇", "Close > 短期 SMA", "Close > 長期 SMA", "Close > 短期及長期 SMA"], index=1)
-        else: sma_short, sma_long, close_condition = 25, 125, "不選擇"
+        with col1:
+            st.markdown("#### 1️⃣ 基礎與趨勢")
+            min_mcap = st.number_input("最低市值 (Million USD)", min_value=0.0, value=500.0, step=50.0)
             
-        enable_rs = col2.checkbox("啟動 【RS】 過濾", value=True)
-        selected_rs = col2.multiselect("RS 階段", ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"], default=["🚀 剛剛突破"]) if enable_rs else []
-        
-        enable_macd = col3.checkbox("啟動 【MACD】 過濾", value=True)
-        selected_macd = col3.multiselect("MACD 階段", ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"], default=["🚀 剛剛突破"]) if enable_macd else []
-        
-        start = st.button("🚀 開始全市場掃描", use_container_width=True, type="primary")
-
-    if start:
-        progress = st.progress(0)
-        status = st.empty()
-        # 步驟 1: Finviz
-        df = fetch_finviz_data()
-        if not df.empty:
-            df['Mcap_Num'] = df['Market Cap'].apply(convert_mcap_to_float)
-            df = df[df['Mcap_Num'] >= min_mcap]
-            # 步驟 2: 指標
-            t_list = df['Ticker'].tolist()
-            ind_res = calculate_all_indicators(t_list, sma_short, sma_long, close_condition, _progress_bar=progress, _status_text=status)
-            df['RS_階段'] = df['Ticker'].map(lambda x: ind_res.get(x, {}).get('RS', '無'))
-            df['MACD_階段'] = df['Ticker'].map(lambda x: ind_res.get(x, {}).get('MACD', '無'))
-            df['SMA多頭'] = df['Ticker'].map(lambda x: ind_res.get(x, {}).get('SMA_Trend', False))
-            # 過濾
-            if enable_sma: df = df[df['SMA多頭']==True]
-            if enable_rs: df = df[df['RS_階段'].isin(selected_rs)]
-            if enable_macd: df = df[df['MACD_階段'].isin(selected_macd)]
-            
-            if not df.empty:
-                # 步驟 3: 財報
-                fund = fetch_fundamentals(df['Ticker'].tolist(), _progress_bar=progress, _status_text=status)
-                df = pd.merge(df, fund, on='Ticker', how='left')
-                status.markdown("✅ **掃描完成！**")
-                progress.progress(100)
-                st.success(f"找到 {len(df)} 隻標的")
+            enable_sma = st.checkbox("啟動 【趨勢排列】 過濾", value=True)
+            if enable_sma:
+                sub1, sub2 = st.columns(2)
+                sma_short = sub1.selectbox("短期 SMA", [10, 20, 25, 50], index=2)
+                sma_long = sub2.selectbox("長期 SMA", [50, 100, 125, 150, 200], index=2)
                 
+                close_options = ["不選擇", "Close > 短期 SMA", "Close > 長期 SMA", "Close > 短期及長期 SMA"]
+                close_condition = st.selectbox("額外 Close 條件", options=close_options, index=1)
+                
+                if close_condition == "不選擇": st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}`")
+                elif close_condition == "Close > 短期 SMA": st.caption(f"✅ 條件：`Close` > SMA `{sma_short}` > SMA `{sma_long}`")
+                elif close_condition == "Close > 長期 SMA": st.caption(f"✅ 條件：SMA `{sma_short}` > SMA `{sma_long}` 且 `Close` > SMA `{sma_long}`")
+                elif close_condition == "Close > 短期及長期 SMA": st.caption(f"✅ 條件：`Close` > 雙均線，且短線高於長線")
+            else:
+                sma_short, sma_long, close_condition = 25, 125, "不選擇"
+            
+        with col2:
+            st.markdown("#### 2️⃣ RS 動能 (對比納指)")
+            enable_rs = st.checkbox("啟動 【RS】 過濾", value=True)
+            if enable_rs:
+                rs_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
+                selected_rs = st.multiselect("顯示 RS 階段:", options=rs_options, default=["🚀 剛剛突破"])
+            else: selected_rs = []
+                
+        with col3:
+            st.markdown("#### 3️⃣ MACD 爆發點")
+            enable_macd = st.checkbox("啟動 【MACD】 過濾", value=True)
+            if enable_macd:
+                macd_options = ["🚀 剛剛突破", "🔥 已經突破", "🎯 即將突破 (<5%)"]
+                selected_macd = st.multiselect("顯示 MACD 階段:", options=macd_options, default=["🚀 剛剛突破"])
+            else: selected_macd = []
+                
+        st.markdown("---")
+        start_scan = st.button("🚀 執行全市場精確掃描", use_container_width=True, type="primary")
+
+    if start_scan:
+        st.markdown("### ⏳ 系統運算進度")
+        status_text = st.empty()
+        progress_bar = st.progress(0)
+
+        status_text.markdown("**階段 1/3**: 正在連接 Finviz 獲取基礎股票名單...")
+        raw_data = fetch_finviz_data()
+        progress_bar.progress(100)
+        
+        if not raw_data.empty:
+            df_processed = raw_data.copy()
+            df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
+            final_df = df_processed[df_processed['Mcap_Numeric'] >= min_mcap].copy()
+            
+            if enable_rs or enable_macd or enable_sma:
+                target_tickers = final_df['Ticker'].tolist()
+                
+                progress_bar.progress(0)
+                indicators_results = calculate_all_indicators(
+                    target_tickers, sma_short, sma_long, close_condition, 
+                    _progress_bar=progress_bar, _status_text=status_text
+                )
+                
+                final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('RS', '無'))
+                final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('MACD', '無'))
+                final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators_results.get(x, {}).get('SMA_Trend', False))
+                
+                if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
+                if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
+                if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
+                
+                if len(final_df) > 0:
+                    progress_bar.progress(0)
+                    fund_df = fetch_fundamentals(
+                        final_df['Ticker'].tolist(), _progress_bar=progress_bar, _status_text=status_text
+                    )
+                    final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
+                    
+                    status_text.markdown("✅ **全市場掃描與過濾完成！**")
+                    progress_bar.progress(100)
+                    st.success(f"成功尋找到 {len(final_df)} 隻符合你完美設定的潛力股票。")
+                else:
+                    status_text.markdown("✅ **全市場掃描完成！**")
+                    progress_bar.progress(100)
+                    st.warning("⚠️ 掃描完成，但沒有股票能同時滿足你設定的嚴格條件。")
+
+            st.markdown("---")
+            if len(final_df) > 0:
+                st.subheader("🎯 終極精選清單")
                 cols = ['Ticker']
-                if 'RS_階段' in df.columns: cols.append('RS_階段')
-                if 'MACD_階段' in df.columns: cols.append('MACD_階段')
-                for oc in ['Company', 'Sector', 'Industry', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales (近4季)', 'Sales Growth (QoQ)']:
-                    if oc in df.columns: cols.append(oc)
+                if 'RS_階段' in final_df.columns: cols.append('RS_階段')
+                if 'MACD_階段' in final_df.columns: cols.append('MACD_階段')
                 
-                st.dataframe(df[cols], use_container_width=True)
-            else: 
-                status.markdown("✅ **掃描完成！**")
-                progress.progress(100)
-                st.warning("未找到符合條件的股票。")
+                other_cols = ['Company', 'Sector', 'Industry', 'Market Cap', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales (近4季)', 'Sales Growth (QoQ)']
+                for oc in other_cols:
+                    if oc in final_df.columns: cols.append(oc)
+                
+                st.dataframe(final_df[cols], use_container_width=True, height=600)
+                csv = final_df[cols].to_csv(index=False).encode('utf-8')
+                st.download_button("📥 下載此終極清單 (CSV)", data=csv, file_name="rs_macd_trend_sniper.csv", mime="text/csv")
+            elif not (enable_rs or enable_macd or enable_sma):
+                 st.info("請勾選至少一個指標，並點擊「執行全市場精確掃描」。")
 
-elif app_mode == "📰 近月 AI 洞察":
-    st.title("📰 近月市場趨勢與全面潛力掃描")
-    st.markdown("自動抓取涵蓋近一個月的熱門財經新聞，交由 AI 全面掃描市場熱點與所有具備潛在爆發機會的股票！")
+# 【功能 B：AI 新聞分析】
+elif app_mode == "📰 近月 AI 新聞潛力分析":
+    st.title("📰 近月 AI 新聞深度分析")
+    st.markdown("系統自動抓取涵蓋近一個月的熱門財經新聞 **(包含標題與內文摘要)**，交由 AI 全面掃描市場熱點與所有具備潛在爆發機會的股票！")
     
     if st.button("🚀 執行 AI 深度分析", type="primary", use_container_width=True):
-        with st.spinner("獲取新聞與分析中... (此過程需要約 20 秒，請耐心等待)"):
-            news = fetch_top_news()
-            if news:
-                with st.expander("📄 查看被分析的原始新聞標題"):
-                    st.text(news)
-                ai_res = analyze_with_ai(news)
-                st.markdown("### 🤖 華爾街 AI 全面洞察報告")
-                with st.container(border=True):
-                    st.markdown(ai_res)
-            else: st.error("目前無法獲取新聞來源。")
+        with st.spinner("⏳ 正在嘗試從多個渠道獲取歷史財經頭條與內文摘要..."):
+            news_list = fetch_top_news()
+            
+        if news_list:
+            st.success(f"✅ 成功獲取 {len(news_list)} 條近期華爾街財經資訊！")
+            
+            # 【升級 UI】原始新聞變成整齊的 DataFrame 數據表
+            with st.expander("📄 查看 AI 正在分析的原始新聞資料庫 (包含內文摘要)"):
+                df_news = pd.DataFrame(news_list)
+                st.dataframe(df_news, use_container_width=True, hide_index=True)
+                
+            with st.spinner("🧠 AI 正在深入閱讀新聞內文，掃描所有潛力股票... (需時 15-30 秒)"):
+                ai_result = analyze_with_free_ai(news_list)
+                
+            st.markdown("---")
+            st.markdown("### 🤖 華爾街 AI 深度洞察報告")
+            with st.container(border=True):
+                st.markdown(ai_result)
+        else:
+            st.error("❌ 目前所有新聞源均返回速率限制 (Too Many Requests)。請於 10-15 分鐘後再試。")
 
+# 【功能 C：開發中】
+else:
+    st.title(app_mode)
+    st.info("功能開發中，請先使用其他可用模組。")
 
 
