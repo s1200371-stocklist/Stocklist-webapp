@@ -1,17 +1,18 @@
 import os
-import streamlit as st
-import pandas as pd
-from finvizfinance.screener.overview import Overview
-from finvizfinance.quote import finvizfinance
-import yfinance as yf
-import datetime
-from datetime import timedelta
-import time
-import concurrent.futures
-import requests
-import random
 import re
 import json
+import time
+import random
+import datetime
+import requests
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+import concurrent.futures
+
+from datetime import timedelta
+from finvizfinance.screener.overview import Overview
+from finvizfinance.quote import finvizfinance
 
 # ==========================================
 # 1. 頁面設定
@@ -27,8 +28,8 @@ st.set_page_config(
 # ==========================================
 def get_headers():
     user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ]
     return {
@@ -50,29 +51,214 @@ def convert_mcap_to_float(val):
     except Exception:
         return 0.0
 
+def safe_to_string(df, rows=8):
+    try:
+        if df is None or df.empty:
+            return "無數據"
+        return df.head(rows).to_string(index=False)
+    except Exception:
+        return "無數據"
+
+def strip_markdown_code_fence(text):
+    if not isinstance(text, str):
+        return str(text)
+    text = re.sub(r"^```(?:json|text|markdown)?\s*", "", text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text.strip())
+    return text.strip()
+
 def clean_ai_response(text):
     if not isinstance(text, str):
         return str(text)
 
-    text = text.strip()
+    raw = text.strip()
+    raw = strip_markdown_code_fence(raw)
 
-    if text.startswith('{'):
+    # 去 <think> 標籤
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
+
+    # 嘗試直接 parse 成 JSON
+    try:
+        parsed = json.loads(raw)
+
+        if isinstance(parsed, dict):
+            if "choices" in parsed and parsed["choices"]:
+                msg = parsed["choices"][0].get("message", {})
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return strip_markdown_code_fence(content.strip())
+
+            if "content" in parsed and isinstance(parsed["content"], str):
+                return strip_markdown_code_fence(parsed["content"].strip())
+
+            if parsed.get("role") == "assistant":
+                if isinstance(parsed.get("content"), str) and parsed["content"].strip():
+                    return strip_markdown_code_fence(parsed["content"].strip())
+                if isinstance(parsed.get("final"), str) and parsed["final"].strip():
+                    return strip_markdown_code_fence(parsed["final"].strip())
+    except Exception:
+        pass
+
+    # 如果成段文字裡面包住 JSON
+    json_match = re.search(r'(\{.*\})', raw, flags=re.DOTALL)
+    if json_match:
+        candidate = json_match.group(1)
         try:
-            parsed = json.loads(text)
-            if 'choices' in parsed:
-                text = parsed['choices'][0]['message']['content']
-            elif 'content' in parsed:
-                text = parsed['content']
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                if parsed.get("role") == "assistant":
+                    if isinstance(parsed.get("content"), str) and parsed["content"].strip():
+                        return strip_markdown_code_fence(parsed["content"].strip())
+                    if isinstance(parsed.get("final"), str) and parsed["final"].strip():
+                        return strip_markdown_code_fence(parsed["final"].strip())
+                if "content" in parsed and isinstance(parsed["content"], str):
+                    return strip_markdown_code_fence(parsed["content"].strip())
         except Exception:
             pass
 
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'","tool_calls":\[\]\}$', '', text)
-    text = text.replace('\\n', '\n').replace('\\"', '"').strip()
-    return text
+    # 強制清掉 reasoning_content / role / content 字段殘渣
+    raw = re.sub(r'"reasoning_content"\s*:\s*".*?"\s*,?', '', raw, flags=re.DOTALL)
+    raw = re.sub(r'"role"\s*:\s*"assistant"\s*,?', '', raw, flags=re.DOTALL)
+    raw = re.sub(r'"content"\s*:\s*', '', raw, flags=re.DOTALL)
+
+    raw = raw.replace('\\"', '"').replace("\\n", "\n").strip()
+
+    # 去首尾大括號
+    raw = re.sub(r'^\{+', '', raw).strip()
+    raw = re.sub(r'\}+$', '', raw).strip()
+
+    # 去常見英語 thinking 垃圾行
+    bad_line_patterns = [
+        r'^\s*we must\b.*$',
+        r'^\s*let[\'’]s\b.*$',
+        r'^\s*probably\b.*$',
+        r'^\s*need to\b.*$',
+        r'^\s*add insights\b.*$',
+        r'^\s*output exactly\b.*$',
+        r'^\s*json\b.*$',
+        r'^\s*role\b.*$',
+        r'^\s*assistant\b.*$',
+        r'^\s*reasoning_content\b.*$',
+    ]
+
+    cleaned_lines = []
+    for line in raw.splitlines():
+        line_strip = line.strip()
+        if not line_strip:
+            cleaned_lines.append("")
+            continue
+
+        skip = False
+        for p in bad_line_patterns:
+            if re.match(p, line_strip, flags=re.IGNORECASE):
+                skip = True
+                break
+        if not skip:
+            cleaned_lines.append(line)
+
+    raw = "\n".join(cleaned_lines)
+    raw = re.sub(r'\n{3,}', '\n\n', raw).strip()
+
+    return raw
+
+def call_pollinations(messages, model='openai-fast', timeout=60):
+    try:
+        response = requests.post(
+            'https://text.pollinations.ai/',
+            json={
+                'messages': messages,
+                'model': model
+            },
+            timeout=timeout
+        )
+        return clean_ai_response(response.text)
+    except Exception as e:
+        return f"⚠️ AI 發生錯誤: {e}"
+
+def extract_cantonese_report(text):
+    cleaned = clean_ai_response(text)
+
+    anchor = "【🕵️ 另類數據 AI 偵測深度報告】"
+    idx = cleaned.find(anchor)
+    if idx != -1:
+        return cleaned[idx:].strip()
+
+    headings = [
+        "【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】",
+        "【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】",
+        "【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"
+    ]
+
+    found_sections = []
+    for h in headings:
+        pos = cleaned.find(h)
+        if pos != -1:
+            found_sections.append((pos, h))
+
+    if found_sections:
+        found_sections.sort(key=lambda x: x[0])
+        rebuilt = ["【🕵️ 另類數據 AI 偵測深度報告】"]
+        for i, (pos, heading) in enumerate(found_sections):
+            start = pos
+            end = found_sections[i + 1][0] if i + 1 < len(found_sections) else len(cleaned)
+            chunk = cleaned[start:end].strip()
+            rebuilt.append(chunk)
+        return "\n\n".join(rebuilt).strip()
+
+    fallback = cleaned
+    fallback = re.sub(r'^\s*\{.*?\}\s*$', '', fallback, flags=re.DOTALL)
+    fallback = re.sub(r'\n{3,}', '\n\n', fallback).strip()
+
+    if fallback:
+        return f"【🕵️ 另類數據 AI 偵測深度報告】\n\n{fallback}"
+
+    return "【🕵️ 另類數據 AI 偵測深度報告】\n\n⚠️ AI 回傳格式異常，建議重新生成一次。"
+
+def extract_stock_sentiment_output(text):
+    allowed_labels = [
+        "【🔥 極度看好】",
+        "【📈 偏向樂觀】",
+        "【⚖️ 中性觀望】",
+        "【📉 偏向悲觀】",
+        "【🧊 極度看淡】"
+    ]
+
+    fallback_label = "【⚖️ 中性觀望】"
+    fallback_body = "市場消息面暫時未有一面倒優勢，利好與風險並存，現階段較適合保持審慎，等待更多業績、指引或催化消息再判斷後續方向。"
+
+    cleaned = clean_ai_response(text)
+    cleaned = re.sub(r'```.*?```', '', cleaned, flags=re.DOTALL)
+    lines = [line.strip() for line in cleaned.split('\n') if line.strip()]
+
+    label = fallback_label
+    body_lines = []
+
+    for line in lines:
+        if line in allowed_labels:
+            label = line
+            continue
+
+        low = line.lower()
+        if "reasoning_content" in low:
+            continue
+        if '"role"' in low or '"content"' in low:
+            continue
+        if line.startswith("{") and line.endswith("}"):
+            continue
+
+        body_lines.append(line)
+
+    body = "\n\n".join(body_lines).strip()
+    body = re.sub(r'\n{3,}', '\n\n', body).strip()
+    body = re.sub(r'^[：:、，。；\-\s]+', '', body)
+
+    if not body:
+        body = fallback_body
+
+    return label, body
 
 # ==========================================
-# 3. 模組 C：另類數據雷達
+# 3. 模組 C：另類數據雷達資料源
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
@@ -84,7 +270,7 @@ def fetch_reddit_sentiment():
             if results:
                 df = pd.DataFrame([
                     {
-                        'Ticker': item['ticker'].upper(),
+                        'Ticker': str(item.get('ticker', '')).upper(),
                         'Sentiment': 'Bullish' if item.get('mentions', 0) > 30 else 'Neutral',
                         'Mentions': item.get('mentions', 0) * 5
                     }
@@ -140,7 +326,7 @@ def fetch_x_sentiment():
 
     if api_key:
         try:
-            # 你之後可以換成真實供應商 endpoint
+            # 之後如有正式供應商，可直接改 endpoint
             url = "https://api.adanos.org/x-stocks/sentiment"
             params = {"limit": 10, "period_days": 7}
             headers = {
@@ -169,11 +355,11 @@ def fetch_x_sentiment():
                             "Ticker": str(item.get("ticker", "")).upper(),
                             "Sentiment": label,
                             "Mentions": item.get("mentions", 0),
-                            "Bullish %": bullish_pct,
+                            "Bullish %": item.get("bullish_pct", bullish_pct),
                             "Trend": item.get("trend", "N/A")
                         })
-                    df = pd.DataFrame(rows)
-                    return df, "🟢 X / FinTwit API 正常 (過去7日數據)"
+
+                    return pd.DataFrame(rows), "🟢 X / FinTwit API 正常 (過去7日數據)"
         except Exception:
             pass
 
@@ -236,7 +422,8 @@ def fetch_insider_buying():
     if results:
         df_final = pd.DataFrame(results)
         df_final['SortValue'] = df_final['Value'].str.replace('$', '', regex=False).str.replace(',', '', regex=False).astype(float)
-        return df_final.sort_values('SortValue', ascending=False).drop(columns=['SortValue']).head(10).reset_index(drop=True)
+        df_final = df_final.sort_values('SortValue', ascending=False).drop(columns=['SortValue']).head(10).reset_index(drop=True)
+        return df_final
 
     return pd.DataFrame([
         {'Ticker': 'ASTS', 'Owner': 'Abel Avellan', 'Relationship': 'CEO', 'Cost': '$24.50', 'Value': '$2,500,000'},
@@ -487,11 +674,12 @@ def fetch_top_news():
             news = finvizfinance(t).ticker_news()
             if not news.empty:
                 for _, row in news.head(15).iterrows():
-                    if row['Title'] not in seen:
-                        seen.add(row['Title'])
+                    title = row.get('Title', '')
+                    if title and title not in seen:
+                        seen.add(title)
                         news_items.append({
-                            '來源': row['Source'],
-                            '新聞標題': row['Title'],
+                            '來源': row.get('Source', 'Finviz'),
+                            '新聞標題': title,
                             '內文摘要': '（來自 Finviz 標題）'
                         })
     except Exception:
@@ -509,7 +697,7 @@ def fetch_top_news():
                         news_items.append({
                             '來源': item.get('publisher', 'Finance News'),
                             '新聞標題': title,
-                            '內文摘要': str(summary)[:200]
+                            '內文摘要': str(summary)[:240]
                         })
     except Exception:
         pass
@@ -526,62 +714,94 @@ def analyze_news_ai(news_list):
         for i, x in enumerate(news_list)
     ])
 
-    system_prompt = (
-        "You are a Hong Kong financial analyst.\n"
-        "RULE: Entire output MUST be in Cantonese (廣東話) and Traditional Chinese (繁體中文). "
-        "NO ENGLISH sentences. NO JSON.\n"
-        "Start directly with: 【📉 近月市場焦點總結】"
+    system_prompt = """
+You are a Hong Kong financial analyst.
+
+規則：
+1. 全文必須用香港廣東話 + 繁體中文。
+2. 唔可以輸出 JSON、XML、markdown code block。
+3. 唔可以輸出 reasoning、thoughts、reasoning_content。
+4. 篇幅不限，但只輸出最終報告。
+5. 直接由標題開始寫。
+
+格式：
+【📉 近月市場焦點總結】
+（篇幅不限）
+
+【🚀 潛力爆發股全面掃描】
+（篇幅不限）
+""".strip()
+
+    user_prompt = f"""
+請根據以下財經新聞，寫一份自然、完整、香港廣東話分析。
+
+新聞：
+{news_text}
+
+記住：
+- 唔好輸出任何分析過程
+- 唔好輸出 JSON
+- 只輸出最終報告
+""".strip()
+
+    result = call_pollinations(
+        messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ],
+        model='openai-fast',
+        timeout=60
     )
 
-    user_prompt = (
-        f"Translate your financial analysis into CANTONESE based on these news:\n{news_text}\n\n"
-        "Format in CANTONESE:\n"
-        "1. 【📉 近月市場焦點總結】\n"
-        "2. 【🚀 潛力爆發股全面掃描】"
-    )
-
-    try:
-        res = requests.post(
-            'https://text.pollinations.ai/',
-            json={
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt}
-                ],
-                'model': 'openai-fast'
-            },
-            timeout=60
-        )
-        return clean_ai_response(res.text) or '⚠️ AI 接口異常'
-    except Exception as e:
-        return f'⚠️ AI 發生錯誤: {e}'
+    cleaned = clean_ai_response(result)
+    if "【📉 近月市場焦點總結】" not in cleaned:
+        cleaned = f"【📉 近月市場焦點總結】\n\n{cleaned}"
+    return cleaned
 
 # ==========================================
 # 6. 模組 C：AI 五維交叉博弈分析
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, x_df, insider_df, congress_df):
-    r_str = reddit_df.head(8).to_string(index=False) if not reddit_df.empty else '無數據'
-    t_str = twits_df.head(8).to_string(index=False) if not twits_df.empty else '無數據'
-    x_str = x_df.head(8).to_string(index=False) if not x_df.empty else '無數據'
-    i_str = insider_df.head(8).to_string(index=False) if not insider_df.empty else '無數據'
-    c_str = congress_df.head(8).to_string(index=False) if not congress_df.empty else '無數據'
+    r_str = safe_to_string(reddit_df, rows=8)
+    t_str = safe_to_string(twits_df, rows=8)
+    x_str = safe_to_string(x_df, rows=8)
+    i_str = safe_to_string(insider_df, rows=8)
+    c_str = safe_to_string(congress_df, rows=8)
 
-    system_prompt = """You are a top-tier Hong Kong financial analyst.
-CRITICAL RULES:
-1. The ENTIRE output MUST be written in conversational Hong Kong Cantonese (廣東話口語) using Traditional Chinese characters (繁體中文).
-2. NO ENGLISH WORDS allowed except for stock tickers and CEO/Politician names.
-3. NEVER output JSON, XML, or any code.
-4. You MUST include these exact slang terms: "瘋狂吸籌", "探氪", "春江鴨", "人踩人風險".
+    system_prompt = """
+You are a Hong Kong financial analyst.
 
-Output EXACTLY with this structure:
+嚴格規則：
+1. 全文必須用香港廣東話口語 + 繁體中文。
+2. 唔可以輸出 JSON。
+3. 唔可以輸出 XML。
+4. 唔可以輸出 markdown code block。
+5. 唔可以解釋你自己點分析。
+6. 唔可以輸出 reasoning、thoughts、reasoning_content。
+7. 唔可以輸出英語句子，除咗股票代號、人名。
+8. 你一定要包含以下四個詞語：
+   瘋狂吸籌
+   探氪
+   春江鴨
+   人踩人風險
+
+你只可以輸出以下格式：
+
 【🕵️ 另類數據 AI 偵測深度報告】
-1. 【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】
-2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-3. 【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"""
+
+【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】
+（篇幅不限，按數據自然分析）
+
+【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
+（篇幅不限，按數據自然分析）
+
+【🎯 終極五維共振：最強爆發潛力股與高危陷阱】
+（篇幅不限，按數據自然分析）
+""".strip()
 
     user_prompt = f"""
-Write the Cantonese report now based on this data:
+請根據以下數據直接寫報告：
 
 Reddit:
 {r_str}
@@ -597,23 +817,22 @@ Insiders:
 
 Congress:
 {c_str}
-"""
 
-    try:
-        response = requests.post(
-            'https://text.pollinations.ai/',
-            json={
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt}
-                ],
-                'model': 'openai-fast'
-            },
-            timeout=80
-        )
-        return clean_ai_response(response.text) or '⚠️ AI 輸出異常，請再試一次。'
-    except Exception as e:
-        return f'⚠️ AI 分析發生錯誤: {e}'
+記住：
+- 只輸出最終報告正文
+- 唔好輸出任何解釋、JSON、前言、思考過程
+""".strip()
+
+    result = call_pollinations(
+        messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ],
+        model='openai-fast',
+        timeout=80
+    )
+
+    return extract_cantonese_report(result)
 
 # ==========================================
 # 7. 模組 D：個股驗證模式 Bottom-Up
@@ -629,7 +848,7 @@ def fetch_single_stock_news(ticker):
                 title = item.get('content', {}).get('title', item.get('title', ''))
                 summary = item.get('content', {}).get('summary', item.get('summary', '無摘要'))
                 if title:
-                    news_items.append(f"標題: {title} | 摘要: {summary[:160]}")
+                    news_items.append(f"標題: {title} | 摘要: {str(summary)[:220]}")
     except Exception:
         pass
 
@@ -638,92 +857,63 @@ def fetch_single_stock_news(ticker):
             news = finvizfinance(ticker).ticker_news()
             if not news.empty:
                 for _, row in news.head(10).iterrows():
-                    news_items.append(f"標題: {row['Title']} | 來源: {row['Source']}")
+                    news_items.append(f"標題: {row.get('Title', '')} | 來源: {row.get('Source', '')}")
         except Exception:
             pass
 
     return news_items
 
 def analyze_single_stock_sentiment(ticker, news_items):
-    allowed_labels = [
-        "【🔥 極度看好】",
-        "【📈 偏向樂觀】",
-        "【⚖️ 中性觀望】",
-        "【📉 偏向悲觀】",
-        "【🧊 極度看淡】"
-    ]
-
     fallback_label = "【⚖️ 中性觀望】"
-    fallback_summary = "市場正觀望財報、Robotaxi 同 AI 進展，潛在驚喜仍在，但訴訟與估值爭議未散，短線消息面好淡交錯，現階段較適合保持審慎。"
+    fallback_body = "市場消息面暫時未有一面倒優勢，利好與風險並存，現階段較適合保持審慎，等待更多業績、指引或催化消息再判斷後續方向。"
 
     if not news_items:
-        return f"{fallback_label}\n缺乏近期專屬新聞，暫時未見足夠利好或利淡催化，現階段較適合先觀望。"
+        return f"{fallback_label}\n\n缺乏近期專屬新聞，暫時未見足夠利好或利淡催化，現階段較適合先觀望。"
 
     news_str = "\n".join(news_items)
 
-    system_prompt = """You are a Hong Kong financial AI.
-You MUST output EXACTLY 2 lines in Traditional Chinese.
-Line 1 must be exactly one of:
+    system_prompt = """
+You are a Hong Kong financial AI.
+
+嚴格規則：
+1. 第一行必須完全等於以下其中一個：
 【🔥 極度看好】
 【📈 偏向樂觀】
 【⚖️ 中性觀望】
 【📉 偏向悲觀】
 【🧊 極度看淡】
+2. 第一行之後，內容必須用繁體中文香港廣東話自然分析。
+3. 唔可以輸出 JSON、XML、markdown code block、reasoning_content、分析過程。
+4. 篇幅不限，但只輸出最終答案。
+5. 如果好淡因素混雜，以【⚖️ 中性觀望】為優先。
+""".strip()
 
-Line 2 must be a concise Traditional Chinese summary in Hong Kong Cantonese style.
-Do not output bullet points.
-Do not output extra lines.
-Do not output English explanation.
-"""
+    user_prompt = f"""
+請分析 {ticker} 近期新聞。
 
-    user_prompt = f"""Analyze the provided news for {ticker}.
-
-If positives and negatives are mixed, choose 【⚖️ 中性觀望】.
-If positives slightly outweigh negatives, choose 【📈 偏向樂觀】.
-
-News:
+新聞如下：
 {news_str}
-"""
 
-    try:
-        res = requests.post(
-            'https://text.pollinations.ai/',
-            json={
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt}
-                ],
-                'model': 'openai-fast'
-            },
-            timeout=20
-        )
+只輸出最終答案。
+""".strip()
 
-        clean_text = clean_ai_response(res.text)
-        clean_text = re.sub(r'\r', '', clean_text).strip()
-        lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
+    result = call_pollinations(
+        messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ],
+        model='openai-fast',
+        timeout=25
+    )
 
+    label, body = extract_stock_sentiment_output(result)
+
+    if not label:
         label = fallback_label
-        summary = fallback_summary
+    if not body:
+        body = fallback_body
 
-        for line in lines:
-            if line in allowed_labels:
-                label = line
-                break
-
-        non_label_lines = [line for line in lines if line not in allowed_labels]
-        if non_label_lines:
-            summary = " ".join(non_label_lines)
-
-        summary = re.sub(r'\s+', ' ', summary).strip()
-        summary = re.sub(r'^[：:、，。；\-\s]+', '', summary)
-
-        if not summary:
-            summary = fallback_summary
-
-        return f"{label}\n{summary}"
-
-    except Exception:
-        return f"{fallback_label}\n{fallback_summary}"
+    return f"{label}\n\n{body}"
 
 # ==========================================
 # 8. 模組 E：終極雙劍合璧
@@ -754,9 +944,9 @@ def run_full_integration(final_df, progress_bar, status_text):
         news = fetch_single_stock_news(ticker)
         if news:
             ai_res = analyze_single_stock_sentiment(ticker, news)
-            lines = ai_res.split('\n')
+            lines = [x.strip() for x in ai_res.split('\n') if x.strip()]
             sentiment = lines[0] if len(lines) > 0 else "【⚖️ 中性觀望】"
-            reason = lines[1] if len(lines) > 1 else "無具體解釋。"
+            reason = "\n\n".join(lines[1:]) if len(lines) > 1 else "無具體解釋。"
         else:
             sentiment = "【⚖️ 中性觀望】"
             reason = "無新聞數據。"
@@ -766,7 +956,7 @@ def run_full_integration(final_df, progress_bar, status_text):
         time.sleep(1)
 
     breakout_df['AI 消息情緒'] = sentiments
-    breakout_df['AI 50字總結'] = reasons
+    breakout_df['AI 深度分析'] = reasons
 
     golden_df = breakout_df[
         ~breakout_df['AI 消息情緒'].str.contains('悲觀|看淡|中性', na=False)
@@ -774,7 +964,7 @@ def run_full_integration(final_df, progress_bar, status_text):
     return golden_df
 
 # ==========================================
-# 9. 側邊欄
+# 9. Sidebar
 # ==========================================
 with st.sidebar:
     st.title('🧰 投資雙引擎')
@@ -789,7 +979,7 @@ with st.sidebar:
     st.caption(f"數據最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 # ==========================================
-# 10. 模組 A 顯示
+# 10. 模組 A
 # ==========================================
 if app_mode == '🎯 RS x MACD 動能狙擊手':
     st.title('🎯 美股 RS x MACD x 趨勢 狙擊手')
@@ -893,7 +1083,7 @@ if app_mode == '🎯 RS x MACD 動能狙擊手':
                     st.warning('⚠️ 搵唔到完全滿足條件嘅股票。')
 
 # ==========================================
-# 11. 模組 B 顯示
+# 11. 模組 B
 # ==========================================
 elif app_mode == '📰 近月 AI 洞察 (廣東話版)':
     st.title('📰 近月 AI 新聞深度分析')
@@ -904,12 +1094,15 @@ elif app_mode == '📰 近月 AI 洞察 (廣東話版)':
 
         if news_list:
             with st.spinner('🧠 AI 認真睇緊內文，掃描所有潛力股票...'):
+                report = analyze_news_ai(news_list)
                 st.markdown('### 🤖 華爾街 AI 深度洞察報告')
                 with st.container(border=True):
-                    st.markdown(analyze_news_ai(news_list))
+                    st.markdown(report)
+        else:
+            st.warning("⚠️ 暫時攞唔到新聞資料。")
 
 # ==========================================
-# 12. 模組 C 顯示：5大維度
+# 12. 模組 C
 # ==========================================
 elif app_mode == '🕵️ 另類數據雷達 (5大維度)':
     st.title('🕵️ 另類數據雷達 (5大維度)')
@@ -952,13 +1145,13 @@ elif app_mode == '🕵️ 另類數據雷達 (5大維度)':
                 st.markdown(res)
 
 # ==========================================
-# 13. 模組 D 顯示
+# 13. 模組 D
 # ==========================================
 elif app_mode == '🔍 個股驗證模式 (Bottom-Up)':
     st.title('🔍 個股驗證模式 (Bottom-Up)')
     st.markdown('當你見到一隻股票，輸入 Ticker 讓 AI 即時睇下佢背後有無新聞利好支撐。')
 
-    target_ticker = st.text_input("輸入美股代號 (例如 TSLA, NVDA, ASTS):").upper()
+    target_ticker = st.text_input("輸入美股代號 (例如 TSLA, NVDA, ASTS):").upper().strip()
 
     if st.button('🧠 立即驗證', type='primary') and target_ticker:
         with st.spinner(f'抓取緊 {target_ticker} 嘅最新新聞並交由 AI 分析...'):
@@ -968,12 +1161,15 @@ elif app_mode == '🔍 個股驗證模式 (Bottom-Up)':
                 res = analyze_single_stock_sentiment(target_ticker, news)
                 st.subheader(f"📊 {target_ticker} 驗證結果")
 
-                lines = res.split('\n')
-                if len(lines) >= 2:
+                lines = [x.strip() for x in res.split('\n') if x.strip()]
+                if lines:
                     st.markdown(f"### {lines[0]}")
-                    st.info(lines[1])
+                    body = "\n\n".join(lines[1:]) if len(lines) > 1 else "暫時無補充分析。"
+                    with st.container(border=True):
+                        st.markdown(body)
                 else:
-                    st.markdown(res)
+                    with st.container(border=True):
+                        st.markdown(res)
 
                 with st.expander("📄 點擊查看 AI 參考嘅原始新聞"):
                     for n in news:
@@ -982,7 +1178,7 @@ elif app_mode == '🔍 個股驗證模式 (Bottom-Up)':
                 st.warning(f"⚠️ 搵唔到 {target_ticker} 嘅近期新聞。")
 
 # ==========================================
-# 14. 模組 E 顯示
+# 14. 模組 E
 # ==========================================
 elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
     st.title('⚔️ 終極雙劍合璧 (Full Integration)')
@@ -1032,12 +1228,20 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
                 if not golden_df.empty:
                     st.balloons()
                     st.subheader(f"🏆 終極黃金共振名單 (共 {len(golden_df)} 隻)")
-                    st.markdown("呢啲股票符合 **技術面突破** 加上 **AI 判定新聞強烈看好**，係勝率極高嘅潛力股：")
+                    st.markdown("呢啲股票符合 **技術面突破** 加上 **AI 判定新聞偏正面**，係較高勝率嘅潛力股：")
 
-                    display_cols = ['Ticker', 'Company', 'Sector', 'RS_階段', 'MACD_階段', 'AI 消息情緒', 'AI 50字總結']
-                    st.dataframe(golden_df[display_cols], use_container_width=True, hide_index=True)
+                    display_cols = ['Ticker', 'Company', 'Sector', 'RS_階段', 'MACD_階段', 'AI 消息情緒']
+                    existing_cols = [c for c in display_cols if c in golden_df.columns]
+                    st.dataframe(golden_df[existing_cols], use_container_width=True, hide_index=True)
+
+                    st.markdown("### 🧠 AI 深度分析逐隻睇")
+                    for _, row in golden_df.iterrows():
+                        with st.expander(f"{row.get('Ticker', 'N/A')} | {row.get('AI 消息情緒', 'N/A')}"):
+                            st.markdown(row.get('AI 深度分析', '無分析內容。'))
                 else:
-                    st.warning('⚠️ 技術突破股經過 AI 驗證後，發現全部都無實質利好新聞支持 (純技術炒作)，為安全起見，本次無黃金名單輸出。')
+                    st.warning('⚠️ 技術突破股經過 AI 驗證後，發現大部分都未有足夠消息面支持，為安全起見，本次無黃金名單輸出。')
             else:
                 status_text.markdown('✅ 掃描完成。')
                 st.warning("市場上暫時無股票同時符合嚴格嘅 RS 同 MACD 雙突破條件。")
+        else:
+            status_text.markdown('⚠️ 暫時攞唔到 Finviz 股票清單。')
