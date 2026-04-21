@@ -4,13 +4,13 @@ from finvizfinance.screener.overview import Overview
 from finvizfinance.quote import finvizfinance
 import yfinance as yf
 import datetime
+from datetime import timedelta
 import time
 import concurrent.futures
 import requests
 import random
 import re
 import json
-import io
 
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title="🚀 美股全方位量化與 AI 平台", page_icon="📈", layout="wide")
@@ -21,8 +21,7 @@ def get_headers():
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0'
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ]
     return {
         'User-Agent': random.choice(user_agents),
@@ -52,24 +51,21 @@ def clean_ai_response(text):
 
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     
-    marker_1 = "【📉"
-    marker_2 = "【🕵️"
-    marker_3 = "【"
+    marker_1, marker_2, marker_3 = "【📉", "【🕵️", "【"
     
     if marker_1 in text: text = text[text.find(marker_1):]
     elif marker_2 in text: text = text[text.find(marker_2):]
     elif marker_3 in text: text = text[text.find(marker_3):]
         
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
-    text = text.replace('\\n', '\n').replace('\\"', '"') 
-    return text.strip()
+    return text.replace('\\n', '\n').replace('\\"', '"').strip()
 
 # ==========================================
-#        模組 C：擴充版另類數據雷達 (4 大數據源)
+#        模組 C：擴充版另類數據雷達 (混合時間窗口)
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
-    """抓取 Reddit WSB 熱門股票"""
+    """抓取 Reddit WSB 熱門股票 (24小時內極短線情緒)"""
     try:
         url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
@@ -80,7 +76,7 @@ def fetch_reddit_sentiment():
                     {'Ticker': item['ticker'].upper(), 'Sentiment': 'Bullish' if item.get('mentions', 0) > 30 else 'Neutral', 'Mentions': item.get('mentions', 0) * 5}
                     for item in results[:10]
                 ])
-                return df_ape, "🟢 ApeWisdom (WSB)"
+                return df_ape, "🟢 ApeWisdom (過去 24h 數據)"
     except: pass
     
     mock_data = [
@@ -94,7 +90,7 @@ def fetch_reddit_sentiment():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_stocktwits_trending():
-    """抓取 StockTwits 散戶熱門榜"""
+    """抓取 StockTwits 散戶熱門榜 (當刻即時情緒)"""
     try:
         url = "https://api.stocktwits.com/api/2/trending/symbols.json"
         res = requests.get(url, headers=get_headers(), timeout=8)
@@ -102,7 +98,7 @@ def fetch_stocktwits_trending():
             symbols = res.json().get('symbols', [])
             if symbols:
                 df = pd.DataFrame([{'Ticker': s['symbol'], 'Name': s['title']} for s in symbols[:10]])
-                return df, "🟢 StockTwits 正常"
+                return df, "🟢 StockTwits 正常 (即時數據)"
     except: pass
     
     mock_data = [
@@ -114,10 +110,13 @@ def fetch_stocktwits_trending():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
-    """獲取 Insider 高層真金白銀買入"""
-    target_tickers = ["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA", "AMD", "PLTR", "CRWD", "ASTS", "COIN"]
+    """獲取 Insider 高層真金白銀買入 (嚴格鎖定過去 30 日內)"""
+    target_tickers = ["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA", "AMD", "PLTR", "CRWD", "ASTS", "COIN", "MARA"]
     random.shuffle(target_tickers)
     results = []
+    
+    # 計算 30 日前嘅日期
+    cutoff_date = pd.Timestamp.now() - timedelta(days=30)
     
     def fetch_yf_insider(ticker):
         try:
@@ -125,8 +124,15 @@ def fetch_insider_buying():
             trades = tkr.insider_transactions
             if trades is not None and not trades.empty:
                 df = trades.reset_index()
+                
+                # 確保有時間欄位進行 30 日篩選
+                date_col = next((c for c in df.columns if 'date' in c.lower()), None)
+                if date_col:
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+                    df = df[df[date_col] >= cutoff_date]
+                
                 text_col = next((c for c in df.columns if 'text' in c.lower() or 'trans' in c.lower()), None)
-                if text_col:
+                if text_col and not df.empty:
                     buys = df[df[text_col].astype(str).str.contains('Buy|Purchase', case=False, na=False)].copy()
                     for _, row in buys.head(2).iterrows():
                         shares, value = row.get('Shares', 0), row.get('Value', 0)
@@ -157,22 +163,30 @@ def fetch_insider_buying():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_congress_trades():
-    """抓取美國國會議員 (Politician) 交易數據"""
+    """抓取美國國會議員交易 (嚴格鎖定過去 45 日內申報)"""
     try:
-        # 使用開源嘅 House Stock Watcher 數據庫
         url = "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json"
         res = requests.get(url, headers=get_headers(), timeout=8)
         if res.status_code == 200:
             data = res.json()
             df = pd.DataFrame(data)
+            
             # 過濾純買入
             df = df[df['type'].astype(str).str.lower() == 'purchase']
+            
+            # 轉換日期並進行 45 日篩選
             df['transaction_date'] = pd.to_datetime(df['transaction_date'], errors='coerce')
+            cutoff_date = pd.Timestamp.now() - timedelta(days=45)
+            df = df[df['transaction_date'] >= cutoff_date]
+            
             df = df.sort_values('transaction_date', ascending=False).dropna(subset=['transaction_date'])
             df = df[['transaction_date', 'representative', 'ticker', 'amount']].head(10)
             df.columns = ['Date', 'Politician', 'Ticker', 'Amount']
             df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-            return df, "🟢 國會交易 (House)"
+            
+            # 如果近 45 日真係冇數據，會自然觸發 fallback
+            if not df.empty:
+                return df, "🟢 國會交易 (過去 45 日數據)"
     except: pass
     
     mock_data = [
@@ -366,20 +380,20 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
     
     user_prompt = f"""
     請交叉分析以下四大另類數據陣營：
-    [散戶數據 1：Reddit WSB 熱門]:\n{r_str}\n
-    [散戶數據 2：StockTwits 熱搜]:\n{t_str}\n
-    [大戶數據 1：高層 Insider 買入]:\n{i_str}\n
-    [大戶數據 2：國會議員 (佩洛西等) 買入]:\n{c_str}\n
+    [散戶數據 1：Reddit WSB 熱門 (過去24小時)]:\n{r_str}\n
+    [散戶數據 2：StockTwits 熱搜 (即時)]:\n{t_str}\n
+    [大戶數據 1：高層 Insider 買入 (過去30日)]:\n{i_str}\n
+    [大戶數據 2：國會議員交易 (過去45日)]:\n{c_str}\n
     
     請嚴格根據以下格式輸出報告（直接填寫內容）：
     
     【🕵️ 另類數據 AI 偵測報告】
 
     1. 【🔥 散戶雙引擎：全網瘋傳啲咩？】
-    （用大概 150 字廣東話，綜合 Reddit 同 StockTwits 嘅熱門名單，總結散戶情緒，解釋邊啲 Meme 股或者板塊最受全網關注。）
+    （用大概 150 字廣東話，綜合 Reddit 同 StockTwits 嘅極短線熱門名單，總結散戶情緒，解釋邊啲 Meme 股或者板塊最受全網關注。）
 
     2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-    （用大概 150 字廣東話，分析高層 Insider 同國會議員嘅買入名單。指出邊啲股票有「政客光環」加持，或者高層真金白銀掃貨，代表咩級數嘅信心。）
+    （用大概 150 字廣東話，分析高層 Insider (過去30日) 同國會議員 (過去45日) 嘅買入名單。指出邊啲股票有「政客光環」加持，或者高層真金白銀掃貨，代表咩級數嘅信心。）
 
     3. 【🎯 終極爆發潛力股 (四維共振)】
     （對比散戶同大戶兩邊名單，挑選 1-2 隻「散戶炒緊 + 大戶/政客偷偷入緊」嘅黃金交叉股票。用大概 150 字精準解釋點解值得放入觀察名單。）
@@ -398,7 +412,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption(f"數據最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-# --- 模組 A 顯示 (省略修改，保持原樣運行) ---
+# --- 模組 A 顯示 ---
 if app_mode == "🎯 RS x MACD 動能狙擊手":
     st.title("🎯 美股 RS x MACD x 趨勢 狙擊手")
     with st.expander("⚙️ 展開設定篩選參數", expanded=True):
@@ -471,31 +485,32 @@ elif app_mode == "🕵️ 另類數據雷達 (4大維度)":
     st.title("🕵️ 另類數據雷達 (4大維度)")
     st.markdown("全面升級！追蹤 **Reddit + StockTwits 散戶情緒** 同埋 **高層 Insider + 國會議員交易**，四維度狙擊爆發股！")
     
-    st.subheader("🌐 散戶情緒雙引擎")
+    st.subheader("🌐 散戶情緒雙引擎 (極短線)")
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**1. Reddit WSB 討論熱度**")
+        st.markdown("**1. Reddit WSB 討論熱度 (過去24h)**")
         with st.spinner("攞緊 Reddit..."):
             r_df, r_msg = fetch_reddit_sentiment()
             st.caption(r_msg)
             st.dataframe(r_df.head(8), use_container_width=True, hide_index=True)
     with c2:
-        st.markdown("**2. StockTwits 全美熱搜榜**")
+        st.markdown("**2. StockTwits 全美熱搜榜 (即時)**")
         with st.spinner("攞緊 StockTwits..."):
             t_df, t_msg = fetch_stocktwits_trending()
             st.caption(t_msg)
             st.dataframe(t_df.head(8), use_container_width=True, hide_index=True)
             
     st.divider()
-    st.subheader("🏛️ 聰明錢與政客跟蹤")
+    st.subheader("🏛️ 聰明錢與政客跟蹤 (中短線)")
     c3, c4 = st.columns(2)
     with c3:
-        st.markdown("**3. 高層 Insider 買入**")
+        st.markdown("**3. 高層 Insider 真金白銀買入 (過去30日)**")
         with st.spinner("攞緊 Insider..."):
             i_df = fetch_insider_buying()
+            st.caption("✅ Yahoo Finance API (嚴格篩選近30日買入)")
             st.dataframe(i_df.head(8), use_container_width=True, hide_index=True)
     with c4:
-        st.markdown("**4. 國會議員 (Politician) 交易**")
+        st.markdown("**4. 國會議員交易 (過去45日申報)**")
         with st.spinner("攞緊國會數據..."):
             c_df, c_msg = fetch_congress_trades()
             st.caption(c_msg)
