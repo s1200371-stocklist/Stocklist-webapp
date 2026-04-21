@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 from finvizfinance.screener.overview import Overview
@@ -68,7 +69,6 @@ def clean_ai_response(text):
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
     text = text.replace('\\n', '\n').replace('\\"', '"').strip()
-
     return text
 
 # ==========================================
@@ -129,6 +129,65 @@ def fetch_stocktwits_trending():
         {'Ticker': 'ASTS', 'Name': 'AST SpaceMobile'},
     ]
     return pd.DataFrame(mock), '🔴 離線備援 (StockTwits)'
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_x_sentiment():
+    api_key = None
+    try:
+        api_key = st.secrets.get("X_SENTIMENT_API_KEY", None)
+    except Exception:
+        api_key = os.getenv("X_SENTIMENT_API_KEY")
+
+    if api_key:
+        try:
+            # 你之後可以換成真實供應商 endpoint
+            url = "https://api.adanos.org/x-stocks/sentiment"
+            params = {"limit": 10, "period_days": 7}
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+            res = requests.get(url, headers=headers, params=params, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                stocks = data.get("stocks", [])
+                if stocks:
+                    rows = []
+                    for item in stocks[:10]:
+                        sentiment_score = item.get("sentiment_score", 0)
+                        bullish_pct = item.get("bullish_pct", 50)
+
+                        if sentiment_score >= 0.25:
+                            label = "Bullish"
+                        elif sentiment_score <= -0.25:
+                            label = "Bearish"
+                        else:
+                            label = "Neutral"
+
+                        rows.append({
+                            "Ticker": str(item.get("ticker", "")).upper(),
+                            "Sentiment": label,
+                            "Mentions": item.get("mentions", 0),
+                            "Bullish %": bullish_pct,
+                            "Trend": item.get("trend", "N/A")
+                        })
+                    df = pd.DataFrame(rows)
+                    return df, "🟢 X / FinTwit API 正常 (過去7日數據)"
+        except Exception:
+            pass
+
+    mock = [
+        {"Ticker": "TSLA", "Sentiment": "Bullish", "Mentions": 4820, "Bullish %": 68, "Trend": "Rising"},
+        {"Ticker": "NVDA", "Sentiment": "Bullish", "Mentions": 3910, "Bullish %": 72, "Trend": "Rising"},
+        {"Ticker": "PLTR", "Sentiment": "Bullish", "Mentions": 2440, "Bullish %": 66, "Trend": "Stable"},
+        {"Ticker": "AMD",  "Sentiment": "Neutral", "Mentions": 1890, "Bullish %": 54, "Trend": "Stable"},
+        {"Ticker": "AAPL", "Sentiment": "Neutral", "Mentions": 1710, "Bullish %": 52, "Trend": "Flat"},
+        {"Ticker": "SMCI", "Sentiment": "Bearish", "Mentions": 1580, "Bullish %": 39, "Trend": "Falling"},
+        {"Ticker": "META", "Sentiment": "Bullish", "Mentions": 1490, "Bullish %": 63, "Trend": "Rising"},
+        {"Ticker": "COIN", "Sentiment": "Bullish", "Mentions": 1380, "Bullish %": 64, "Trend": "Rising"},
+    ]
+    return pd.DataFrame(mock), "🔴 離線備援 (X / FinTwit)"
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
@@ -498,12 +557,13 @@ def analyze_news_ai(news_list):
         return f'⚠️ AI 發生錯誤: {e}'
 
 # ==========================================
-# 6. 模組 C：AI 交叉博弈分析
+# 6. 模組 C：AI 五維交叉博弈分析
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
+def analyze_alt_data_ai(reddit_df, twits_df, x_df, insider_df, congress_df):
     r_str = reddit_df.head(8).to_string(index=False) if not reddit_df.empty else '無數據'
     t_str = twits_df.head(8).to_string(index=False) if not twits_df.empty else '無數據'
+    x_str = x_df.head(8).to_string(index=False) if not x_df.empty else '無數據'
     i_str = insider_df.head(8).to_string(index=False) if not insider_df.empty else '無數據'
     c_str = congress_df.head(8).to_string(index=False) if not congress_df.empty else '無數據'
 
@@ -513,13 +573,31 @@ CRITICAL RULES:
 2. NO ENGLISH WORDS allowed except for stock tickers and CEO/Politician names.
 3. NEVER output JSON, XML, or any code.
 4. You MUST include these exact slang terms: "瘋狂吸籌", "探氪", "春江鴨", "人踩人風險".
+
 Output EXACTLY with this structure:
 【🕵️ 另類數據 AI 偵測深度報告】
-1. 【🔥 散戶雙引擎：流動性正喺度衝擊邊個板塊？】
+1. 【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】
 2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-3. 【🎯 終極四維共振：最強爆發潛力股與高危陷阱】"""
+3. 【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"""
 
-    user_prompt = f"Write the Cantonese report now based on this data:\nReddit: {r_str}\nStockTwits: {t_str}\nInsiders: {i_str}\nCongress: {c_str}"
+    user_prompt = f"""
+Write the Cantonese report now based on this data:
+
+Reddit:
+{r_str}
+
+StockTwits:
+{t_str}
+
+X / FinTwit:
+{x_str}
+
+Insiders:
+{i_str}
+
+Congress:
+{c_str}
+"""
 
     try:
         response = requests.post(
@@ -668,7 +746,7 @@ def run_full_integration(final_df, progress_bar, status_text):
     sentiments = []
     reasons = []
 
-    for idx, row in breakout_df.iterrows():
+    for _, row in breakout_df.iterrows():
         ticker = row['Ticker']
         status_text.markdown(f"**終極驗證中...** 正在用 AI 掃描 `{ticker}` 嘅新聞基本面 ({len(sentiments)+1}/{total_stocks})")
         progress_bar.progress((len(sentiments)+1) / total_stocks)
@@ -703,7 +781,7 @@ with st.sidebar:
     app_mode = st.radio('可用模組', [
         '🎯 RS x MACD 動能狙擊手',
         '📰 近月 AI 洞察 (廣東話版)',
-        '🕵️ 另類數據雷達 (4大維度)',
+        '🕵️ 另類數據雷達 (5大維度)',
         '🔍 個股驗證模式 (Bottom-Up)',
         '⚔️ 終極雙劍合璧 (Full Integration)'
     ])
@@ -831,34 +909,44 @@ elif app_mode == '📰 近月 AI 洞察 (廣東話版)':
                     st.markdown(analyze_news_ai(news_list))
 
 # ==========================================
-# 12. 模組 C 顯示
+# 12. 模組 C 顯示：5大維度
 # ==========================================
-elif app_mode == '🕵️ 另類數據雷達 (4大維度)':
-    st.title('🕵️ 另類數據雷達 (4大維度)')
+elif app_mode == '🕵️ 另類數據雷達 (5大維度)':
+    st.title('🕵️ 另類數據雷達 (5大維度)')
 
     c1, c2 = st.columns(2)
     with c1:
         st.markdown('**1. Reddit WSB 討論熱度 (過去24h)**')
         r_df, r_msg = fetch_reddit_sentiment()
+        st.caption(r_msg)
         st.dataframe(r_df.head(8), use_container_width=True, hide_index=True)
+
     with c2:
         st.markdown('**2. StockTwits 全美熱搜榜 (即時)**')
         t_df, t_msg = fetch_stocktwits_trending()
+        st.caption(t_msg)
         st.dataframe(t_df.head(8), use_container_width=True, hide_index=True)
 
     c3, c4 = st.columns(2)
     with c3:
-        st.markdown('**3. 高層 Insider 真金白銀買入 (過去30日)**')
+        st.markdown('**3. X / FinTwit 社交情緒熱度 (過去7日)**')
+        x_df, x_msg = fetch_x_sentiment()
+        st.caption(x_msg)
+        st.dataframe(x_df.head(8), use_container_width=True, hide_index=True)
+
+    with c4:
+        st.markdown('**4. 高層 Insider 真金白銀買入 (過去30日)**')
         i_df = fetch_insider_buying()
         st.dataframe(i_df.head(8), use_container_width=True, hide_index=True)
-    with c4:
-        st.markdown('**4. 國會議員交易 (過去45日申報)**')
-        c_df, c_msg = fetch_congress_trades()
-        st.dataframe(c_df.head(8), use_container_width=True, hide_index=True)
 
-    if st.button('🚀 啟動 AI 四維交叉博弈分析', type='primary', use_container_width=True):
-        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析...'):
-            res = analyze_alt_data_ai(r_df, t_df, i_df, c_df)
+    st.markdown('**5. 國會議員交易 (過去45日申報)**')
+    c_df, c_msg = fetch_congress_trades()
+    st.caption(c_msg)
+    st.dataframe(c_df.head(8), use_container_width=True, hide_index=True)
+
+    if st.button('🚀 啟動 AI 五維交叉博弈分析', type='primary', use_container_width=True):
+        with st.spinner('🧠 AI 正在進行 Reddit + StockTwits + X + Insider + Congress 五維度深度分析...'):
+            res = analyze_alt_data_ai(r_df, t_df, x_df, i_df, c_df)
             st.markdown('### 🤖 另類數據 AI 偵測深度報告')
             with st.container(border=True):
                 st.markdown(res)
