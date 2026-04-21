@@ -15,7 +15,7 @@ import json
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title='🚀 美股全方位量化與 AI 平台', page_icon='📈', layout='wide')
 
-# --- 2. 終極暴力清洗函數 ---
+# --- 2. 輔助/清洗函數 ---
 def get_headers():
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -38,11 +38,11 @@ def convert_mcap_to_float(val):
     except Exception: return 0.0
 
 def clean_ai_response(text):
-    """終極防護清洗器：斬走所有英文廢話同 JSON"""
+    """專門對付 Reasoning 模型嘅清洗器"""
     if not isinstance(text, str): return str(text)
     text = text.strip()
     
-    # 1. 如果 AI 夾硬出咗 JSON，嘗試拆解
+    # 1. 拆解 JSON (如果有)
     if text.startswith('{'):
         try:
             parsed = json.loads(text)
@@ -50,11 +50,11 @@ def clean_ai_response(text):
             elif 'content' in parsed: text = parsed['content']
         except Exception: pass
         
-    # 2. 移除所有 DeepSeek 類模型嘅 <think> 思考過程
+    # 2. 徹底移除新版模型必定會有嘅 <think>...</think> 思考過程
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
     
-    # 3. 暴力截斷：搵第一個【符號，將前面所有英文廢話一刀切斬走！
+    # 3. 暴力截斷：搵第一個【符號，將前面所有漏網之魚嘅英文廢話一刀切斬走
     first_bracket = text.find('【')
     if first_bracket != -1:
         text = text[first_bracket:]
@@ -343,9 +343,10 @@ def analyze_news_ai(news_list):
 2. 【🚀 潛力爆發股全面掃描】：搵出潛力 Ticker，用廣東話詳細解釋。"""
 
     try:
+        # 使用官方最新 Default 模型 openai-fast
         res = requests.post(
             'https://text.pollinations.ai/',
-            json={'messages': [{'role': 'user', 'content': combined_prompt}], 'model': 'gpt-4o', 'temperature': 0.5},
+            json={'messages': [{'role': 'user', 'content': combined_prompt}], 'model': 'openai-fast'},
             timeout=60
         )
         result = clean_ai_response(res.text)
@@ -353,7 +354,7 @@ def analyze_news_ai(news_list):
     except Exception as e: return f'⚠️ AI 發生錯誤: {e}'
 
 # ==========================================
-#        模組 C：AI 交叉博弈分析引擎 (終極一刀切版)
+#        模組 C：AI 交叉博弈分析引擎 (完美適配新 API 版)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
@@ -362,7 +363,6 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
     i_str = insider_df.head(8).to_string(index=False) if not insider_df.empty else '無數據'
     c_str = congress_df.head(8).to_string(index=False) if not congress_df.empty else '無數據'
 
-    # 將指令全部壓縮為全中文單一 Prompt，徹底斷絕英文誘因
     combined_prompt = f"""請你扮演香港中環頂級美股策略分析師。
 【絕對強制要求】：
 1. 語言必須 100% 使用地道「香港廣東話口語」。
@@ -397,18 +397,17 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
 """
 
     try:
-        # 強制呼叫 GPT-4o，鎖死 temperature 減低發神經機率
+        # 使用官方最新 Default 模型 openai-fast，唔再強制鎖死 gpt-4o 避開 404 Error
         response = requests.post(
             'https://text.pollinations.ai/',
             json={
                 'messages': [{'role': 'user', 'content': combined_prompt}],
-                'model': 'gpt-4o',
-                'temperature': 0.5
+                'model': 'openai-fast'
             },
             timeout=80
         )
         
-        # 使用終極清洗器，只要見到英文前言就直接斬首
+        # 使用升級版清洗器，自動剔除 Reasoning 模型嘅所有 <think> 標籤
         result = clean_ai_response(response.text)
         return result if result else '⚠️ AI 輸出異常，請再試一次。'
         
@@ -539,7 +538,7 @@ elif app_mode == '🕵️ 另類數據雷達 (4大維度)':
 
     st.markdown('---')
     if st.button('🚀 啟動 AI 四維交叉博弈分析', type='primary', use_container_width=True):
-        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (強硬防護版，請稍候 15-30 秒)'):
+        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (已適配最新 API，請稍候 15-30 秒)'):
             res = analyze_alt_data_ai(r_df, t_df, i_df, c_df)
             st.markdown('### 🤖 另類數據 AI 偵測深度報告')
             with st.container(border=True):
