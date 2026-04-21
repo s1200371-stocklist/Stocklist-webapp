@@ -263,7 +263,7 @@ def extract_stock_sentiment_output(text):
     return label, body
 
 # ==========================================
-# 3. 新聞資料源 (新增 RSS 解析與備援)
+# 3. 新聞資料源 (RSS 解析與備援)
 # ==========================================
 def parse_rss_items(xml_text, source_name, limit=10):
     items = []
@@ -699,15 +699,23 @@ def fetch_single_stock_news(ticker):
         tkr = yf.Ticker(ticker)
         if hasattr(tkr, 'news') and isinstance(tkr.news, list):
             for item in tkr.news[:10]:
-                title = item.get('content', {}).get('title', item.get('title', ''))
-                if title: news_items.append(f"標題: {title} | 摘要: {str(item.get('content', {}).get('summary', item.get('summary', ''))[:220]}")
-    except Exception: pass
+                content = item.get('content', {}) if isinstance(item, dict) else {}
+                title = content.get('title', item.get('title', ''))
+                if title:
+                    summary = content.get('summary', item.get('summary', ''))
+                    news_items.append(f"標題: {title} | 摘要: {str(summary)[:220]}")
+    except Exception:
+        pass
+        
     if not news_items:
         try:
             news = finvizfinance(ticker).ticker_news()
             if not news.empty:
-                for _, row in news.head(10).iterrows(): news_items.append(f"標題: {row.get('Title', '')} | 來源: {row.get('Source', '')}")
-        except Exception: pass
+                for _, row in news.head(10).iterrows():
+                    news_items.append(f"標題: {row.get('Title', '')} | 來源: {row.get('Source', '')}")
+        except Exception:
+            pass
+            
     return news_items
 
 def analyze_single_stock_sentiment(ticker, news_items):
