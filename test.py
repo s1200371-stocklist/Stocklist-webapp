@@ -10,6 +10,7 @@ import requests
 import random
 import re
 import json
+import io  # 必須引入，用於 OpenInsider 的 HTML 解析
 
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title="🚀 美股全方位量化與 AI 平台", page_icon="📈", layout="wide")
@@ -18,15 +19,15 @@ st.set_page_config(page_title="🚀 美股全方位量化與 AI 平台", page_ic
 def get_headers():
     """模擬真實瀏覽器 Header 防止被封鎖"""
     user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0'
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0'
     ]
     return {
         'User-Agent': random.choice(user_agents),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Language': 'en-US,en;q=0.9',
     }
 
 def convert_mcap_to_float(val):
@@ -43,14 +44,17 @@ def clean_ai_response(text):
     if not isinstance(text, str): return str(text)
     text = text.strip()
     
+    # 嘗試解析 JSON (防禦 API 回傳原始 JSON)
     if text.startswith('{'):
         try:
             parsed = json.loads(text)
             text = parsed.get('content', parsed.get('choices', [{}])[0].get('message', {}).get('content', text))
         except: pass
 
+    # 移除 <think> 標籤 (針對新一代推理模型)
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     
+    # 定位報告起點 (防止 AI 漏出英文草稿)
     marker_1 = "【📉"
     marker_2 = "【🕵️"
     marker_3 = "【"
@@ -69,7 +73,8 @@ def clean_ai_response(text):
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
     """抓取 Reddit WSB 熱門股票 (返回 DataFrame, 狀態訊息)"""
-    # 嘗試 1: ApeWisdom API
+    
+    # 嘗試 1: ApeWisdom API (全新主力，專門監控 WSB，穩定性極高)
     try:
         url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
@@ -80,7 +85,7 @@ def fetch_reddit_sentiment():
                     {
                         'ticker': item['ticker'].upper(), 
                         'sentiment': 'Bullish' if item.get('mentions', 0) > 30 else 'Neutral',
-                        'no_of_comments': item.get('mentions', 0) * 5
+                        'no_of_comments': item.get('mentions', 0) * 5 # 放大數字符合顯示習慣
                     } for item in results[:15]
                 ])
                 return df_ape, "🟢 ApeWisdom API 運作正常"
@@ -98,7 +103,7 @@ def fetch_reddit_sentiment():
                 return df_trade.head(15), "🟢 Tradestie API 運作正常"
     except: pass
         
-    # 嘗試 3: 原生 Reddit JSON 解析
+    # 嘗試 3: 原生 Reddit JSON 解析 (最強備援方案)
     try:
         reddit_url = "https://www.reddit.com/r/wallstreetbets/hot.json?limit=50"
         res = requests.get(reddit_url, headers=get_headers(), timeout=10)
@@ -123,7 +128,7 @@ def fetch_reddit_sentiment():
                 return df_fallback, "🟡 Reddit 原生 JSON (API 被阻，備援啟動)"
     except: pass
     
-    # 嘗試 4: 離線模擬數據
+    # 嘗試 4: 離線模擬數據 (確保 AI 模組永不報錯)
     mock_data = [
         {'ticker': 'NVDA', 'sentiment': 'Bullish', 'no_of_comments': 1520},
         {'ticker': 'TSLA', 'sentiment': 'Bearish', 'no_of_comments': 940},
@@ -136,17 +141,74 @@ def fetch_reddit_sentiment():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
+    """獲取 Insider 買入 (強化版：OpenInsider 主力 + Finviz 備援 + 重試機制)"""
+    
+    # 方案 1: OpenInsider (較少封 IP，但要扮得似瀏覽器)
+    for attempt in range(2):
+        try:
+            if attempt > 0:
+                time.sleep(2 + random.random() * 2) # 被 block 就等 2-4 秒再試
+                
+            url = (
+                "http://openinsider.com/screener?"
+                "s=&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago="
+                "&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0"
+                "&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h="
+                "&sortcol=0&cnt=50&page=1"
+            )
+            # 強制用極度似真實 user 嘅 header
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'http://openinsider.com/',
+                'Connection': 'keep-alive'
+            }
+            
+            res = requests.get(url, headers=headers, timeout=(5, 20))
+            if res.status_code == 200:
+                tables = pd.read_html(io.StringIO(res.text))
+                if tables:
+                    df = tables[0].copy()
+                    df.columns = [str(c).strip() for c in df.columns]
+                    
+                    rename_map = {}
+                    for c in df.columns:
+                        cl = c.lower().strip()
+                        if cl == "ticker": rename_map[c] = "Ticker"
+                        elif cl in ("company name", "company"): rename_map[c] = "Company"
+                        elif cl in ("insider name", "insider"): rename_map[c] = "Owner"
+                        elif cl == "title": rename_map[c] = "Relationship"
+                        elif cl == "price": rename_map[c] = "Cost"
+                        elif cl == "value": rename_map[c] = "Value"
+                        
+                    df = df.rename(columns=rename_map)
+                    need = ["Ticker", "Owner", "Relationship", "Cost", "Value"]
+                    available = [c for c in need if c in df.columns]
+                    
+                    if "Ticker" in df.columns and len(available) >= 3:
+                        df = df[available].copy()
+                        df = df[df["Ticker"].astype(str).str.match(r"^[A-Z]{1,6}$")]
+                        return df.head(15).reset_index(drop=True)
+        except Exception:
+            pass
+
+    # 方案 2: Finviz Insider (備援方案)
     try:
         from finvizfinance.insider import Insider
         finsider = Insider(option='top insider trading recent buy')
         df = finsider.get_insider()
         if df is not None and not df.empty:
-            return df
-    except: pass
+            need = ["Ticker", "Owner", "Relationship", "Cost", "Value"]
+            available = [c for c in need if c in df.columns]
+            return df[available].head(15).reset_index(drop=True)
+    except Exception:
+        pass
+        
     return pd.DataFrame()
 
 # ==========================================
-#        模組 A：量化與財報引擎 (優化版)
+#        模組 A：量化與財報引擎
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_finviz_data():
@@ -167,7 +229,8 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
 
     for b in benchmarks_to_try:
         try:
-            temp_data = yf.download(b, period="2y", progress=False)
+            # 確保 group_by="column" 防止新版 yfinance 出錯
+            temp_data = yf.download(b, period="2y", progress=False, group_by="column")
             if not temp_data.empty and 'Close' in temp_data.columns:
                 close_data = temp_data['Close']
                 if isinstance(close_data, pd.Series): bench_data = close_data.to_frame(name=b)
@@ -191,7 +254,8 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
         if _progress_bar: _progress_bar.progress(min(1.0, (i + batch_size) / total_tickers))
             
         try:
-            data = yf.download(batch_tickers, period="2y", progress=False)
+            # 確保 group_by="column" 防止新版 yfinance MultiIndex 出錯
+            data = yf.download(batch_tickers, period="2y", progress=False, group_by="column")
             if data.empty or 'Close' not in data.columns: raise ValueError("No Data")
             close_prices = data['Close']
             if isinstance(close_prices, pd.Series): close_prices = close_prices.to_frame(name=batch_tickers[0])
@@ -205,6 +269,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                     max_req_len = max(sma_short, sma_long)
                     
                     if len(stock_price) > max_req_len + 1: 
+                        # RS
                         stock_norm = stock_price / stock_price.iloc[0]
                         aligned_bench = bench_norm.reindex(stock_norm.index).ffill()
                         rs_line = stock_norm / aligned_bench * 100
@@ -215,6 +280,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                         if latest_rs > latest_rs_ma: rs_stage = "🚀 啱啱突破" if prev_rs <= prev_rs_ma else "🔥 已經突破"
                         elif latest_rs >= latest_rs_ma * 0.95: rs_stage = "🎯 就快突破 (<5%)"
                         
+                        # MACD
                         ema12, ema26 = stock_price.ewm(span=12, adjust=False).mean(), stock_price.ewm(span=26, adjust=False).mean()
                         macd_line, signal_line = ema12 - ema26, (ema12 - ema26).ewm(span=9, adjust=False).mean()
                         latest_macd, prev_macd = float(macd_line.iloc[-1]), float(macd_line.iloc[-2])
@@ -222,6 +288,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                         if latest_macd > latest_sig: macd_stage = "🚀 啱啱突破" if prev_macd <= prev_sig else "🔥 已經突破"
                         elif abs(latest_sig) > 0.0001 and abs(latest_macd - latest_sig) <= abs(latest_sig) * 0.05: macd_stage = "🎯 就快突破 (<5%)"
                                     
+                        # SMA & Close
                         sma_s_line, sma_l_line = stock_price.rolling(window=sma_short).mean(), stock_price.rolling(window=sma_long).mean()
                         latest_close, latest_sma_s, latest_sma_l = float(stock_price.iloc[-1]), float(sma_s_line.iloc[-1]), float(sma_l_line.iloc[-1])
                         
@@ -590,7 +657,7 @@ elif app_mode == "🕵️ 另類數據雷達":
             i_df = fetch_insider_buying()
         if not i_df.empty:
             st.dataframe(i_df[['Ticker', 'Owner', 'Relationship', 'Cost', 'Value']].head(15), use_container_width=True, hide_index=True)
-        else: st.warning("⚠️ Finviz Insider 模組連線受阻，可能被頻率限制。")
+        else: st.warning("⚠️ 數據模組連線受阻，可能被目標網站封鎖或頻率限制，請稍後再試。")
 
     st.markdown("---")
     if st.button("🚀 啟動 AI 大戶散戶交叉博弈分析", type="primary", use_container_width=True):
