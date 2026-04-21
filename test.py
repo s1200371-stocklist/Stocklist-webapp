@@ -65,7 +65,7 @@ def clean_ai_response(text):
     return text.strip()
 
 # ==========================================
-#        模組 C：另類數據雷達 (四重防封鎖)
+#        模組 C：另類數據雷達 (防封鎖與兜底)
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
@@ -123,6 +123,7 @@ def fetch_reddit_sentiment():
         {'ticker': 'NVDA', 'sentiment': 'Bullish', 'no_of_comments': 1520},
         {'ticker': 'TSLA', 'sentiment': 'Bearish', 'no_of_comments': 940},
         {'ticker': 'PLTR', 'sentiment': 'Bullish', 'no_of_comments': 810},
+        {'ticker': 'ASTS', 'sentiment': 'Bullish', 'no_of_comments': 730},
         {'ticker': 'SMCI', 'sentiment': 'Bearish', 'no_of_comments': 620},
         {'ticker': 'AMD',  'sentiment': 'Bullish', 'no_of_comments': 430},
         {'ticker': 'GME',  'sentiment': 'Neutral', 'no_of_comments': 310}
@@ -134,7 +135,7 @@ def fetch_insider_buying():
     """獲取 Insider 買入 (終極防封鎖版：Yahoo Finance API + 兜底數據)"""
     target_tickers = [
         "NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA", "AMD", "PLTR",
-        "SMCI", "AVGO", "INTC", "CRM", "NFLX", "COIN", "ARM", "CRWD", "MARA"
+        "SMCI", "AVGO", "INTC", "CRM", "NFLX", "COIN", "ARM", "CRWD", "ASTS", "MARA"
     ]
     random.shuffle(target_tickers)
     results = []
@@ -175,9 +176,9 @@ def fetch_insider_buying():
             return df_final.head(15).reset_index(drop=True)
             
     mock_data = [
+        {'Ticker': 'ASTS', 'Owner': 'Abel Avellan', 'Relationship': 'CEO', 'Cost': '$24.50', 'Value': '$2,500,000'},
         {'Ticker': 'PLTR', 'Owner': 'Alexander Karp', 'Relationship': 'CEO', 'Cost': '$22.50', 'Value': '$1,500,000'},
         {'Ticker': 'AMD', 'Owner': 'Lisa Su', 'Relationship': 'CEO', 'Cost': '$155.20', 'Value': '$2,100,000'},
-        {'Ticker': 'SOFI', 'Owner': 'Anthony Noto', 'Relationship': 'CEO', 'Cost': '$7.80', 'Value': '$850,000'},
         {'Ticker': 'CRWD', 'Owner': 'George Kurtz', 'Relationship': 'CEO', 'Cost': '$280.00', 'Value': '$3,200,000'}
     ]
     return pd.DataFrame(mock_data)
@@ -406,7 +407,7 @@ def analyze_news_ai(news_list):
     【絕對強制規範】：
     1. 你必須用「香港廣東話口語（Cantonese）」寫呢份報告。
     2. 絕對禁止輸出任何 JSON、字典、編程代碼、括號結構或任何非中文內容。
-    3. 絕對禁止輸出你嘅思考過程、英文草稿 (例如 'Let's analyze', 'reasoning_content')。
+    3. 絕對禁止輸出你嘅思考過程、英文草稿。
     4. 請直接輸出 Markdown 格式分析報告，開頭第一句必須準確無誤地寫上：「【📉 近月市場焦點總結】」。
     """
     
@@ -428,24 +429,40 @@ def analyze_news_ai(news_list):
         return f"⚠️ 免費 AI 接口狀態異常 (HTTP {response.status_code})，請遲啲再試。"
     except Exception as e: return f"⚠️ AI 發生錯誤: {e}"
 
+# ==========================================
+#        模組 C：AI 交叉博弈分析引擎 (終極長文模板)
+# ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, insider_df):
-    system_prompt = """你係香港中環頂級策略分析師。
-    【絕對強制規範】：
-    1. 必須用地道「香港廣東話口語（Cantonese）」寫報告。
-    2. 絕對禁止輸出任何英文思考過程或 JSON。
-    3. 第一句必須寫：「【🕵️ 另類數據 AI 偵測報告】」。
-    """
-    r_str = reddit_df.head(10).to_string() if not reddit_df.empty else "無數據"
-    i_str = insider_df.head(10).to_string() if not insider_df.empty else "無數據"
+    r_str = reddit_df.head(10).to_string(index=False) if not reddit_df.empty else "無數據"
+    i_str = insider_df.head(10).to_string(index=False) if not insider_df.empty else "無數據"
     
-    user_prompt = f"""分析以下美股另類數據：
-    [Reddit WallStreetBets 熱門名單]:\n{r_str}\n
-    [內部人士 (Insider) 買入名單]:\n{i_str}\n
-    請用廣東話完成：
-    1. 【🔥 散戶正喺度瘋傳啲咩？】：用 100 字總結 Reddit 網民情緒同最關注嘅 Meme 股。
-    2. 【🏛️ 大佬真金白銀入緊邊隻？】：分析 Insider 買入名單，邊啲股票連高層都忍唔住入貨。
-    3. 【🎯 終極爆發潛力股】：對比兩份名單，搵出有冇邊隻股票係「大戶散戶齊齊入」或最具轉機，用 1-2 句解釋點解。"""
+    system_prompt = """
+    你係香港中環頂級策略分析師。
+    【絕對強制規範】：
+    1. 必須用地道「香港廣東話口語（Cantonese）」寫報告，語氣要專業得嚟夠貼地、生動（例如用：瘋狂討論緊、靜靜雞入貨、金睛火眼睇實）。
+    2. 絕對禁止輸出任何 JSON、字典、編程代碼、或英文思考過程。
+    3. 必須嚴格按照用戶提供嘅格式同標題輸出，絕對唔可以自己發明新標題或加多減少。
+    """
+    
+    user_prompt = f"""
+    分析以下美股另類數據：
+    [Reddit WallStreetBets 熱門名單 (散戶數據)]:\n{r_str}\n
+    [內部人士 Insider 買入名單 (大戶數據)]:\n{i_str}\n
+    
+    請嚴格根據以下格式輸出報告（請直接填寫內容，唔好加「以下是您的報告」等廢話）：
+    
+    【🕵️ 另類數據 AI 偵測報告】
+
+    1. 【🔥 散戶正喺度瘋傳啲咩？】
+    （用大概 100-150 字廣東話，總結 Reddit 網民情緒同最關注嘅 Meme 股，解釋佢哋炒緊啲咩概念。）
+
+    2. 【🏛️ 大佬真金白銀入緊邊隻？】
+    （用大概 100-150 字廣東話，分析 Insider 買入名單，指出邊啲板塊或股票連高層都忍唔住真金白銀狂掃，背後代表咩信心。）
+
+    3. 【🎯 終極爆發潛力股】
+    （綜合兩邊數據，挑選 1-2 隻「大戶散戶齊齊入」或最具轉機嘅股票。用大概 100-150 字廣東話精準解釋點解值得放入觀察名單，例如黃金交叉、鎖死籌碼等。）
+    """
     
     try:
         response = requests.post(
@@ -624,7 +641,6 @@ elif app_mode == "🕵️ 另類數據雷達":
         with st.spinner("攞緊 Insider 數據..."):
             i_df = fetch_insider_buying()
             
-        # 因為已經加咗 yfinance 同 mock 數據，一定會有嘢出，所以可以直接顯示
         st.dataframe(i_df[['Ticker', 'Owner', 'Relationship', 'Cost', 'Value']].head(15), use_container_width=True, hide_index=True)
 
     st.markdown("---")
@@ -632,7 +648,7 @@ elif app_mode == "🕵️ 另類數據雷達":
         if r_df.empty and i_df.empty:
             st.error("⚠️ 兩邊數據都攞唔到，AI 無嘢可以分析。請遲啲再試。")
         else:
-            with st.spinner("🧠 AI 正在分析大戶同散戶嘅博弈情況... (要等大概 15 秒)"):
+            with st.spinner("🧠 AI 正在分析大戶同散戶嘅博弈情況... (要等大概 15-20 秒)"):
                 res = analyze_alt_data_ai(r_df, i_df)
                 st.markdown("### 🤖 另類數據 AI 偵測報告")
                 with st.container(border=True):
