@@ -393,19 +393,41 @@ def fetch_single_stock_news(ticker):
     return news_items
 
 def analyze_single_stock_sentiment(ticker, news_items):
-    if not news_items: return "🧊 無法獲取新聞，情緒不明\n缺乏新聞數據，無法判定。"
+    if not news_items: return "【🧊 極度看淡】\n缺乏新聞數據，無法判定。"
     news_str = "\n".join(news_items)
-    system_prompt = """You are a Hong Kong financial AI.
+    
+    system_prompt = """You are a precise Hong Kong financial AI.
 Analyze the provided news for a specific stock.
-Output EXACTLY 2 lines in Hong Kong Cantonese (Traditional Chinese).
-Line 1 MUST BE ONE OF: 【🔥 極度看好】, 【📈 偏向樂觀】, 【⚖️ 中性觀望】, 【📉 偏向悲觀】, or 【🧊 極度看淡】.
-Line 2 MUST BE a concise 50-word summary explaining why."""
+You MUST output EXACTLY 2 lines. 
+Line 1 MUST BE EXACTLY ONE OF THESE FIVE TAGS:
+【🔥 極度看好】
+【📈 偏向樂觀】
+【⚖️ 中性觀望】
+【📉 偏向悲觀】
+【🧊 極度看淡】
+
+Line 2 MUST BE a single concise 50-word summary explaining why, written in Traditional Chinese (Hong Kong Cantonese style).
+
+Example Output:
+【📈 偏向樂觀】
+近期 AI 晶片需求強勁帶動營收大增，但市場憂慮產能跟唔上，整體情緒偏向樂觀但帶點隱憂。"""
+
     user_prompt = f"Stock: {ticker}\nNews:\n{news_str}"
     try:
-        res = requests.post('https://text.pollinations.ai/',json={'messages': [{'role': 'system', 'content': system_prompt},{'role': 'user', 'content': user_prompt}],'model': 'openai-fast'},timeout=20)
-        return clean_ai_response(res.text)
+        res = requests.post(
+            'https://text.pollinations.ai/',
+            json={'messages': [{'role': 'system', 'content': system_prompt},{'role': 'user', 'content': user_prompt}],'model': 'openai-fast'},
+            timeout=20
+        )
+        # 清洗並確保只回傳頭兩行
+        clean_text = clean_ai_response(res.text)
+        lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
+        if len(lines) >= 2:
+            return f"{lines[0]}\n{lines[1]}"
+        else:
+            return clean_text
     except Exception: 
-        return "⚠️ AI 分析超時\n發生網路錯誤。"
+        return "【⚖️ 中性觀望】\nAI 分析超時或發生網路錯誤。"
 
 # ==========================================
 #   模組 E：終極雙劍合璧 (Full Integration)
@@ -432,11 +454,11 @@ def run_full_integration(final_df, progress_bar, status_text):
         if news:
             ai_res = analyze_single_stock_sentiment(ticker, news)
             lines = ai_res.split('\n')
-            sentiment = lines[0] if len(lines) > 0 else "中性"
-            reason = lines[1] if len(lines) > 1 else ai_res
+            sentiment = lines[0] if len(lines) > 0 else "【⚖️ 中性觀望】"
+            reason = lines[1] if len(lines) > 1 else "無具體解釋。"
         else:
-            sentiment = "❓ 無新聞數據"
-            reason = "無"
+            sentiment = "【⚖️ 中性觀望】"
+            reason = "無新聞數據。"
             
         sentiments.append(sentiment)
         reasons.append(reason)
@@ -446,7 +468,7 @@ def run_full_integration(final_df, progress_bar, status_text):
     breakout_df['AI 50字總結'] = reasons
     
     # 剔除悲觀股票
-    golden_df = breakout_df[~breakout_df['AI 消息情緒'].str.contains('悲觀|看淡|無新聞', na=False)]
+    golden_df = breakout_df[~breakout_df['AI 消息情緒'].str.contains('悲觀|看淡|中性', na=False)]
     return golden_df
 
 
