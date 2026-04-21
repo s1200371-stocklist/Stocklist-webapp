@@ -1,5 +1,7 @@
 streamlit
 pandas
-finvizfinance
 yfinance
+finvizfinance
 requests
+lxml
+html5lib
