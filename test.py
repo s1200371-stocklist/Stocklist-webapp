@@ -67,11 +67,11 @@ def clean_ai_response(text):
     return text.strip()
 
 # ==========================================
-#        模組 C：另類數據雷達 (雙重防封鎖修復版)
+#        模組 C：另類數據雷達 (雙重防封鎖 + 狀態燈號)
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
-    """抓取 Reddit WSB 熱門股票 (主 API + 原生 Reddit 備援)"""
+    """抓取 Reddit WSB 熱門股票 (返回 DataFrame, 狀態訊息)"""
     
     # 嘗試 1: Tradestie API
     url = "https://tradestie.com/api/v1/apps/reddit"
@@ -81,7 +81,7 @@ def fetch_reddit_sentiment():
             if response.status_code == 200:
                 data = response.json()
                 if isinstance(data, list) and len(data) > 0:
-                    return pd.DataFrame(data)
+                    return pd.DataFrame(data), "🟢 Tradestie API 運作正常"
             time.sleep(1)
         except: continue
         
@@ -92,11 +92,10 @@ def fetch_reddit_sentiment():
         if res.status_code == 200:
             posts = res.json().get('data', {}).get('children', [])
             tickers = {}
-            ignore_words = {'WSB', 'YOLO', 'MOON', 'HOLD', 'PUMP', 'DROP', 'CALL', 'PUTS', 'EDIT', 'LOSS', 'GAIN', 'BULL', 'BEAR'}
+            ignore_words = {'WSB', 'YOLO', 'MOON', 'HOLD', 'PUMP', 'DROP', 'CALL', 'PUTS', 'EDIT', 'LOSS', 'GAIN', 'BULL', 'BEAR', 'THE', 'AND'}
             
             for p in posts:
                 title = p.get('data', {}).get('title', '')
-                # 簡單提取 $TICKER 或 3-4 個大楷字母嘅字作為股票代號
                 words = re.findall(r'\$?[A-Z]{3,4}\b', title)
                 for w in words:
                     clean_w = w.replace('$', '')
@@ -104,15 +103,23 @@ def fetch_reddit_sentiment():
                         tickers[clean_w] = tickers.get(clean_w, 0) + 1
             
             if tickers:
-                # 將結果轉換成類似 Tradestie 嘅格式
                 df_fallback = pd.DataFrame([
                     {'ticker': k, 'sentiment': 'Bullish' if v > 1 else 'Neutral', 'no_of_comments': v * 25}
                     for k, v in sorted(tickers.items(), key=lambda item: item[1], reverse=True)[:15]
                 ])
-                return df_fallback
+                return df_fallback, "🟡 Reddit 原生 JSON (API 被阻，備援啟動)"
     except: pass
     
-    return pd.DataFrame()
+    # 嘗試 3: 離線模擬數據 (確保 AI 模組永不報錯)
+    mock_data = [
+        {'ticker': 'NVDA', 'sentiment': 'Bullish', 'no_of_comments': 1520},
+        {'ticker': 'TSLA', 'sentiment': 'Bearish', 'no_of_comments': 940},
+        {'ticker': 'PLTR', 'sentiment': 'Bullish', 'no_of_comments': 810},
+        {'ticker': 'SMCI', 'sentiment': 'Bearish', 'no_of_comments': 620},
+        {'ticker': 'AMD',  'sentiment': 'Bullish', 'no_of_comments': 430},
+        {'ticker': 'GME',  'sentiment': 'Neutral', 'no_of_comments': 310}
+    ]
+    return pd.DataFrame(mock_data), "🔴 離線模擬數據 (所有網絡 API 暫被封鎖)"
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
@@ -562,10 +569,15 @@ elif app_mode == "🕵️ 另類數據雷達":
     with col_l:
         st.subheader("🌐 Reddit WSB 散戶熱度榜")
         with st.spinner("攞緊 Reddit 數據..."):
-            r_df = fetch_reddit_sentiment()
+            r_df, status_msg = fetch_reddit_sentiment()
+            
+        # 顯示狀態燈號
+        if "🟢" in status_msg: st.success(status_msg)
+        elif "🟡" in status_msg: st.warning(status_msg)
+        else: st.error(status_msg)
+            
         if not r_df.empty:
             st.dataframe(r_df[['ticker', 'sentiment', 'no_of_comments']].head(15), use_container_width=True, hide_index=True)
-        else: st.warning("⚠️ 暫時攞唔到 Reddit 數據。系統已經為你開啟原生 JSON 備援方案。")
             
     with col_r:
         st.subheader("🏛️ 近期高層 Insider 真金白銀買入")
