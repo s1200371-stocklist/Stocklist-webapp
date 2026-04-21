@@ -71,35 +71,37 @@ def clean_ai_response(text):
         return str(text)
 
     raw = text.strip()
-    raw = strip_markdown_code_fence(raw)
 
-    # 去 <think> 標籤
+    # 去 markdown code fence
+    raw = re.sub(r"^```(?:json|text|markdown)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    # 去 <think>...</think>
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
 
-    # 嘗試直接 parse 成 JSON
+    # 先試 parse 完整 JSON
     try:
         parsed = json.loads(raw)
-
         if isinstance(parsed, dict):
             if "choices" in parsed and parsed["choices"]:
                 msg = parsed["choices"][0].get("message", {})
                 if isinstance(msg, dict):
                     content = msg.get("content")
                     if isinstance(content, str) and content.strip():
-                        return strip_markdown_code_fence(content.strip())
+                        return content.strip()
 
             if "content" in parsed and isinstance(parsed["content"], str):
-                return strip_markdown_code_fence(parsed["content"].strip())
+                return parsed["content"].strip()
 
             if parsed.get("role") == "assistant":
                 if isinstance(parsed.get("content"), str) and parsed["content"].strip():
-                    return strip_markdown_code_fence(parsed["content"].strip())
+                    return parsed["content"].strip()
                 if isinstance(parsed.get("final"), str) and parsed["final"].strip():
-                    return strip_markdown_code_fence(parsed["final"].strip())
+                    return parsed["final"].strip()
     except Exception:
         pass
 
-    # 如果成段文字裡面包住 JSON
+    # 嘗試抽 JSON 片段
     json_match = re.search(r'(\{.*\})', raw, flags=re.DOTALL)
     if json_match:
         candidate = json_match.group(1)
@@ -108,37 +110,52 @@ def clean_ai_response(text):
             if isinstance(parsed, dict):
                 if parsed.get("role") == "assistant":
                     if isinstance(parsed.get("content"), str) and parsed["content"].strip():
-                        return strip_markdown_code_fence(parsed["content"].strip())
+                        return parsed["content"].strip()
                     if isinstance(parsed.get("final"), str) and parsed["final"].strip():
-                        return strip_markdown_code_fence(parsed["final"].strip())
+                        return parsed["final"].strip()
                 if "content" in parsed and isinstance(parsed["content"], str):
-                    return strip_markdown_code_fence(parsed["content"].strip())
+                    return parsed["content"].strip()
         except Exception:
             pass
 
-    # 強制清掉 reasoning_content / role / content 字段殘渣
+    # 去常見 metadata key
     raw = re.sub(r'"reasoning_content"\s*:\s*".*?"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"role"\s*:\s*"assistant"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"content"\s*:\s*', '', raw, flags=re.DOTALL)
 
-    raw = raw.replace('\\"', '"').replace("\\n", "\n").strip()
+    # 去 tool_calls / function_call / finish_reason 殘留
+    raw = re.sub(r',?\s*"tool_calls"\s*:\s*\[\s*\]\s*', '', raw, flags=re.DOTALL)
+    raw = re.sub(r',?\s*"tool_calls"\s*:\s*\[.*?\]\s*', '', raw, flags=re.DOTALL)
+    raw = re.sub(r',?\s*"function_call"\s*:\s*\{.*?\}\s*', '', raw, flags=re.DOTALL)
+    raw = re.sub(r',?\s*"finish_reason"\s*:\s*"tool_calls"\s*', '', raw, flags=re.DOTALL)
 
-    # 去首尾大括號
+    # 去殘餘符號
+    raw = raw.replace('\\"', '"').replace('\\n', '\n').strip()
     raw = re.sub(r'^\{+', '', raw).strip()
     raw = re.sub(r'\}+$', '', raw).strip()
 
-    # 去常見英語 thinking 垃圾行
+    # 去尾巴殘餘
+    raw = re.sub(r'"\s*,\s*"tool_calls"\s*:\s*\[\s*\]\s*$', '', raw, flags=re.DOTALL)
+    raw = re.sub(r',\s*"tool_calls"\s*:\s*\[\s*\]\s*$', '', raw, flags=re.DOTALL)
+    raw = re.sub(r'"\s*,\s*"tool_calls"\s*:\s*\[.*?\]\s*$', '', raw, flags=re.DOTALL)
+    raw = re.sub(r',\s*"tool_calls"\s*:\s*\[.*?\]\s*$', '', raw, flags=re.DOTALL)
+
+    # 去英語 thinking / parser 垃圾行
     bad_line_patterns = [
         r'^\s*we must\b.*$',
         r'^\s*let[\'’]s\b.*$',
         r'^\s*probably\b.*$',
         r'^\s*need to\b.*$',
         r'^\s*add insights\b.*$',
-        r'^\s*output exactly\b.*$',
+        r'^\s*also not use\b.*$',
+        r'^\s*use plain text\b.*$',
+        r'^\s*ensure we do not\b.*$',
+        r'^\s*only the final report\b.*$',
         r'^\s*json\b.*$',
         r'^\s*role\b.*$',
         r'^\s*assistant\b.*$',
         r'^\s*reasoning_content\b.*$',
+        r'^\s*tool_calls\b.*$',
     ]
 
     cleaned_lines = []
@@ -157,9 +174,42 @@ def clean_ai_response(text):
             cleaned_lines.append(line)
 
     raw = "\n".join(cleaned_lines)
+
+    # 最後全局去一次殘餘 token
+    raw = raw.replace('","tool_calls":[]', '')
+    raw = raw.replace('"tool_calls":[]', '')
+    raw = raw.replace('tool_calls":[]', '')
+    raw = raw.replace('","tool_calls":[],', '')
     raw = re.sub(r'\n{3,}', '\n\n', raw).strip()
 
     return raw
+
+def final_text_sanitize(text):
+    if not isinstance(text, str):
+        return str(text)
+
+    t = clean_ai_response(text)
+
+    trailing_patterns = [
+        r'","\s*tool_calls"\s*:\s*\[\s*\]\s*$',
+        r',\s*"tool_calls"\s*:\s*\[\s*\]\s*$',
+        r'"\s*,\s*"tool_calls"\s*:\s*\[.*?\]\s*$',
+        r',\s*"tool_calls"\s*:\s*\[.*?\]\s*$',
+        r'","\s*reasoning_content"\s*:\s*".*?$',
+        r',\s*"reasoning_content"\s*:\s*".*?$',
+        r'","\s*role"\s*:\s*"assistant".*?$',
+        r',\s*"role"\s*:\s*"assistant".*?$',
+    ]
+
+    for p in trailing_patterns:
+        t = re.sub(p, '', t, flags=re.DOTALL | re.IGNORECASE)
+
+    t = t.replace('","tool_calls":[]', '')
+    t = t.replace('"tool_calls":[]', '')
+    t = t.replace('tool_calls":[]', '')
+    t = t.replace('","tool_calls":[],', '')
+    t = re.sub(r'\n{3,}', '\n\n', t).strip()
+    return t
 
 def call_pollinations(messages, model='openai-fast', timeout=60):
     try:
@@ -171,17 +221,17 @@ def call_pollinations(messages, model='openai-fast', timeout=60):
             },
             timeout=timeout
         )
-        return clean_ai_response(response.text)
+        return final_text_sanitize(response.text)
     except Exception as e:
         return f"⚠️ AI 發生錯誤: {e}"
 
 def extract_cantonese_report(text):
-    cleaned = clean_ai_response(text)
+    cleaned = final_text_sanitize(text)
 
     anchor = "【🕵️ 另類數據 AI 偵測深度報告】"
     idx = cleaned.find(anchor)
     if idx != -1:
-        return cleaned[idx:].strip()
+        cleaned = cleaned[idx:].strip()
 
     headings = [
         "【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】",
@@ -202,13 +252,11 @@ def extract_cantonese_report(text):
             start = pos
             end = found_sections[i + 1][0] if i + 1 < len(found_sections) else len(cleaned)
             chunk = cleaned[start:end].strip()
+            chunk = final_text_sanitize(chunk)
             rebuilt.append(chunk)
         return "\n\n".join(rebuilt).strip()
 
-    fallback = cleaned
-    fallback = re.sub(r'^\s*\{.*?\}\s*$', '', fallback, flags=re.DOTALL)
-    fallback = re.sub(r'\n{3,}', '\n\n', fallback).strip()
-
+    fallback = final_text_sanitize(cleaned)
     if fallback:
         return f"【🕵️ 另類數據 AI 偵測深度報告】\n\n{fallback}"
 
@@ -226,8 +274,7 @@ def extract_stock_sentiment_output(text):
     fallback_label = "【⚖️ 中性觀望】"
     fallback_body = "市場消息面暫時未有一面倒優勢，利好與風險並存，現階段較適合保持審慎，等待更多業績、指引或催化消息再判斷後續方向。"
 
-    cleaned = clean_ai_response(text)
-    cleaned = re.sub(r'```.*?```', '', cleaned, flags=re.DOTALL)
+    cleaned = final_text_sanitize(text)
     lines = [line.strip() for line in cleaned.split('\n') if line.strip()]
 
     label = fallback_label
@@ -241,6 +288,8 @@ def extract_stock_sentiment_output(text):
         low = line.lower()
         if "reasoning_content" in low:
             continue
+        if "tool_calls" in low:
+            continue
         if '"role"' in low or '"content"' in low:
             continue
         if line.startswith("{") and line.endswith("}"):
@@ -249,8 +298,7 @@ def extract_stock_sentiment_output(text):
         body_lines.append(line)
 
     body = "\n\n".join(body_lines).strip()
-    body = re.sub(r'\n{3,}', '\n\n', body).strip()
-    body = re.sub(r'^[：:、，。；\-\s]+', '', body)
+    body = final_text_sanitize(body)
 
     if not body:
         body = fallback_body
@@ -326,7 +374,6 @@ def fetch_x_sentiment():
 
     if api_key:
         try:
-            # 之後如有正式供應商，可直接改 endpoint
             url = "https://api.adanos.org/x-stocks/sentiment"
             params = {"limit": 10, "period_days": 7}
             headers = {
@@ -720,7 +767,7 @@ You are a Hong Kong financial analyst.
 規則：
 1. 全文必須用香港廣東話 + 繁體中文。
 2. 唔可以輸出 JSON、XML、markdown code block。
-3. 唔可以輸出 reasoning、thoughts、reasoning_content。
+3. 唔可以輸出 reasoning、thoughts、reasoning_content、tool_calls。
 4. 篇幅不限，但只輸出最終報告。
 5. 直接由標題開始寫。
 
@@ -741,6 +788,7 @@ You are a Hong Kong financial analyst.
 記住：
 - 唔好輸出任何分析過程
 - 唔好輸出 JSON
+- 唔好輸出 tool_calls
 - 只輸出最終報告
 """.strip()
 
@@ -753,7 +801,7 @@ You are a Hong Kong financial analyst.
         timeout=60
     )
 
-    cleaned = clean_ai_response(result)
+    cleaned = final_text_sanitize(result)
     if "【📉 近月市場焦點總結】" not in cleaned:
         cleaned = f"【📉 近月市場焦點總結】\n\n{cleaned}"
     return cleaned
@@ -778,7 +826,7 @@ You are a Hong Kong financial analyst.
 3. 唔可以輸出 XML。
 4. 唔可以輸出 markdown code block。
 5. 唔可以解釋你自己點分析。
-6. 唔可以輸出 reasoning、thoughts、reasoning_content。
+6. 唔可以輸出 reasoning、thoughts、reasoning_content、tool_calls。
 7. 唔可以輸出英語句子，除咗股票代號、人名。
 8. 你一定要包含以下四個詞語：
    瘋狂吸籌
@@ -821,6 +869,7 @@ Congress:
 記住：
 - 只輸出最終報告正文
 - 唔好輸出任何解釋、JSON、前言、思考過程
+- 唔好輸出 tool_calls
 """.strip()
 
     result = call_pollinations(
@@ -883,7 +932,7 @@ You are a Hong Kong financial AI.
 【📉 偏向悲觀】
 【🧊 極度看淡】
 2. 第一行之後，內容必須用繁體中文香港廣東話自然分析。
-3. 唔可以輸出 JSON、XML、markdown code block、reasoning_content、分析過程。
+3. 唔可以輸出 JSON、XML、markdown code block、reasoning_content、tool_calls、分析過程。
 4. 篇幅不限，但只輸出最終答案。
 5. 如果好淡因素混雜，以【⚖️ 中性觀望】為優先。
 """.strip()
@@ -943,10 +992,10 @@ def run_full_integration(final_df, progress_bar, status_text):
 
         news = fetch_single_stock_news(ticker)
         if news:
-            ai_res = analyze_single_stock_sentiment(ticker, news)
+            ai_res = final_text_sanitize(analyze_single_stock_sentiment(ticker, news))
             lines = [x.strip() for x in ai_res.split('\n') if x.strip()]
             sentiment = lines[0] if len(lines) > 0 else "【⚖️ 中性觀望】"
-            reason = "\n\n".join(lines[1:]) if len(lines) > 1 else "無具體解釋。"
+            reason = final_text_sanitize("\n\n".join(lines[1:]) if len(lines) > 1 else "無具體解釋。")
         else:
             sentiment = "【⚖️ 中性觀望】"
             reason = "無新聞數據。"
@@ -1081,6 +1130,8 @@ if app_mode == '🎯 RS x MACD 動能狙擊手':
                     status_text.markdown('✅ **全市場掃描搞掂！**')
                     progress_bar.progress(100)
                     st.warning('⚠️ 搵唔到完全滿足條件嘅股票。')
+        else:
+            st.warning("⚠️ 暫時攞唔到 Finviz 股票清單。")
 
 # ==========================================
 # 11. 模組 B
@@ -1094,7 +1145,7 @@ elif app_mode == '📰 近月 AI 洞察 (廣東話版)':
 
         if news_list:
             with st.spinner('🧠 AI 認真睇緊內文，掃描所有潛力股票...'):
-                report = analyze_news_ai(news_list)
+                report = final_text_sanitize(analyze_news_ai(news_list))
                 st.markdown('### 🤖 華爾街 AI 深度洞察報告')
                 with st.container(border=True):
                     st.markdown(report)
@@ -1139,7 +1190,7 @@ elif app_mode == '🕵️ 另類數據雷達 (5大維度)':
 
     if st.button('🚀 啟動 AI 五維交叉博弈分析', type='primary', use_container_width=True):
         with st.spinner('🧠 AI 正在進行 Reddit + StockTwits + X + Insider + Congress 五維度深度分析...'):
-            res = analyze_alt_data_ai(r_df, t_df, x_df, i_df, c_df)
+            res = final_text_sanitize(analyze_alt_data_ai(r_df, t_df, x_df, i_df, c_df))
             st.markdown('### 🤖 另類數據 AI 偵測深度報告')
             with st.container(border=True):
                 st.markdown(res)
@@ -1158,13 +1209,13 @@ elif app_mode == '🔍 個股驗證模式 (Bottom-Up)':
             news = fetch_single_stock_news(target_ticker)
 
             if news:
-                res = analyze_single_stock_sentiment(target_ticker, news)
+                res = final_text_sanitize(analyze_single_stock_sentiment(target_ticker, news))
                 st.subheader(f"📊 {target_ticker} 驗證結果")
 
                 lines = [x.strip() for x in res.split('\n') if x.strip()]
                 if lines:
                     st.markdown(f"### {lines[0]}")
-                    body = "\n\n".join(lines[1:]) if len(lines) > 1 else "暫時無補充分析。"
+                    body = final_text_sanitize("\n\n".join(lines[1:]) if len(lines) > 1 else "暫時無補充分析。")
                     with st.container(border=True):
                         st.markdown(body)
                 else:
@@ -1190,9 +1241,12 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
         status_text, progress_bar = st.empty(), st.progress(0)
 
         status_text.markdown('**階段 1/2**: 正在執行全市場 RS x MACD 掃描 (強制設定市值 > 20億以加快速度)...')
-        f_screener = Overview()
-        f_screener.set_filter(filters_dict={'Market Cap.': '+Mid (over $2bln)'})
-        raw_data = f_screener.screener_view()
+        try:
+            f_screener = Overview()
+            f_screener.set_filter(filters_dict={'Market Cap.': '+Mid (over $2bln)'})
+            raw_data = f_screener.screener_view()
+        except Exception:
+            raw_data = pd.DataFrame()
 
         if not raw_data.empty:
             df_processed = raw_data.copy()
@@ -1237,7 +1291,7 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
                     st.markdown("### 🧠 AI 深度分析逐隻睇")
                     for _, row in golden_df.iterrows():
                         with st.expander(f"{row.get('Ticker', 'N/A')} | {row.get('AI 消息情緒', 'N/A')}"):
-                            st.markdown(row.get('AI 深度分析', '無分析內容。'))
+                            st.markdown(final_text_sanitize(row.get('AI 深度分析', '無分析內容。')))
                 else:
                     st.warning('⚠️ 技術突破股經過 AI 驗證後，發現大部分都未有足夠消息面支持，為安全起見，本次無黃金名單輸出。')
             else:
