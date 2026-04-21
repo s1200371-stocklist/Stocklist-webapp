@@ -38,11 +38,10 @@ def convert_mcap_to_float(val):
     except Exception: return 0.0
 
 def clean_ai_response(text):
-    """專門對付 Reasoning 模型嘅清洗器"""
+    """防禦開源模型：暴力斬除思考過程與英文開場白"""
     if not isinstance(text, str): return str(text)
     text = text.strip()
     
-    # 1. 拆解 JSON (如果有)
     if text.startswith('{'):
         try:
             parsed = json.loads(text)
@@ -50,11 +49,11 @@ def clean_ai_response(text):
             elif 'content' in parsed: text = parsed['content']
         except Exception: pass
         
-    # 2. 徹底移除新版模型必定會有嘅 <think>...</think> 思考過程
+    # 移除 <think> 標籤
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
     
-    # 3. 暴力截斷：搵第一個【符號，將前面所有漏網之魚嘅英文廢話一刀切斬走
+    # 強制斬首：如果 AI 講 "Here is the report..."，直接斬走，由【開始
     first_bracket = text.find('【')
     if first_bracket != -1:
         text = text[first_bracket:]
@@ -332,21 +331,23 @@ def analyze_news_ai(news_list):
     if not news_list: return '⚠️ 目前攞唔到新聞數據，請遲啲再試下。'
     news_text = '\n'.join([f"{i+1}. [{x['來源']}] 標題：{x['新聞標題']}\n摘要：{x['內文摘要']}\n" for i, x in enumerate(news_list)])
     
-    combined_prompt = f"""請扮演香港中環頂級金融分析師。
-【絕對強制要求】：必須 100% 用香港廣東話口語。絕對禁止輸出英文或任何代碼。回覆必須直接由「【📉 近月市場焦點總結】」開始。
+    # 使用英文指令確保開源模型聽得懂，但強制佢輸出廣東話
+    system_prompt = """You are a financial analyst in Hong Kong.
+CRITICAL RULE: You MUST output your ENTIRE response in Hong Kong Cantonese (廣東話口語) using Traditional Chinese (繁體中文).
+NEVER output English. NEVER output code or JSON.
+Start directly with: 【📉 近月市場焦點總結】"""
 
-分析以下新聞：
+    user_prompt = f"""Translate your financial analysis into CANTONESE based on these news:
 {news_text}
 
-請嚴格使用以下標題輸出長篇分析：
-1. 【📉 近月市場焦點總結】：總結大市走勢同情緒。
-2. 【🚀 潛力爆發股全面掃描】：搵出潛力 Ticker，用廣東話詳細解釋。"""
+Format exactly like this in CANTONESE:
+1. 【📉 近月市場焦點總結】：(Your Cantonese analysis here)
+2. 【🚀 潛力爆發股全面掃描】：(Your Cantonese analysis here)"""
 
     try:
-        # 使用官方最新 Default 模型 openai-fast
         res = requests.post(
             'https://text.pollinations.ai/',
-            json={'messages': [{'role': 'user', 'content': combined_prompt}], 'model': 'openai-fast'},
+            json={'messages': [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt}], 'model': 'openai-fast'},
             timeout=60
         )
         result = clean_ai_response(res.text)
@@ -354,7 +355,7 @@ def analyze_news_ai(news_list):
     except Exception as e: return f'⚠️ AI 發生錯誤: {e}'
 
 # ==========================================
-#        模組 C：AI 交叉博弈分析引擎 (完美適配新 API 版)
+#        模組 C：AI 交叉博弈分析引擎 (終極英文指令版)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
@@ -363,51 +364,57 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
     i_str = insider_df.head(8).to_string(index=False) if not insider_df.empty else '無數據'
     c_str = congress_df.head(8).to_string(index=False) if not congress_df.empty else '無數據'
 
-    combined_prompt = f"""請你扮演香港中環頂級美股策略分析師。
-【絕對強制要求】：
-1. 語言必須 100% 使用地道「香港廣東話口語」。
-2. 絕對禁止輸出任何英文前言、禁止輸出思考過程、禁止輸出 JSON 代碼。
-3. 你的回覆必須直接由「【🕵️ 另類數據 AI 偵測深度報告】」開始，不允許任何廢話。
+    # 針對開源 20B 模型嘅終極絕招：用英文落 Order，強制佢講廣東話
+    system_prompt = """You are a top-tier financial analyst in Hong Kong.
+CRITICAL RULE: You MUST write your ENTIRE report in Hong Kong Cantonese (廣東話口語) using Traditional Chinese characters (繁體中文). 
+NEVER output in English (except for stock tickers). NEVER output JSON. Do NOT output <think> tags.
+Use vivid Cantonese financial slang (e.g., 春江鴨, 掟貨, 掃貨, 人踩人風險, 瘋狂吸籌).
 
-真實數據如下：
-[散戶：Reddit WSB 熱門]:
+Always start your response EXACTLY with: 【🕵️ 另類數據 AI 偵測深度報告】"""
+
+    user_prompt = f"""Analyze the following data and write a detailed report in CANTONESE (廣東話口語).
+
+[Data 1: Reddit WSB]:
 {r_str}
 
-[散戶：StockTwits 熱搜]:
+[Data 2: StockTwits]:
 {t_str}
 
-[大戶：高層 Insider 買入]:
+[Data 3: Insider Buying]:
 {i_str}
 
-[大戶：國會議員交易]:
+[Data 4: Congress Trades]:
 {c_str}
 
-請立刻輸出極度深入嘅廣東話長篇報告，嚴格使用以下標題：
+Structure your CANTONESE report strictly with these headings (Do NOT use English in the paragraphs!):
 
 【🕵️ 另類數據 AI 偵測深度報告】
 
 1. 【🔥 散戶雙引擎：流動性正喺度衝擊邊個板塊？】
-（點名最熱門股票，引用具體次數。深入分析散戶情緒同板塊輪動，例如瘋狂吸籌定避險。）
+(Write detailed CANTONESE analysis here. Mention tickers and numbers.)
 
 2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-（點名有買入動作嘅 CEO 同政客，引用具體金額。深入分析春江鴨佈局邏輯。）
+(Write detailed CANTONESE analysis here. Explain the logic of CEOs and politicians.)
 
 3. 【🎯 終極四維共振：最強爆發潛力股與高危陷阱】
-（搵出黃金交叉股同高危陷阱股，點出人踩人風險。）
+(Write detailed CANTONESE analysis here. Pick the best overlap stock and the most dangerous retail-only stock.)
+
+Remember: Your entire explanation MUST be in CANTONESE! (例如：今日散戶瘋狂掃貨...)
 """
 
     try:
-        # 使用官方最新 Default 模型 openai-fast，唔再強制鎖死 gpt-4o 避開 404 Error
         response = requests.post(
             'https://text.pollinations.ai/',
             json={
-                'messages': [{'role': 'user', 'content': combined_prompt}],
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ],
                 'model': 'openai-fast'
             },
             timeout=80
         )
         
-        # 使用升級版清洗器，自動剔除 Reasoning 模型嘅所有 <think> 標籤
         result = clean_ai_response(response.text)
         return result if result else '⚠️ AI 輸出異常，請再試一次。'
         
@@ -538,7 +545,7 @@ elif app_mode == '🕵️ 另類數據雷達 (4大維度)':
 
     st.markdown('---')
     if st.button('🚀 啟動 AI 四維交叉博弈分析', type='primary', use_container_width=True):
-        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (已適配最新 API，請稍候 15-30 秒)'):
+        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (強制廣東話指令，請稍候 15-30 秒)'):
             res = analyze_alt_data_ai(r_df, t_df, i_df, c_df)
             st.markdown('### 🤖 另類數據 AI 偵測深度報告')
             with st.container(border=True):
