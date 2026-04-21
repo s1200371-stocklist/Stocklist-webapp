@@ -39,7 +39,7 @@ def convert_mcap_to_float(val):
     except Exception: return 0.0
 
 def clean_ai_response(text):
-    """終極 AI 輸出清洗器"""
+    """基本 AI 輸出清洗器"""
     if not isinstance(text, str): return str(text)
     text = text.strip()
     if text.startswith('{'):
@@ -48,10 +48,6 @@ def clean_ai_response(text):
             text = parsed.get('content', parsed.get('choices', [{}])[0].get('message', {}).get('content', text))
         except Exception: pass
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    for marker in ['【📉', '【🕵️', '【']:
-        if marker in text:
-            text = text[text.find(marker):]
-            break
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
     return text.replace('\\n', '\n').replace('\\"', '"').strip()
 
@@ -346,11 +342,17 @@ def analyze_news_ai(news_list):
     user_prompt = f'分析以下新聞：\n{news_text}\n1. 【📉 近月市場焦點總結】：總結大市走勢同情緒。\n2. 【🚀 潛力爆發股全面掃描】：搵出所有有潛力或炒作嘅Ticker，詳細用廣東話解釋點解睇好。'
     try:
         res = requests.post('https://text.pollinations.ai/', json={'messages': [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt}], 'model': 'openai'}, timeout=60)
-        return clean_ai_response(res.text) if res.status_code == 200 else '⚠️ AI 接口異常'
+        
+        # 強制截斷
+        raw_text = clean_ai_response(res.text)
+        if "【📉 近月市場焦點總結】" in raw_text:
+            raw_text = raw_text[raw_text.find("【📉 近月市場焦點總結】"):]
+            
+        return raw_text if raw_text else '⚠️ AI 接口異常'
     except Exception as e: return f'⚠️ AI 發生錯誤: {e}'
 
 # ==========================================
-#        模組 C：AI 交叉博弈分析引擎 (終極 Few-Shot 深度版)
+#        模組 C：AI 交叉博弈分析引擎 (終極防雜訊版)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
@@ -359,39 +361,20 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
     i_str = insider_df.head(8).to_string(index=False) if not insider_df.empty else '無數據'
     c_str = congress_df.head(8).to_string(index=False) if not congress_df.empty else '無數據'
 
-    system_prompt = """你係香港中環頂級策略分析師。
-【絕對強制規範】：
-1. 必須用地道「香港廣東話口語」寫報告，語氣要極度專業、深入，並保留生動形容詞（例如：瘋狂吸籌、大戶散戶大隻揪、人踩人風險、春江鴨）。
-2. 絕對禁止輸出任何 JSON、字典格式、或英文思考過程。
-3. 直接輸出純 Markdown 報告，段落要分明，好似頂級財經長文專欄咁。
-4. 必須精準引用我提供嘅真實數據（具體提及次數、買入金額、人名、股票代號）。
-5. 不設字數上限，每段分析要極度詳細深入，越長篇越好！
+    # 【終極防雜訊版 System Prompt】
+    # 徹底移除所有英文，只保留最強硬嘅中文/廣東話格式指令
+    system_prompt = """你係一位駐守香港中環嘅頂級美股策略分析師。
+【絕對強制輸出規則】：
+1. 語言：必須 100% 使用地道「香港廣東話口語（Cantonese）」。絕對禁止輸出任何英文思考過程（English thinking）、禁止輸出 JSON、禁止輸出代碼塊（Code blocks）。
+2. 語氣：極度專業、深入，同時使用生動嘅廣東話財經術語（例如：瘋狂吸籌、春江鴨、人踩人風險、大戶散戶大隻揪、派貨、撈底）。
+3. 數據引用：必須精準引用我提供嘅數據（例如：具體提及次數、金額、CEO名字、政客名字）。
+4. 格式：你嘅第一句回覆必須直接係「【🕵️ 另類數據 AI 偵測深度報告】」，然後直接開始第一部分，不允許任何開場白或廢話。
+5. 字數：不設上限，每段分析必須極度詳細同深入。"""
 
-以下係一個完全符合要求嘅輸出示範，請你照住呢個風格、深度同廣東話語氣，但內容必須根據我最新提供嘅真實數據重新撰寫：
-
----示範開始---
-【🕵️ 另類數據 AI 偵測深度報告】
-
-1. 【🔥 散戶雙引擎：流動性正喺度衝擊邊個板塊？】
-綜合 Reddit WallStreetBets 同 StockTwits 兩大散戶大本營嘅即時數據，今日全網散戶嘅投資情緒絕對可以用「極度貪婪、無懼高追」嚟形容。喺 Reddit WSB 方面，龍頭晶片股 $NVDA（英偉達）繼續以壓倒性嘅 1,520 次提及瘋狂霸榜，情緒標籤呈現一面倒嘅 Bullish，反映散戶對 AI 算力嘅信仰已經去到近乎宗教級別，深信黃仁勳可以繼續帶領大市破頂。緊隨其後嘅係電動車龍頭 $TSLA（特斯拉），雖然有高達 940 次提及，但情緒罕有地呈現 Bearish，網民明顯正喺度熱烈討論馬斯克近期嘅負面新聞，甚至有不少即日鮮交易員正準備集體開 Put 賭佢業績失利。
-
-與此同時，StockTwits 嘅全美熱搜榜就揭示咗另一股隱藏嘅資金暗流。散戶除咗盯實科技巨頭，仲將大量流動性湧入二三線嘅高光概念股，例如 $ASTS（AST SpaceMobile）喺 Reddit 錄得 810 次提及之餘，亦喺 StockTwits 討論區爆升，呢班「YOLO 族」正瘋狂炒作低軌衛星直連手機嘅顛覆性概念。整體嚟睇，散戶資金目前處於「科技權重股」同「高風險投機股」之間嘅劇烈板塊輪動，市場毫無避險意識，呢種極端情緒往往係大市即將出現單邊突破或者暴跌嘅前奏。
-
-2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-當散戶喺度末日狂歡嘅時候，透過追蹤過去 30 至 45 日嘅「聰明錢」同政客申報紀錄，發現呢班「春江鴨」嘅佈局邏輯完全係另一個世界。喺高層 Insider 真金白銀買入名單入面，最令人震驚嘅係網絡安全巨頭 $CRWD（CrowdStrike）嘅 CEO George Kurtz，佢喺近期市況波動之際，動用高達 $3,200,000 狂掃自家股票，成本價約 $280，強烈釋放出「公司基本面極度強勁、目前股價被嚴重低估」嘅終極信心信號。與此同時，$PLTR（Palantir）CEO Alexander Karp 亦靜靜雞以 $1,500,000 撈底，明顯係預期政府國防 AI 合約將迎來大爆發。
-
-更值得關注嘅係「國會山莊股神」Nancy Pelosi 嘅最新動向。根據最新申報，佢大手筆買入咗網絡安全龍頭 $PANW（Palo Alto Networks），涉資高達 $1,000,000 至 $5,000,000。將 $CRWD CEO 嘅增持同佩洛西買 $PANW 拼埋一齊睇，條資金線索就呼之欲出：頂層大戶同掌握國家機密嘅政客，正喺度瘋狂吸籌「網絡安全」板塊，好可能預見到未來將有重大國防預算傾斜或者大型網絡攻擊事件，趁大市震盪期間悄悄完成長線大茶飯嘅佈局。
-
-3. 【🎯 終極四維共振：最強爆發潛力股與高危陷阱】
-🟢 四維黃金交叉股：$NVDA 及 $CRWD
-經過大戶同散戶嘅四維數據交叉比對，$NVDA 毫無疑問係目前最強嘅共振爆發股。佢唔單止喺 Reddit 以 1,520 次提及稱霸散戶情緒榜，政客 Michael McCaul 亦申報買入 $100,000 至 $250,000 嘅 $NVDA，散戶狂熱流動性加上掌握晶片出口政策內幕嘅政客齊齊掃貨，推動力極具爆發力。另外 $CRWD 雖然散戶討論度未算最頂尖，但科技議員 Ro Khanna（申報買入 $15,000-$50,000）聯同 CEO George Kurtz 嘅三百萬美金增持，形成極強嘅「政商合璧」底部支撐，隨時準備一飛衝天。
-
-🔴 極度高危陷阱股：$TSLA
-必須發出嚴重嘅人踩人風險警告。$TSLA 雖然喺 Reddit WSB 錄得高達 940 次提及，但喺過去 30 日嘅 Insider 高層買入同過去 45 日嘅國會議員交易名單入面，完完全全搵唔到 $TSLA 嘅影。即係話，目前嘅交投純粹靠散戶互相廝殺支撐，聰明錢根本袖手旁觀，甚至可能已經一早派晒貨。缺乏大戶托底嘅情況下，一旦散戶情緒逆轉，極容易觸發斬倉踩踏式暴跌，強烈建議短線避之則吉。
----示範結束---"""
-
+    # 【極簡化 User Prompt】
+    # 只提供真實數據同埋大綱，唔好教佢點諗，避免佢將教學過程印出嚟
     user_prompt = f"""
-請根據以下最新真實數據，照住示範嘅廣東話風格同深度，重新撰寫一份全新嘅深度報告：
+以下係最新嘅真實另類數據：
 
 [散戶數據 1：Reddit WSB 熱門 (過去24小時)]:
 {r_str}
@@ -405,18 +388,18 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
 [大戶數據 2：國會議員交易 (過去45日)]:
 {c_str}
 
-請嚴格根據以下格式輸出（不設字數上限，每段要極度深入詳盡）：
+請立刻根據以上數據，寫出一份極度深入嘅廣東話財經分析長文。必須嚴格跟隨以下 3 個標題進行長篇分析：
 
 【🕵️ 另類數據 AI 偵測深度報告】
 
 1. 【🔥 散戶雙引擎：流動性正喺度衝擊邊個板塊？】
-（綜合 Reddit 同 StockTwits 數據，詳細引用具體提及次數，深入分析散戶情緒走向同板塊輪動。）
+（點名 Reddit 同 StockTwits 最熱門嘅 2-3 隻股票，引用具體提及次數。深入長篇分析散戶嘅情緒係極度貪婪定避險？佢哋瘋狂炒緊咩概念？）
 
 2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-（點名每位 CEO 同政客，引用具體買入金額，深入解讀佢哋嘅資金佈局邏輯。）
+（點名有買入動作嘅 CEO 同政客，引用具體買入金額。深入分析呢班「春江鴨」背後嘅資金佈局邏輯。）
 
 3. 【🎯 終極四維共振：最強爆發潛力股與高危陷阱】
-（搵出散戶同大戶都同時入緊嘅黃金交叉股，以及純散戶炒作無大戶跟進嘅高危陷阱股，詳細警告風險。）
+（結合散戶同大戶數據，搵出有潛力爆發嘅「黃金交叉股」，以及嚴重警告純靠散戶支撐嘅「高危陷阱股」，解釋背後嘅人踩人風險。）
 """
 
     try:
@@ -431,7 +414,18 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
             },
             timeout=80
         )
-        return clean_ai_response(response.text) if response.status_code == 200 else '⚠️ AI 分析暫時離線，請稍後再試。'
+        
+        # 基本清洗
+        raw_text = clean_ai_response(response.text)
+        
+        # 【強制截斷保險機制】
+        # 如果 AI 偷偷漏咗英文或者 JSON，強行斬走前半截廢話，確保第一句乾淨
+        marker = "【🕵️ 另類數據"
+        if marker in raw_text:
+            raw_text = raw_text[raw_text.find(marker):]
+            
+        return raw_text if raw_text else '⚠️ AI 輸出異常，請再試一次。'
+        
     except Exception as e:
         return f'⚠️ AI 分析發生錯誤: {e}'
 
@@ -559,7 +553,7 @@ elif app_mode == '🕵️ 另類數據雷達 (4大維度)':
 
     st.markdown('---')
     if st.button('🚀 啟動 AI 四維交叉博弈分析', type='primary', use_container_width=True):
-        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (加入 Few-Shot 範例，不設字數上限，請稍候 30-60 秒)'):
+        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (強硬防護版，請稍候 30-60 秒)'):
             res = analyze_alt_data_ai(r_df, t_df, i_df, c_df)
             st.markdown('### 🤖 另類數據 AI 偵測深度報告')
             with st.container(border=True):
