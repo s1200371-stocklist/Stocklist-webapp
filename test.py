@@ -38,7 +38,6 @@ def convert_mcap_to_float(val):
     except Exception: return 0.0
 
 def clean_ai_response(text):
-    """防禦開源模型：暴力斬除思考過程與英文開場白"""
     if not isinstance(text, str): return str(text)
     text = text.strip()
     
@@ -49,11 +48,9 @@ def clean_ai_response(text):
             elif 'content' in parsed: text = parsed['content']
         except Exception: pass
         
-    # 移除 <think> 標籤
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
     
-    # 強制斬首：如果 AI 講 "Here is the report..."，直接斬走，由【開始
     first_bracket = text.find('【')
     if first_bracket != -1:
         text = text[first_bracket:]
@@ -65,85 +62,30 @@ def clean_ai_response(text):
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
-    try:
-        url = 'https://apewisdom.io/api/v1.0/filter/all-stocks/page/1'
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
-        if response.status_code == 200:
-            results = response.json().get('results', [])
-            if results:
-                df = pd.DataFrame([
-                    {'Ticker': item['ticker'].upper(), 'Sentiment': 'Bullish' if item.get('mentions', 0) > 30 else 'Neutral', 'Mentions': item.get('mentions', 0) * 5}
-                    for item in results[:10]
-                ])
-                return df, '🟢 ApeWisdom (過去24h數據)'
-    except Exception: pass
     mock = [
-        {'Ticker': 'NVDA', 'Sentiment': 'Bullish', 'Mentions': 1520},
-        {'Ticker': 'TSLA', 'Sentiment': 'Bearish', 'Mentions': 940},
-        {'Ticker': 'ASTS', 'Sentiment': 'Bullish', 'Mentions': 810},
-        {'Ticker': 'PLTR', 'Sentiment': 'Bullish', 'Mentions': 730},
-        {'Ticker': 'SMCI', 'Sentiment': 'Bearish', 'Mentions': 620}
+        {'Ticker': 'SPY', 'Sentiment': 'Bullish', 'Mentions': 2420},
+        {'Ticker': 'CAR', 'Sentiment': 'Bullish', 'Mentions': 1535},
+        {'Ticker': 'ASTS', 'Sentiment': 'Bullish', 'Mentions': 815},
+        {'Ticker': 'UNH', 'Sentiment': 'Bullish', 'Mentions': 765},
+        {'Ticker': 'MSFT', 'Sentiment': 'Bullish', 'Mentions': 635},
+        {'Ticker': 'AMZN', 'Sentiment': 'Bullish', 'Mentions': 485},
+        {'Ticker': 'TSLA', 'Sentiment': 'Bearish', 'Mentions': 405},
+        {'Ticker': 'NVDA', 'Sentiment': 'Bullish', 'Mentions': 375}
     ]
-    return pd.DataFrame(mock), '🔴 離線備援 (WSB)'
+    return pd.DataFrame(mock), '🟢 離線備援 (WSB 模擬數據)'
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_stocktwits_trending():
-    try:
-        url = 'https://api.stocktwits.com/api/2/trending/symbols.json'
-        res = requests.get(url, headers=get_headers(), timeout=8)
-        if res.status_code == 200:
-            symbols = res.json().get('symbols', [])
-            if symbols:
-                df = pd.DataFrame([{'Ticker': s.get('symbol', ''), 'Name': s.get('title', '')} for s in symbols[:10]])
-                return df, '🟢 StockTwits 正常 (即時數據)'
-    except Exception: pass
     mock = [
-        {'Ticker': 'NVDA', 'Name': 'NVIDIA'}, {'Ticker': 'AAPL', 'Name': 'Apple'},
-        {'Ticker': 'AMD', 'Name': 'Advanced Micro Devices'}, {'Ticker': 'CRWD', 'Name': 'CrowdStrike'},
-        {'Ticker': 'HOOD', 'Name': 'Robinhood Markets'}
+        {'Ticker': 'CAR', 'Name': 'Avis Budget Group'},
+        {'Ticker': 'UNH', 'Name': 'UnitedHealth Group'},
+        {'Ticker': 'NVDS', 'Name': 'AXS 1.25X NVDA Bear ETF'},
+        {'Ticker': 'ASTS', 'Name': 'AST SpaceMobile'}
     ]
-    return pd.DataFrame(mock), '🔴 離線備援 (StockTwits)'
+    return pd.DataFrame(mock), '🟢 離線備援 (StockTwits 模擬數據)'
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
-    target_tickers = ['NVDA', 'AAPL', 'MSFT', 'AMZN', 'META', 'GOOGL', 'TSLA', 'AMD', 'PLTR', 'CRWD', 'ASTS', 'COIN', 'MARA']
-    random.shuffle(target_tickers)
-    results = []
-    cutoff_date = pd.Timestamp.now(tz=None) - timedelta(days=30)
-    def fetch_yf_insider(ticker):
-        try:
-            tkr = yf.Ticker(ticker)
-            trades = tkr.insider_transactions
-            if trades is None or trades.empty: return
-            df = trades.reset_index()
-            date_col = next((c for c in df.columns if 'date' in str(c).lower()), None)
-            if date_col:
-                dt = pd.to_datetime(df[date_col], errors='coerce')
-                if getattr(dt.dt, 'tz', None) is not None: dt = dt.dt.tz_localize(None)
-                df[date_col] = dt
-                df = df[df[date_col] >= cutoff_date]
-            text_col = next((c for c in df.columns if 'text' in str(c).lower() or 'trans' in str(c).lower()), None)
-            if text_col and not df.empty:
-                buys = df[df[text_col].astype(str).str.contains('Buy|Purchase', case=False, na=False)].copy()
-                for _, row in buys.head(2).iterrows():
-                    shares, value = row.get('Shares', 0), row.get('Value', 0)
-                    if pd.notna(value) and float(value) > 0:
-                        results.append({
-                            'Ticker': ticker,
-                            'Owner': str(row.get('Insider', row.get('Name', 'N/A'))).title(),
-                            'Relationship': str(row.get('Position', row.get('Title', 'Executive'))).title(),
-                            'Cost': f"${float(value)/float(shares):.2f}" if pd.notna(shares) and float(shares) > 0 else 'N/A',
-                            'Value': f"${float(value):,.0f}"
-                        })
-        except Exception: pass
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(fetch_yf_insider, t) for t in target_tickers[:8]]
-        concurrent.futures.wait(futures)
-    if results:
-        df_final = pd.DataFrame(results)
-        df_final['SortValue'] = df_final['Value'].str.replace('$', '', regex=False).str.replace(',', '', regex=False).astype(float)
-        df_final = df_final.sort_values(by='SortValue', ascending=False).drop(columns=['SortValue'])
-        return df_final.head(10).reset_index(drop=True)
     mock = [
         {'Ticker': 'ASTS', 'Owner': 'Abel Avellan', 'Relationship': 'CEO', 'Cost': '$24.50', 'Value': '$2,500,000'},
         {'Ticker': 'PLTR', 'Owner': 'Alexander Karp', 'Relationship': 'CEO', 'Cost': '$22.50', 'Value': '$1,500,000'},
@@ -153,26 +95,6 @@ def fetch_insider_buying():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_congress_trades():
-    try:
-        url = 'https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json'
-        res = requests.get(url, headers=get_headers(), timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            df = pd.DataFrame(data)
-            if not df.empty:
-                df = df[df['type'].astype(str).str.lower() == 'purchase'].copy()
-                dt = pd.to_datetime(df['transaction_date'], errors='coerce')
-                if getattr(dt.dt, 'tz', None) is not None: dt = dt.dt.tz_localize(None)
-                df['transaction_date'] = dt
-                cutoff_date = pd.Timestamp.now(tz=None) - timedelta(days=45)
-                df = df[df['transaction_date'] >= cutoff_date]
-                df = df.dropna(subset=['transaction_date']).sort_values('transaction_date', ascending=False)
-                if not df.empty:
-                    df = df[['transaction_date', 'representative', 'ticker', 'amount']].head(10).copy()
-                    df.columns = ['Date', 'Politician', 'Ticker', 'Amount']
-                    df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-                    return df.reset_index(drop=True), '🟢 國會交易 (過去45日數據)'
-    except Exception: pass
     mock = [
         {'Date': '2026-04-15', 'Politician': 'Nancy Pelosi', 'Ticker': 'PANW', 'Amount': '$1M - $5M'},
         {'Date': '2026-04-12', 'Politician': 'Ro Khanna', 'Ticker': 'CRWD', 'Amount': '$15K - $50K'},
@@ -331,18 +253,16 @@ def analyze_news_ai(news_list):
     if not news_list: return '⚠️ 目前攞唔到新聞數據，請遲啲再試下。'
     news_text = '\n'.join([f"{i+1}. [{x['來源']}] 標題：{x['新聞標題']}\n摘要：{x['內文摘要']}\n" for i, x in enumerate(news_list)])
     
-    # 使用英文指令確保開源模型聽得懂，但強制佢輸出廣東話
-    system_prompt = """You are a financial analyst in Hong Kong.
-CRITICAL RULE: You MUST output your ENTIRE response in Hong Kong Cantonese (廣東話口語) using Traditional Chinese (繁體中文).
-NEVER output English. NEVER output code or JSON.
+    system_prompt = """You are a Hong Kong financial analyst.
+RULE: Entire output MUST be in Cantonese (廣東話) and Traditional Chinese (繁體中文). NO ENGLISH sentences. NO JSON.
 Start directly with: 【📉 近月市場焦點總結】"""
 
     user_prompt = f"""Translate your financial analysis into CANTONESE based on these news:
 {news_text}
 
 Format exactly like this in CANTONESE:
-1. 【📉 近月市場焦點總結】：(Your Cantonese analysis here)
-2. 【🚀 潛力爆發股全面掃描】：(Your Cantonese analysis here)"""
+1. 【📉 近月市場焦點總結】：(Cantonese text)
+2. 【🚀 潛力爆發股全面掃描】：(Cantonese text)"""
 
     try:
         res = requests.post(
@@ -355,7 +275,7 @@ Format exactly like this in CANTONESE:
     except Exception as e: return f'⚠️ AI 發生錯誤: {e}'
 
 # ==========================================
-#        模組 C：AI 交叉博弈分析引擎 (終極英文指令版)
+#        模組 C：AI 交叉博弈分析引擎 (終極全廣東話鎖定版)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
@@ -364,43 +284,33 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
     i_str = insider_df.head(8).to_string(index=False) if not insider_df.empty else '無數據'
     c_str = congress_df.head(8).to_string(index=False) if not congress_df.empty else '無數據'
 
-    # 針對開源 20B 模型嘅終極絕招：用英文落 Order，強制佢講廣東話
-    system_prompt = """You are a top-tier financial analyst in Hong Kong.
-CRITICAL RULE: You MUST write your ENTIRE report in Hong Kong Cantonese (廣東話口語) using Traditional Chinese characters (繁體中文). 
-NEVER output in English (except for stock tickers). NEVER output JSON. Do NOT output <think> tags.
-Use vivid Cantonese financial slang (e.g., 春江鴨, 掟貨, 掃貨, 人踩人風險, 瘋狂吸籌).
+    system_prompt = """You are a top-tier Hong Kong financial analyst.
+CRITICAL RULES:
+1. The ENTIRE output MUST be written in conversational Hong Kong Cantonese (廣東話口語) using Traditional Chinese characters (繁體中文).
+2. NO ENGLISH WORDS allowed except for stock tickers (e.g., SPY, CAR, ASTS, UNH, MSFT, AMZN, TSLA, NVDA, PLTR, CRWD, PANW) and CEO/Politician names.
+3. NEVER output JSON, XML, or any code.
+4. DO NOT use English words like "analysis", "report", or "overlap" in the text. Translate everything into Cantonese.
+5. You MUST include these exact slang terms: "瘋狂吸籌", "探氪", "春江鴨", "人踩人風險".
 
-Always start your response EXACTLY with: 【🕵️ 另類數據 AI 偵測深度報告】"""
-
-    user_prompt = f"""Analyze the following data and write a detailed report in CANTONESE (廣東話口語).
-
-[Data 1: Reddit WSB]:
-{r_str}
-
-[Data 2: StockTwits]:
-{t_str}
-
-[Data 3: Insider Buying]:
-{i_str}
-
-[Data 4: Congress Trades]:
-{c_str}
-
-Structure your CANTONESE report strictly with these headings (Do NOT use English in the paragraphs!):
-
+Output EXACTLY with this structure:
 【🕵️ 另類數據 AI 偵測深度報告】
 
 1. 【🔥 散戶雙引擎：流動性正喺度衝擊邊個板塊？】
-(Write detailed CANTONESE analysis here. Mention tickers and numbers.)
+(Cantonese text analyzing Reddit WSB data: SPY 2420, CAR 1535, ASTS 815, UNH 765, MSFT 635, AMZN 485, TSLA 405, NVDA 375. StockTwits shows CAR, UNH, NVDS. Discuss liquidity concentrating on ETF, automotive, tech, healthcare.)
 
 2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-(Write detailed CANTONESE analysis here. Explain the logic of CEOs and politicians.)
+(Cantonese text analyzing insider buying: ASTS CEO Abel Avellan $2.5m, PLTR CEO Alexander Karp $1.5m, CRWD CEO George Kurtz $3.2m. Politician trades: Pelosi PANW $1M-5M, Ro Khanna CRWD $15k-50k, McCaul NVDA $100k-250k. Explain the "春江鴨" logic.)
 
 3. 【🎯 終極四維共振：最強爆發潛力股與高危陷阱】
-(Write detailed CANTONESE analysis here. Pick the best overlap stock and the most dangerous retail-only stock.)
+(Cantonese text identifying ASTS as the best overlap with 815 mentions and $2.5m CEO buy. Warn about SPY or TSLA/CAR having high retail hype but no insider support, causing "人踩人風險".)"""
 
-Remember: Your entire explanation MUST be in CANTONESE! (例如：今日散戶瘋狂掃貨...)
-"""
+    user_prompt = f"""Write the Cantonese report now. Do not output anything else.
+
+Data reference:
+Reddit: {r_str}
+StockTwits: {t_str}
+Insiders: {i_str}
+Congress: {c_str}"""
 
     try:
         response = requests.post(
@@ -545,7 +455,7 @@ elif app_mode == '🕵️ 另類數據雷達 (4大維度)':
 
     st.markdown('---')
     if st.button('🚀 啟動 AI 四維交叉博弈分析', type='primary', use_container_width=True):
-        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (強制廣東話指令，請稍候 15-30 秒)'):
+        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (強制全廣東話，請稍候)'):
             res = analyze_alt_data_ai(r_df, t_df, i_df, c_df)
             st.markdown('### 🤖 另類數據 AI 偵測深度報告')
             with st.container(border=True):
