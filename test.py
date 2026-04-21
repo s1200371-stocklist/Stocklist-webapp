@@ -35,7 +35,8 @@ def convert_mcap_to_float(val):
         if 'B' in val: return float(val.replace('B', '')) * 1000
         if 'M' in val: return float(val.replace('M', ''))
         return float(val)
-    except Exception: return 0.0
+    except Exception: 
+        return 0.0
 
 def clean_ai_response(text):
     if not isinstance(text, str): return str(text)
@@ -45,11 +46,11 @@ def clean_ai_response(text):
             parsed = json.loads(text)
             if 'choices' in parsed: text = parsed['choices'][0]['message']['content']
             elif 'content' in parsed: text = parsed['content']
-        except Exception: pass
+        except Exception: 
+            pass
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
     
-    # 防止 API 出現前面嘅英文廢話，搵第一個【
     first_bracket = text.find('【')
     if first_bracket != -1:
         text = text[first_bracket:]
@@ -71,7 +72,9 @@ def fetch_reddit_sentiment():
                     for item in results[:10]
                 ])
                 return df, '🟢 ApeWisdom (過去24h數據)'
-    except Exception: pass
+    except Exception: 
+        pass
+    
     mock = [
         {'Ticker': 'SPY',  'Sentiment': 'Bullish', 'Mentions': 2420},
         {'Ticker': 'CAR',  'Sentiment': 'Bullish', 'Mentions': 1535},
@@ -94,7 +97,9 @@ def fetch_stocktwits_trending():
             if symbols:
                 df = pd.DataFrame([{'Ticker': s.get('symbol', ''), 'Name': s.get('title', '')} for s in symbols[:10]])
                 return df, '🟢 StockTwits 正常 (即時數據)'
-    except Exception: pass
+    except Exception: 
+        pass
+        
     mock = [
         {'Ticker': 'CAR',  'Name': 'Avis Budget Group'},
         {'Ticker': 'UNH',  'Name': 'UnitedHealth Group'},
@@ -109,6 +114,7 @@ def fetch_insider_buying():
     random.shuffle(target_tickers)
     results = []
     cutoff_date = pd.Timestamp.now(tz=None) - timedelta(days=30)
+    
     def fetch_yf_insider(ticker):
         try:
             tkr = yf.Ticker(ticker)
@@ -134,14 +140,18 @@ def fetch_insider_buying():
                             'Cost': f"${float(value)/float(shares):.2f}" if pd.notna(shares) and float(shares) > 0 else 'N/A',
                             'Value': f"${float(value):,.0f}"
                         })
-        except Exception: pass
+        except Exception: 
+            pass
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(fetch_yf_insider, t) for t in target_tickers[:8]]
         concurrent.futures.wait(futures)
+        
     if results:
         df_final = pd.DataFrame(results)
         df_final['SortValue'] = df_final['Value'].str.replace('$','',regex=False).str.replace(',','',regex=False).astype(float)
         return df_final.sort_values('SortValue', ascending=False).drop(columns=['SortValue']).head(10).reset_index(drop=True)
+        
     return pd.DataFrame([
         {'Ticker':'ASTS','Owner':'Abel Avellan','Relationship':'CEO','Cost':'$24.50','Value':'$2,500,000'},
         {'Ticker':'PLTR','Owner':'Alexander Karp','Relationship':'CEO','Cost':'$22.50','Value':'$1,500,000'},
@@ -167,7 +177,9 @@ def fetch_congress_trades():
                     df.columns = ['Date','Politician','Ticker','Amount']
                     df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
                     return df.reset_index(drop=True), '🟢 國會交易 (過去45日數據)'
-    except Exception: pass
+    except Exception: 
+        pass
+    
     return pd.DataFrame([
         {'Date':'2026-04-15','Politician':'Nancy Pelosi','Ticker':'PANW','Amount':'$1M - $5M'},
         {'Date':'2026-04-12','Politician':'Ro Khanna','Ticker':'CRWD','Amount':'$15K - $50K'},
@@ -183,7 +195,8 @@ def fetch_finviz_data():
         f_screener = Overview()
         f_screener.set_filter(filters_dict={'Market Cap.': '+Small (over $300mln)'})
         return f_screener.screener_view()
-    except Exception: return pd.DataFrame()
+    except Exception: 
+        return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batch_size=200, _progress_bar=None, _status_text=None):
@@ -195,10 +208,13 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
             if not tmp.empty and 'Close' in tmp.columns:
                 bench_data = tmp['Close'].to_frame(name=b) if isinstance(tmp['Close'], pd.Series) else tmp['Close']
                 used_bench = b; break
-        except Exception: continue
+        except Exception: 
+            continue
+            
     if bench_data.empty: return results
     if getattr(bench_data.index, 'tz', None) is not None: bench_data.index = bench_data.index.tz_localize(None)
     bench_norm = bench_data[used_bench] / bench_data[used_bench].iloc[0]
+    
     for i in range(0, len(tickers), batch_size):
         batch_tickers = tickers[i:i+batch_size]
         if _status_text: _status_text.markdown(f'**階段 2/3**: 計緊技術指標... (`{min(i+batch_size, len(tickers))}` / `{len(tickers)}`)')
@@ -210,6 +226,7 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
             if isinstance(cp, pd.Series): cp = cp.to_frame(name=batch_tickers[0])
             cp = cp.ffill().dropna(how='all')
             if getattr(cp.index,'tz',None) is not None: cp.index = cp.index.tz_localize(None)
+            
             for ticker in batch_tickers:
                 rs, macd_s, sma_t = '無','無', False
                 if ticker in cp.columns and not cp[ticker].dropna().empty:
@@ -220,10 +237,12 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                         rma = rl.rolling(25).mean()
                         if float(rl.iloc[-1])>float(rma.iloc[-1]): rs = '🚀 啱啱突破' if float(rl.iloc[-2])<=float(rma.iloc[-2]) else '🔥 已經突破'
                         elif float(rl.iloc[-1])>=float(rma.iloc[-1])*0.95: rs = '🎯 就快突破 (<5%)'
+                        
                         e12,e26=sp.ewm(span=12,adjust=False).mean(),sp.ewm(span=26,adjust=False).mean()
                         ml=e12-e26; sl=ml.ewm(span=9,adjust=False).mean()
                         if float(ml.iloc[-1])>float(sl.iloc[-1]): macd_s='🚀 啱啱突破' if float(ml.iloc[-2])<=float(sl.iloc[-2]) else '🔥 已經突破'
                         elif abs(float(ml.iloc[-1])-float(sl.iloc[-1]))<=max(abs(float(sl.iloc[-1]))*0.05,1e-9): macd_s='🎯 就快突破 (<5%)'
+                        
                         ss,ls=sp.rolling(sma_short).mean(),sp.rolling(sma_long).mean()
                         lc,lss,lls=float(sp.iloc[-1]),float(ss.iloc[-1]),float(ls.iloc[-1])
                         tok=lss>lls
@@ -248,7 +267,7 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
                 if q is None or q.empty: continue
                 cols = list(q.columns)[:4]
                 try: cols = sorted(cols)
-                except: cols = cols[::-1]
+                except Exception: cols = cols[::-1]
                 er, sr = None, None
                 for r in ['Diluted EPS','Basic EPS','Normalized EPS']:
                     if r in q.index: er=q.loc[r]; break
@@ -259,8 +278,10 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
                 def fv(vs,s=False): return ' | '.join(['-' if v is None else (f'{v/1e9:.2f}B' if s and v>=1e9 else (f'{v/1e6:.2f}M' if s and v>=1e6 else f'{v:.2f}')) for v in vs])
                 def fg(vs): out=['-']; [out.append(f'{(vs[i]-vs[i-1])/abs(vs[i-1])*100:+.1f}%' if vs[i] and vs[i-1] and vs[i-1]!=0 else '-') for i in range(1,len(vs))]; return ' | '.join(out)
                 return {'Ticker':t,'EPS (近4季)':fv(ev),'EPS Growth (QoQ)':fg(ev),'Sales (近4季)':fv(sv,True),'Sales Growth (QoQ)':fg(sv)}
-            except: time.sleep(1)
+            except Exception: 
+                time.sleep(1)
         return {'Ticker':t,'EPS (近4季)':'N/A','EPS Growth (QoQ)':'N/A','Sales (近4季)':'N/A','Sales Growth (QoQ)':'N/A'}
+        
     empty_df=pd.DataFrame(columns=['Ticker','EPS (近4季)','EPS Growth (QoQ)','Sales (近4季)','Sales Growth (QoQ)'])
     if not tickers: return empty_df
     results, done = [], 0
@@ -287,7 +308,8 @@ def fetch_top_news():
                 for _, row in news.head(15).iterrows():
                     if row['Title'] not in seen:
                         seen.add(row['Title']); news_items.append({'來源':row['Source'],'新聞標題':row['Title'],'內文摘要':'（來自 Finviz 標題）'})
-    except: pass
+    except Exception: 
+        pass
     try:
         for t in ['SPY','QQQ','NVDA','AAPL']:
             tkr = yf.Ticker(t)
@@ -298,19 +320,23 @@ def fetch_top_news():
                         seen.add(title)
                         summary=item.get('content',{}).get('summary',item.get('summary','無內文'))
                         news_items.append({'來源':item.get('publisher','Finance News'),'新聞標題':title,'內文摘要':str(summary)[:200]})
-    except: pass
+    except Exception: 
+        pass
     return news_items
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_news_ai(news_list):
     if not news_list: return '⚠️ 目前攞唔到新聞數據，請遲啲再試下。'
     news_text='\n'.join([f"{i+1}. [{x['來源']}] 標題：{x['新聞標題']}\n摘要：{x['內文摘要']}\n" for i,x in enumerate(news_list)])
+    
     system_prompt="You are a Hong Kong financial analyst.\nRULE: Entire output MUST be in Cantonese (廣東話) and Traditional Chinese (繁體中文). NO ENGLISH sentences. NO JSON.\nStart directly with: 【📉 近月市場焦點總結】"
     user_prompt=f"Translate your financial analysis into CANTONESE based on these news:\n{news_text}\n\nFormat in CANTONESE:\n1. 【📉 近月市場焦點總結】\n2. 【🚀 潛力爆發股全面掃描】"
+    
     try:
         res=requests.post('https://text.pollinations.ai/',json={'messages':[{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}],'model':'openai-fast'},timeout=60)
         return clean_ai_response(res.text) or '⚠️ AI 接口異常'
-    except Exception as e: return f'⚠️ AI 發生錯誤: {e}'
+    except Exception as e: 
+        return f'⚠️ AI 發生錯誤: {e}'
 
 # ==========================================
 #   模組 C：AI 交叉博弈分析引擎
@@ -336,7 +362,8 @@ Output EXACTLY with this structure:
     try:
         response = requests.post('https://text.pollinations.ai/',json={'messages': [{'role': 'system', 'content': system_prompt},{'role': 'user', 'content': user_prompt}],'model': 'openai-fast'},timeout=80)
         return clean_ai_response(response.text) or '⚠️ AI 輸出異常，請再試一次。'
-    except Exception as e: return f'⚠️ AI 分析發生錯誤: {e}'
+    except Exception as e: 
+        return f'⚠️ AI 分析發生錯誤: {e}'
 
 # ==========================================
 #   模組 D：個股驗證模式 (Bottom-Up)
@@ -351,18 +378,22 @@ def fetch_single_stock_news(ticker):
                 title = item.get('content', {}).get('title', item.get('title', ''))
                 summary = item.get('content', {}).get('summary', item.get('summary', '無摘要'))
                 if title: news_items.append(f"標題: {title} | 摘要: {summary[:100]}")
-    except Exception: pass
+    except Exception: 
+        pass
+        
     if not news_items:
         try:
             news = finvizfinance(ticker).ticker_news()
             if not news.empty:
                 for _, row in news.head(10).iterrows():
                     news_items.append(f"標題: {row['Title']} | 來源: {row['Source']}")
-    except Exception: pass
+        except Exception: 
+            pass
+            
     return news_items
 
 def analyze_single_stock_sentiment(ticker, news_items):
-    if not news_items: return "🧊 無法獲取新聞，情緒不明"
+    if not news_items: return "🧊 無法獲取新聞，情緒不明\n缺乏新聞數據，無法判定。"
     news_str = "\n".join(news_items)
     system_prompt = """You are a Hong Kong financial AI.
 Analyze the provided news for a specific stock.
@@ -373,7 +404,8 @@ Line 2 MUST BE a concise 50-word summary explaining why."""
     try:
         res = requests.post('https://text.pollinations.ai/',json={'messages': [{'role': 'system', 'content': system_prompt},{'role': 'user', 'content': user_prompt}],'model': 'openai-fast'},timeout=20)
         return clean_ai_response(res.text)
-    except: return "⚠️ AI 分析超時"
+    except Exception: 
+        return "⚠️ AI 分析超時\n發生網路錯誤。"
 
 # ==========================================
 #   模組 E：終極雙劍合璧 (Full Integration)
@@ -545,7 +577,6 @@ elif app_mode == '🔍 個股驗證模式 (Bottom-Up)':
             if news:
                 res = analyze_single_stock_sentiment(target_ticker, news)
                 
-                # 美化顯示
                 st.subheader(f"📊 {target_ticker} 驗證結果")
                 lines = res.split('\n')
                 if len(lines) >= 2:
@@ -569,8 +600,7 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
     if st.button('🚀 啟動終極掃描', type='primary', use_container_width=True):
         status_text, progress_bar = st.empty(), st.progress(0)
         
-        # 1. 跑技術面
-        status_text.markdown('**階段 1/2**: 正在執行全市場 RS x MACD 掃描 (為求速度，強制設定市值 > 20億)...')
+        status_text.markdown('**階段 1/2**: 正在執行全市場 RS x MACD 掃描 (強制設定市值 > 20億以加快速度)...')
         f_screener = Overview()
         f_screener.set_filter(filters_dict={'Market Cap.': '+Mid (over $2bln)'})
         raw_data = f_screener.screener_view()
@@ -579,13 +609,11 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
             df_processed = raw_data.copy()
             df_processed['Mcap_Numeric'] = df_processed['Market Cap'].apply(convert_mcap_to_float)
             
-            # 使用最嚴格條件：短期與長期多頭排列
             indicators = calculate_all_indicators(df_processed['Ticker'].tolist(), 25, 125, 'Close > 短期及長期 SMA', _progress_bar=progress_bar, _status_text=status_text)
             df_processed['RS_階段'] = df_processed['Ticker'].map(lambda x: indicators.get(x, {}).get('RS', '無'))
             df_processed['MACD_階段'] = df_processed['Ticker'].map(lambda x: indicators.get(x, {}).get('MACD', '無'))
             df_processed['SMA多頭'] = df_processed['Ticker'].map(lambda x: indicators.get(x, {}).get('SMA_Trend', False))
             
-            # 篩選出技術面極強嘅股票
             tech_df = df_processed[(df_processed['SMA多頭'] == True) & 
                                    (df_processed['RS_階段'].isin(['🚀 啱啱突破', '🔥 已經突破'])) & 
                                    (df_processed['MACD_階段'].isin(['🚀 啱啱突破', '🔥 已經突破']))].copy()
@@ -593,7 +621,6 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
             if not tech_df.empty:
                 st.success(f"✅ 技術面掃描完成！搵到 {len(tech_df)} 隻技術突破股。準備交由 AI 驗證基本面...")
                 
-                # 2. 跑 AI 基本面
                 golden_df = run_full_integration(tech_df, progress_bar, status_text)
                 
                 status_text.markdown('✅ **終極掃描完成！**')
