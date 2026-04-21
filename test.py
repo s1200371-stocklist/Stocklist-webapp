@@ -15,9 +15,8 @@ import json
 # --- 1. 專業版面配置 ---
 st.set_page_config(page_title='🚀 美股全方位量化與 AI 平台', page_icon='📈', layout='wide')
 
-# --- 2. 輔助/清洗函數 ---
+# --- 2. 終極暴力清洗函數 ---
 def get_headers():
-    """模擬真實瀏覽器 Header 防止被封鎖"""
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -39,24 +38,34 @@ def convert_mcap_to_float(val):
     except Exception: return 0.0
 
 def clean_ai_response(text):
-    """基本 AI 輸出清洗器"""
+    """終極防護清洗器：斬走所有英文廢話同 JSON"""
     if not isinstance(text, str): return str(text)
     text = text.strip()
+    
+    # 1. 如果 AI 夾硬出咗 JSON，嘗試拆解
     if text.startswith('{'):
         try:
             parsed = json.loads(text)
-            text = parsed.get('content', parsed.get('choices', [{}])[0].get('message', {}).get('content', text))
+            if 'choices' in parsed: text = parsed['choices'][0]['message']['content']
+            elif 'content' in parsed: text = parsed['content']
         except Exception: pass
+        
+    # 2. 移除所有 DeepSeek 類模型嘅 <think> 思考過程
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'","tool_calls":\[\]\}$', '', text)
+    
+    # 3. 暴力截斷：搵第一個【符號，將前面所有英文廢話一刀切斬走！
+    first_bracket = text.find('【')
+    if first_bracket != -1:
+        text = text[first_bracket:]
+        
     return text.replace('\\n', '\n').replace('\\"', '"').strip()
 
 # ==========================================
-#        模組 C：擴充版另類數據雷達 (混合時間窗口)
+#        模組 C：擴充版另類數據雷達
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
-    """抓取 Reddit WSB 熱門股票 (24小時內極短線情緒)"""
     try:
         url = 'https://apewisdom.io/api/v1.0/filter/all-stocks/page/1'
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
@@ -69,7 +78,6 @@ def fetch_reddit_sentiment():
                 ])
                 return df, '🟢 ApeWisdom (過去24h數據)'
     except Exception: pass
-    
     mock = [
         {'Ticker': 'NVDA', 'Sentiment': 'Bullish', 'Mentions': 1520},
         {'Ticker': 'TSLA', 'Sentiment': 'Bearish', 'Mentions': 940},
@@ -81,7 +89,6 @@ def fetch_reddit_sentiment():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_stocktwits_trending():
-    """抓取 StockTwits 散戶熱門榜 (當刻即時情緒)"""
     try:
         url = 'https://api.stocktwits.com/api/2/trending/symbols.json'
         res = requests.get(url, headers=get_headers(), timeout=8)
@@ -91,7 +98,6 @@ def fetch_stocktwits_trending():
                 df = pd.DataFrame([{'Ticker': s.get('symbol', ''), 'Name': s.get('title', '')} for s in symbols[:10]])
                 return df, '🟢 StockTwits 正常 (即時數據)'
     except Exception: pass
-    
     mock = [
         {'Ticker': 'NVDA', 'Name': 'NVIDIA'}, {'Ticker': 'AAPL', 'Name': 'Apple'},
         {'Ticker': 'AMD', 'Name': 'Advanced Micro Devices'}, {'Ticker': 'CRWD', 'Name': 'CrowdStrike'},
@@ -101,12 +107,10 @@ def fetch_stocktwits_trending():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
-    """獲取 Insider 高層真金白銀買入 (嚴格鎖定過去 30 日內)"""
     target_tickers = ['NVDA', 'AAPL', 'MSFT', 'AMZN', 'META', 'GOOGL', 'TSLA', 'AMD', 'PLTR', 'CRWD', 'ASTS', 'COIN', 'MARA']
     random.shuffle(target_tickers)
     results = []
     cutoff_date = pd.Timestamp.now(tz=None) - timedelta(days=30)
-
     def fetch_yf_insider(ticker):
         try:
             tkr = yf.Ticker(ticker)
@@ -133,17 +137,14 @@ def fetch_insider_buying():
                             'Value': f"${float(value):,.0f}"
                         })
         except Exception: pass
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(fetch_yf_insider, t) for t in target_tickers[:8]]
         concurrent.futures.wait(futures)
-
     if results:
         df_final = pd.DataFrame(results)
         df_final['SortValue'] = df_final['Value'].str.replace('$', '', regex=False).str.replace(',', '', regex=False).astype(float)
         df_final = df_final.sort_values(by='SortValue', ascending=False).drop(columns=['SortValue'])
         return df_final.head(10).reset_index(drop=True)
-
     mock = [
         {'Ticker': 'ASTS', 'Owner': 'Abel Avellan', 'Relationship': 'CEO', 'Cost': '$24.50', 'Value': '$2,500,000'},
         {'Ticker': 'PLTR', 'Owner': 'Alexander Karp', 'Relationship': 'CEO', 'Cost': '$22.50', 'Value': '$1,500,000'},
@@ -153,7 +154,6 @@ def fetch_insider_buying():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_congress_trades():
-    """抓取美國國會議員交易 (嚴格鎖定過去 45 日內申報)"""
     try:
         url = 'https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json'
         res = requests.get(url, headers=get_headers(), timeout=8)
@@ -174,7 +174,6 @@ def fetch_congress_trades():
                     df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
                     return df.reset_index(drop=True), '🟢 國會交易 (過去45日數據)'
     except Exception: pass
-    
     mock = [
         {'Date': '2026-04-15', 'Politician': 'Nancy Pelosi', 'Ticker': 'PANW', 'Amount': '$1M - $5M'},
         {'Date': '2026-04-12', 'Politician': 'Ro Khanna', 'Ticker': 'CRWD', 'Amount': '$15K - $50K'},
@@ -191,14 +190,13 @@ def fetch_finviz_data():
         f_screener = Overview()
         f_screener.set_filter(filters_dict={'Market Cap.': '+Small (over $300mln)'})
         return f_screener.screener_view()
-    except Exception as e: return pd.DataFrame()
+    except Exception: return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batch_size=200, _progress_bar=None, _status_text=None):
     results = {}
     benchmarks_to_try = ['QQQ', '^NDX', 'QQQM']
     bench_data, used_bench = pd.DataFrame(), ''
-
     for b in benchmarks_to_try:
         try:
             temp_data = yf.download(b, period='2y', progress=False, group_by='column', auto_adjust=False)
@@ -208,10 +206,8 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                 used_bench = b; break
         except Exception: continue
     if bench_data.empty: return results
-
     if getattr(bench_data.index, 'tz', None) is not None: bench_data.index = bench_data.index.tz_localize(None)
     bench_norm = bench_data[used_bench] / bench_data[used_bench].iloc[0]
-
     total_tickers = len(tickers)
     for i in range(0, total_tickers, batch_size):
         batch_tickers = tickers[i:i+batch_size]
@@ -224,7 +220,6 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
             if isinstance(close_prices, pd.Series): close_prices = close_prices.to_frame(name=batch_tickers[0])
             close_prices = close_prices.ffill().dropna(how='all')
             if getattr(close_prices.index, 'tz', None) is not None: close_prices.index = close_prices.index.tz_localize(None)
-
             for ticker in batch_tickers:
                 rs_stage, macd_stage, sma_trend = '無', '無', False
                 if ticker in close_prices.columns and not close_prices[ticker].dropna().empty:
@@ -236,13 +231,11 @@ def calculate_all_indicators(tickers, sma_short, sma_long, close_condition, batc
                         rs_ma_25 = rs_line.rolling(window=25).mean()
                         if float(rs_line.iloc[-1]) > float(rs_ma_25.iloc[-1]): rs_stage = '🚀 啱啱突破' if float(rs_line.iloc[-2]) <= float(rs_ma_25.iloc[-2]) else '🔥 已經突破'
                         elif float(rs_line.iloc[-1]) >= float(rs_ma_25.iloc[-1]) * 0.95: rs_stage = '🎯 就快突破 (<5%)'
-
                         ema12, ema26 = stock_price.ewm(span=12, adjust=False).mean(), stock_price.ewm(span=26, adjust=False).mean()
                         macd_line = ema12 - ema26
                         signal_line = macd_line.ewm(span=9, adjust=False).mean()
                         if float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]): macd_stage = '🚀 啱啱突破' if float(macd_line.iloc[-2]) <= float(signal_line.iloc[-2]) else '🔥 已經突破'
                         elif abs(float(macd_line.iloc[-1]) - float(signal_line.iloc[-1])) <= max(abs(float(signal_line.iloc[-1])) * 0.05, 1e-9): macd_stage = '🎯 就快突破 (<5%)'
-
                         sma_s_line, sma_l_line = stock_price.rolling(window=sma_short).mean(), stock_price.rolling(window=sma_long).mean()
                         latest_close, latest_sma_s, latest_sma_l = float(stock_price.iloc[-1]), float(sma_s_line.iloc[-1]), float(sma_l_line.iloc[-1])
                         trend_ok = latest_sma_s > latest_sma_l
@@ -338,21 +331,29 @@ def fetch_top_news():
 def analyze_news_ai(news_list):
     if not news_list: return '⚠️ 目前攞唔到新聞數據，請遲啲再試下。'
     news_text = '\n'.join([f"{i+1}. [{x['來源']}] 標題：{x['新聞標題']}\n摘要：{x['內文摘要']}\n" for i, x in enumerate(news_list)])
-    system_prompt = '你係香港中環頂級金融分析師。必須用香港廣東話口語寫報告。絕對禁止輸出JSON或編程代碼。直接輸出Markdown報告，開頭第一句必須係：【📉 近月市場焦點總結】。不設字數上限，越深入越好。'
-    user_prompt = f'分析以下新聞：\n{news_text}\n1. 【📉 近月市場焦點總結】：總結大市走勢同情緒。\n2. 【🚀 潛力爆發股全面掃描】：搵出所有有潛力或炒作嘅Ticker，詳細用廣東話解釋點解睇好。'
+    
+    combined_prompt = f"""請扮演香港中環頂級金融分析師。
+【絕對強制要求】：必須 100% 用香港廣東話口語。絕對禁止輸出英文或任何代碼。回覆必須直接由「【📉 近月市場焦點總結】」開始。
+
+分析以下新聞：
+{news_text}
+
+請嚴格使用以下標題輸出長篇分析：
+1. 【📉 近月市場焦點總結】：總結大市走勢同情緒。
+2. 【🚀 潛力爆發股全面掃描】：搵出潛力 Ticker，用廣東話詳細解釋。"""
+
     try:
-        res = requests.post('https://text.pollinations.ai/', json={'messages': [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt}], 'model': 'openai'}, timeout=60)
-        
-        # 強制截斷
-        raw_text = clean_ai_response(res.text)
-        if "【📉 近月市場焦點總結】" in raw_text:
-            raw_text = raw_text[raw_text.find("【📉 近月市場焦點總結】"):]
-            
-        return raw_text if raw_text else '⚠️ AI 接口異常'
+        res = requests.post(
+            'https://text.pollinations.ai/',
+            json={'messages': [{'role': 'user', 'content': combined_prompt}], 'model': 'gpt-4o', 'temperature': 0.5},
+            timeout=60
+        )
+        result = clean_ai_response(res.text)
+        return result if result else "⚠️ AI 接口異常"
     except Exception as e: return f'⚠️ AI 發生錯誤: {e}'
 
 # ==========================================
-#        模組 C：AI 交叉博弈分析引擎 (終極防雜訊版)
+#        模組 C：AI 交叉博弈分析引擎 (終極一刀切版)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
@@ -361,70 +362,55 @@ def analyze_alt_data_ai(reddit_df, twits_df, insider_df, congress_df):
     i_str = insider_df.head(8).to_string(index=False) if not insider_df.empty else '無數據'
     c_str = congress_df.head(8).to_string(index=False) if not congress_df.empty else '無數據'
 
-    # 【終極防雜訊版 System Prompt】
-    # 徹底移除所有英文，只保留最強硬嘅中文/廣東話格式指令
-    system_prompt = """你係一位駐守香港中環嘅頂級美股策略分析師。
-【絕對強制輸出規則】：
-1. 語言：必須 100% 使用地道「香港廣東話口語（Cantonese）」。絕對禁止輸出任何英文思考過程（English thinking）、禁止輸出 JSON、禁止輸出代碼塊（Code blocks）。
-2. 語氣：極度專業、深入，同時使用生動嘅廣東話財經術語（例如：瘋狂吸籌、春江鴨、人踩人風險、大戶散戶大隻揪、派貨、撈底）。
-3. 數據引用：必須精準引用我提供嘅數據（例如：具體提及次數、金額、CEO名字、政客名字）。
-4. 格式：你嘅第一句回覆必須直接係「【🕵️ 另類數據 AI 偵測深度報告】」，然後直接開始第一部分，不允許任何開場白或廢話。
-5. 字數：不設上限，每段分析必須極度詳細同深入。"""
+    # 將指令全部壓縮為全中文單一 Prompt，徹底斷絕英文誘因
+    combined_prompt = f"""請你扮演香港中環頂級美股策略分析師。
+【絕對強制要求】：
+1. 語言必須 100% 使用地道「香港廣東話口語」。
+2. 絕對禁止輸出任何英文前言、禁止輸出思考過程、禁止輸出 JSON 代碼。
+3. 你的回覆必須直接由「【🕵️ 另類數據 AI 偵測深度報告】」開始，不允許任何廢話。
 
-    # 【極簡化 User Prompt】
-    # 只提供真實數據同埋大綱，唔好教佢點諗，避免佢將教學過程印出嚟
-    user_prompt = f"""
-以下係最新嘅真實另類數據：
-
-[散戶數據 1：Reddit WSB 熱門 (過去24小時)]:
+真實數據如下：
+[散戶：Reddit WSB 熱門]:
 {r_str}
 
-[散戶數據 2：StockTwits 熱搜 (即時)]:
+[散戶：StockTwits 熱搜]:
 {t_str}
 
-[大戶數據 1：高層 Insider 買入 (過去30日)]:
+[大戶：高層 Insider 買入]:
 {i_str}
 
-[大戶數據 2：國會議員交易 (過去45日)]:
+[大戶：國會議員交易]:
 {c_str}
 
-請立刻根據以上數據，寫出一份極度深入嘅廣東話財經分析長文。必須嚴格跟隨以下 3 個標題進行長篇分析：
+請立刻輸出極度深入嘅廣東話長篇報告，嚴格使用以下標題：
 
 【🕵️ 另類數據 AI 偵測深度報告】
 
 1. 【🔥 散戶雙引擎：流動性正喺度衝擊邊個板塊？】
-（點名 Reddit 同 StockTwits 最熱門嘅 2-3 隻股票，引用具體提及次數。深入長篇分析散戶嘅情緒係極度貪婪定避險？佢哋瘋狂炒緊咩概念？）
+（點名最熱門股票，引用具體次數。深入分析散戶情緒同板塊輪動，例如瘋狂吸籌定避險。）
 
 2. 【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
-（點名有買入動作嘅 CEO 同政客，引用具體買入金額。深入分析呢班「春江鴨」背後嘅資金佈局邏輯。）
+（點名有買入動作嘅 CEO 同政客，引用具體金額。深入分析春江鴨佈局邏輯。）
 
 3. 【🎯 終極四維共振：最強爆發潛力股與高危陷阱】
-（結合散戶同大戶數據，搵出有潛力爆發嘅「黃金交叉股」，以及嚴重警告純靠散戶支撐嘅「高危陷阱股」，解釋背後嘅人踩人風險。）
+（搵出黃金交叉股同高危陷阱股，點出人踩人風險。）
 """
 
     try:
+        # 強制呼叫 GPT-4o，鎖死 temperature 減低發神經機率
         response = requests.post(
             'https://text.pollinations.ai/',
             json={
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt}
-                ],
-                'model': 'openai'
+                'messages': [{'role': 'user', 'content': combined_prompt}],
+                'model': 'gpt-4o',
+                'temperature': 0.5
             },
             timeout=80
         )
         
-        # 基本清洗
-        raw_text = clean_ai_response(response.text)
-        
-        # 【強制截斷保險機制】
-        # 如果 AI 偷偷漏咗英文或者 JSON，強行斬走前半截廢話，確保第一句乾淨
-        marker = "【🕵️ 另類數據"
-        if marker in raw_text:
-            raw_text = raw_text[raw_text.find(marker):]
-            
-        return raw_text if raw_text else '⚠️ AI 輸出異常，請再試一次。'
+        # 使用終極清洗器，只要見到英文前言就直接斬首
+        result = clean_ai_response(response.text)
+        return result if result else '⚠️ AI 輸出異常，請再試一次。'
         
     except Exception as e:
         return f'⚠️ AI 分析發生錯誤: {e}'
@@ -553,7 +539,7 @@ elif app_mode == '🕵️ 另類數據雷達 (4大維度)':
 
     st.markdown('---')
     if st.button('🚀 啟動 AI 四維交叉博弈分析', type='primary', use_container_width=True):
-        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (強硬防護版，請稍候 30-60 秒)'):
+        with st.spinner('🧠 AI 正在進行散戶 vs 政客大戶 4 維度深度分析... (強硬防護版，請稍候 15-30 秒)'):
             res = analyze_alt_data_ai(r_df, t_df, i_df, c_df)
             st.markdown('### 🤖 另類數據 AI 偵測深度報告')
             with st.container(border=True):
