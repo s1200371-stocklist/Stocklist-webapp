@@ -67,28 +67,43 @@ def clean_ai_response(text):
     return text.strip()
 
 # ==========================================
-#        模組 C：另類數據雷達 (雙重防封鎖 + 狀態燈號)
+#        模組 C：另類數據雷達 (四重防封鎖 + 全新 ApeWisdom API)
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
     """抓取 Reddit WSB 熱門股票 (返回 DataFrame, 狀態訊息)"""
     
-    # 嘗試 1: Tradestie API
-    url = "https://tradestie.com/api/v1/apps/reddit"
-    for _ in range(2):
-        try:
-            response = requests.get(url, headers=get_headers(), timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, list) and len(data) > 0:
-                    return pd.DataFrame(data), "🟢 Tradestie API 運作正常"
-            time.sleep(1)
-        except: continue
+    # 嘗試 1: ApeWisdom API (全新主力，專門監控 WSB，穩定性極高)
+    try:
+        url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        if response.status_code == 200:
+            results = response.json().get('results', [])
+            if results:
+                df_ape = pd.DataFrame([
+                    {
+                        'ticker': item['ticker'], 
+                        'sentiment': 'Bullish' if item.get('mentions', 0) > 30 else 'Neutral',
+                        'no_of_comments': item.get('mentions', 0) * 5 # 放大數字符合顯示習慣
+                    } for item in results[:15]
+                ])
+                return df_ape, "🟢 ApeWisdom API 運作正常"
+    except: pass
+
+    # 嘗試 2: Tradestie API
+    try:
+        url = "https://tradestie.com/api/v1/apps/reddit"
+        response = requests.get(url, headers=get_headers(), timeout=8)
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                return pd.DataFrame(data), "🟢 Tradestie API 運作正常"
+    except: pass
         
-    # 嘗試 2: 原生 Reddit JSON 解析 (最強備援方案)
+    # 嘗試 3: 原生 Reddit JSON 解析 (最強備援方案)
     try:
         reddit_url = "https://www.reddit.com/r/wallstreetbets/hot.json?limit=50"
-        res = requests.get(reddit_url, headers=get_headers(), timeout=15)
+        res = requests.get(reddit_url, headers=get_headers(), timeout=10)
         if res.status_code == 200:
             posts = res.json().get('data', {}).get('children', [])
             tickers = {}
@@ -110,7 +125,7 @@ def fetch_reddit_sentiment():
                 return df_fallback, "🟡 Reddit 原生 JSON (API 被阻，備援啟動)"
     except: pass
     
-    # 嘗試 3: 離線模擬數據 (確保 AI 模組永不報錯)
+    # 嘗試 4: 離線模擬數據 (確保 AI 模組永不報錯)
     mock_data = [
         {'ticker': 'NVDA', 'sentiment': 'Bullish', 'no_of_comments': 1520},
         {'ticker': 'TSLA', 'sentiment': 'Bearish', 'no_of_comments': 940},
