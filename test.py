@@ -1,4 +1,67 @@
-```(?
+
+import os
+import re
+import json
+import time
+import random
+import datetime
+import requests
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+import concurrent.futures
+from datetime import timedelta
+from finvizfinance.screener.overview import Overview
+from finvizfinance.quote import finvizfinance
+
+# ==========================================
+# 1. 頁面設定
+# ==========================================
+st.set_page_config(
+    page_title='🚀 美股全方位量化與 AI 平台',
+    page_icon='📈',
+    layout='wide'
+)
+
+# ==========================================
+# 2. 基本工具函數與字串清洗
+# ==========================================
+def get_headers():
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    ]
+    return {
+        'User-Agent': random.choice(user_agents),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'zh-HK,en-US;q=0.9,en;q=0.8',
+    }
+
+def convert_mcap_to_float(val):
+    try:
+        if pd.isna(val) or val == '-':
+            return 0.0
+        val = str(val).upper().replace(',', '')
+        if 'B' in val:
+            return float(val.replace('B', '')) * 1000
+        if 'M' in val:
+            return float(val.replace('M', ''))
+        return float(val)
+    except Exception:
+        return 0.0
+
+def safe_to_string(df, rows=8):
+    try:
+        if df is None or df.empty:
+            return "無數據"
+        return df.head(rows).to_string(index=False)
+    except Exception:
+        return "無數據"
+
+def clean_ai_response(text):
+    if not isinstance(text, str): return str(text)
+    raw = text.strip()
     raw = re.sub(r"\s*```$", "", raw)
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
     try:
@@ -643,3 +706,5 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
             status_text.markdown('⚠️ 暫時攞唔到 Finviz 股票清單。')
 
 ```
+
+
