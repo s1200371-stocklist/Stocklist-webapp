@@ -705,6 +705,5 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
         else:
             status_text.markdown('⚠️ 暫時攞唔到 Finviz 股票清單。')
 
-```
 
 
