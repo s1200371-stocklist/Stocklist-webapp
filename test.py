@@ -91,7 +91,6 @@ def clean_ai_response(text):
         except: pass
         
     # 清除 markdown 標籤與 <think>
-    ```(?
     raw = re.sub(r"\s*```$", "", raw)
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
     
