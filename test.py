@@ -56,7 +56,6 @@ def safe_to_string(df, rows=10):
 def clean_ai_response(text):
     if not isinstance(text, str): return str(text)
     raw = text.strip()
-    ```(?
     raw = re.sub(r"\s*```$", "", raw)
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
     try:
