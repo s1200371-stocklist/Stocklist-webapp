@@ -886,5 +886,3 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
                 status_text.markdown('✅ 掃描完成。'); st.warning("無股票同時符合嚴格雙突破條件。")
         else:
             status_text.markdown('⚠️ 暫時攞唔到 Finviz 股票清單。')
-
-
