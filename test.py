@@ -206,20 +206,34 @@ def fetch_reddit_sentiment():
         if res.status_code == 200:
             results = res.json().get('results', [])
             if results:
-                df = pd.DataFrame([{'Ticker': str(i.get('ticker', '')).upper(), 'Sentiment': 'Bullish' if i.get('mentions', 0) > 30 else 'Neutral', 'Mentions': i.get('mentions', 0) * 5} for i in results[:10]])
+                rows = []
+                for i in results[:10]:
+                    now_m = i.get('mentions', 0)
+                    prev_m = i.get('mentions_24h_ago', now_m)
+                    now_r = i.get('rank', 99)
+                    prev_r = i.get('rank_24h_ago', now_r)
+                    pct = (now_m - prev_m) / prev_m * 100 if prev_m > 0 else 0
+                    if pct >= 20 or now_r < prev_r:
+                        trend = f'📈 上升 (+{pct:.0f}%)'
+                    elif pct <= -20 or now_r > prev_r:
+                        trend = f'📉 下跌 ({pct:.0f}%)'
+                    else:
+                        trend = f'▶ 平穩 ({pct:+.0f}%)'
+                    rows.append({'Ticker': str(i.get('ticker', '')).upper(), 'Sentiment': 'Bullish' if now_m > 30 else 'Neutral', 'Mentions': now_m, 'Trend': trend})
+                df = pd.DataFrame(rows)
                 return df, '🟢 ApeWisdom (過去24h數據)'
     except: pass
     return pd.DataFrame([
-        {'Ticker': 'SPY',  'Sentiment': 'Bullish', 'Mentions': 2420},
-        {'Ticker': 'NVDA', 'Sentiment': 'Bullish', 'Mentions': 1965},
-        {'Ticker': 'TSLA', 'Sentiment': 'Bullish', 'Mentions': 1540},
-        {'Ticker': 'AAPL', 'Sentiment': 'Neutral', 'Mentions': 1120},
-        {'Ticker': 'AMD',  'Sentiment': 'Bullish', 'Mentions': 890},
-        {'Ticker': 'PLTR', 'Sentiment': 'Bullish', 'Mentions': 780},
-        {'Ticker': 'MSFT', 'Sentiment': 'Neutral', 'Mentions': 650},
-        {'Ticker': 'META', 'Sentiment': 'Bullish', 'Mentions': 530},
-        {'Ticker': 'COIN', 'Sentiment': 'Bullish', 'Mentions': 480},
-        {'Ticker': 'MARA', 'Sentiment': 'Bullish', 'Mentions': 370},
+        {'Ticker': 'SPY',  'Sentiment': 'Bullish', 'Mentions': 2420, 'Trend': '📈 上升 (+45%)'},
+        {'Ticker': 'NVDA', 'Sentiment': 'Bullish', 'Mentions': 1965, 'Trend': '📈 上升 (+32%)'},
+        {'Ticker': 'TSLA', 'Sentiment': 'Bullish', 'Mentions': 1540, 'Trend': '▶ 平穩 (+5%)'},
+        {'Ticker': 'AAPL', 'Sentiment': 'Neutral', 'Mentions': 1120, 'Trend': '📉 下跌 (-18%)'},
+        {'Ticker': 'AMD',  'Sentiment': 'Bullish', 'Mentions': 890,  'Trend': '📈 上升 (+28%)'},
+        {'Ticker': 'PLTR', 'Sentiment': 'Bullish', 'Mentions': 780,  'Trend': '📈 上升 (+61%)'},
+        {'Ticker': 'MSFT', 'Sentiment': 'Neutral', 'Mentions': 650,  'Trend': '▶ 平穩 (-3%)'},
+        {'Ticker': 'META', 'Sentiment': 'Bullish', 'Mentions': 530,  'Trend': '📈 上升 (+22%)'},
+        {'Ticker': 'COIN', 'Sentiment': 'Bullish', 'Mentions': 480,  'Trend': '📉 下跌 (-25%)'},
+        {'Ticker': 'MARA', 'Sentiment': 'Bullish', 'Mentions': 370,  'Trend': '▶ 平穩 (+8%)'},
     ]), '🔴 離線備援 (WSB)'
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -229,19 +243,30 @@ def fetch_stocktwits_trending():
         if res.status_code == 200:
             symbols = res.json().get('symbols', [])
             if symbols:
-                return pd.DataFrame([{'Ticker': s.get('symbol', ''), 'Name': s.get('title', '')} for s in symbols[:10]]), '🟢 StockTwits 正常'
+                rows = []
+                for s in symbols[:10]:
+                    score = float(s.get('trending_score') or 0)
+                    rank = int(s.get('rank') or 99)
+                    if score >= 15 or rank <= 5:
+                        trend = f'📈 熱烈上升 (Score:{score:.1f})'
+                    elif score >= 5:
+                        trend = f'▶ 溫和上升 (Score:{score:.1f})'
+                    else:
+                        trend = f'📉 熱度下降 (Score:{score:.1f})'
+                    rows.append({'Ticker': s.get('symbol', ''), 'Name': s.get('title', ''), 'Trend': trend})
+                return pd.DataFrame(rows), '🟢 StockTwits 正常'
     except: pass
     return pd.DataFrame([
-        {'Ticker': 'CAR',  'Name': 'Avis Budget Group'},
-        {'Ticker': 'UNH',  'Name': 'UnitedHealth Group'},
-        {'Ticker': 'NVDA', 'Name': 'NVIDIA Corporation'},
-        {'Ticker': 'TSLA', 'Name': 'Tesla Inc'},
-        {'Ticker': 'AAPL', 'Name': 'Apple Inc'},
-        {'Ticker': 'AMD',  'Name': 'Advanced Micro Devices'},
-        {'Ticker': 'PLTR', 'Name': 'Palantir Technologies'},
-        {'Ticker': 'MSTR', 'Name': 'MicroStrategy'},
-        {'Ticker': 'COIN', 'Name': 'Coinbase Global'},
-        {'Ticker': 'CRWD', 'Name': 'CrowdStrike Holdings'},
+        {'Ticker': 'CAR',  'Name': 'Avis Budget Group',       'Trend': '📈 熱烈上升 (Score:28.4)'},
+        {'Ticker': 'UNH',  'Name': 'UnitedHealth Group',      'Trend': '📉 熱度下降 (Score:3.2)'},
+        {'Ticker': 'NVDA', 'Name': 'NVIDIA Corporation',      'Trend': '📈 熱烈上升 (Score:24.4)'},
+        {'Ticker': 'TSLA', 'Name': 'Tesla Inc',               'Trend': '📈 熱烈上升 (Score:21.7)'},
+        {'Ticker': 'AAPL', 'Name': 'Apple Inc',               'Trend': '▶ 溫和上升 (Score:9.1)'},
+        {'Ticker': 'AMD',  'Name': 'Advanced Micro Devices',  'Trend': '📈 熱烈上升 (Score:19.4)'},
+        {'Ticker': 'PLTR', 'Name': 'Palantir Technologies',   'Trend': '📈 熱烈上升 (Score:17.8)'},
+        {'Ticker': 'MSTR', 'Name': 'MicroStrategy',           'Trend': '▶ 溫和上升 (Score:8.3)'},
+        {'Ticker': 'COIN', 'Name': 'Coinbase Global',         'Trend': '▶ 溫和上升 (Score:6.5)'},
+        {'Ticker': 'CRWD', 'Name': 'CrowdStrike Holdings',    'Trend': '▶ 溫和上升 (Score:7.2)'},
     ]), '🔴 離線備援 (StockTwits)'
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -448,10 +473,16 @@ def fetch_congress_trades():
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_5ch_sentiment():
     data = [
-        {"Ticker": "NVDA", "Name": "エヌビディア", "Sentiment": "🚀 極度狂熱", "Trend": "▲ 爆發", "Source": "5ch/YahooJP"},
-        {"Ticker": "TSLA", "Name": "テスラ", "Sentiment": "📉 悲觀/做空", "Trend": "▼ 衰退", "Source": "5ch/YahooJP"},
-        {"Ticker": "AAPL", "Name": "アップル", "Sentiment": "⚖️ 中立", "Trend": "▶ 平穩", "Source": "5ch/YahooJP"},
-        {"Ticker": "PLTR", "Name": "パランティア", "Sentiment": "📈 偏向樂觀", "Trend": "▲ 上升", "Source": "5ch/YahooJP"},
+        {"Ticker": "NVDA", "Name": "エヌビディア",        "Sentiment": "🚀 極度狂熱",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
+        {"Ticker": "AMD",  "Name": "AMD",                 "Sentiment": "📈 偏向樂觀",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
+        {"Ticker": "TSLA", "Name": "テスラ",               "Sentiment": "📉 悲觀/做空", "Trend": "📉 下跌",  "Source": "5ch/YahooJP"},
+        {"Ticker": "AAPL", "Name": "アップル",             "Sentiment": "⚖️ 中立",     "Trend": "▶ 平穩",  "Source": "5ch/YahooJP"},
+        {"Ticker": "PLTR", "Name": "パランティア",         "Sentiment": "📈 偏向樂觀",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
+        {"Ticker": "MSFT", "Name": "マイクロソフト",       "Sentiment": "⚖️ 中立",     "Trend": "▶ 平穩",  "Source": "5ch/YahooJP"},
+        {"Ticker": "META", "Name": "メタ",                 "Sentiment": "📈 偏向樂觀",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
+        {"Ticker": "COIN", "Name": "コインベース",         "Sentiment": "🚀 極度狂熱",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
+        {"Ticker": "MSTR", "Name": "マイクロストラテジー", "Sentiment": "🚀 極度狂熱",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
+        {"Ticker": "INTC", "Name": "インテル",             "Sentiment": "📉 悲觀/做空", "Trend": "📉 下跌",  "Source": "5ch/YahooJP"},
     ]
     return pd.DataFrame(data), "🟢 日本 2ch/5ch 海外板塊情緒 (示意)"
 
