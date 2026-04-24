@@ -68,7 +68,7 @@ def clean_ai_response(text):
                 if c: return str(c).strip()
     except: pass
     # Strip reasoning_content JSON wrapper pattern specifically
-    rc_match = re.search(r'"content"\s*:\s*"((?:[^"\]|\.)*)"\s*(?:,|\})', raw, re.DOTALL)
+    rc_match = re.search(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, re.DOTALL)
     if rc_match:
         candidate = rc_match.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\n', '\n')
         if len(candidate) > 20: return candidate.strip()
