@@ -48,6 +48,15 @@ def clean_ai_response(text):
     raw = re.sub(r'^```(?:json|text|markdown)?\s*', '', raw, flags=re.IGNORECASE)
     raw = re.sub(r'\s*```$', '', raw)
     raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL | re.IGNORECASE)
+    # Remove meta-commentary (Note:...) patterns
+    raw = re.sub(r'\(Note:[^)]*\)', '', raw, flags=re.IGNORECASE)
+    raw = re.sub(r'（注：[^）]*）', '', raw)
+    raw = re.sub(r'\(注:[^)]*\)', '', raw)
+    raw = re.sub(r'\(Translation note:[^)]*\)', '', raw, flags=re.IGNORECASE)
+    raw = re.sub(r'\(Translator\'s note:[^)]*\)', '', raw, flags=re.IGNORECASE)
+    raw = re.sub(r'\[Note:[^\]]*\]', '', raw, flags=re.IGNORECASE)
+    raw = re.sub(r'\(This (?:sentence|phrase|expression|text)[^)]*\)', '', raw, flags=re.IGNORECASE)
+    raw = re.sub(r'\(此(?:句|段|表達)[^）]*）', '', raw)
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
@@ -605,6 +614,7 @@ def analyze_news_ai(news_list):
         "2. 禁止夾英文句子，禁止用普通話詞語（例如唔可以用「这是」「因为」「所以」「已经」「我们」）。\n"
         "3. 唔可以輸出 JSON、XML、markdown code block、reasoning_content、tool_calls。\n"
         "4. 直接由格式標題開始，唔好有前言。\n"
+        "5. 絕對禁止輸出任何括號內嘅解釋、meta-commentary 或 (Note:...) 格式文字，只輸出正文內容。\n"
         "廣東話例子：\n"
         "✅ 「呢隻股票近排好波動，投資者要小心博大霧。」\n"
         "✅ 「NVDA而家係AI龍頭，但估值已經去到天花板，要量力而為。」\n"
@@ -639,7 +649,7 @@ def analyze_news_ai(news_list):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, x_df, insider_df, congress_df):
-    sys_p = "You are a Hong Kong financial analyst.\n嚴格規則：\n1. 必須用香港廣東話口語 + 繁體中文。\n2. 絕對唔可以輸出 JSON、XML 或 markdown code block。只輸出純文字段落。\n3. 唔可以解釋分析過程，亦唔可以輸出 tool_calls 或 reasoning_content。\n4. 包含以下詞語：瘋狂吸籌、探氪、春江鴨、人踩人風險。\n格式：\n【🕵️ 另類數據 AI 偵測深度報告】\n【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】\n【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】\n【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"
+    sys_p = "You are a Hong Kong financial analyst.\n嚴格規則：\n1. 必須用香港廣東話口語 + 繁體中文。\n2. 絕對唔可以輸出 JSON、XML 或 markdown code block。只輸出純文字段落。\n3. 唔可以解釋分析過程，亦唔可以輸出 tool_calls 或 reasoning_content。\n4. 包含以下詞語：瘋狂吸籌、探氪、春江鴨、人踩人風險。\n5. 絕對禁止輸出 (Note:...) 或任何括號解釋文字，只輸出正文。\n格式：\n【🕵️ 另類數據 AI 偵測深度報告】\n【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】\n【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】\n【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"
     usr_p = f"請根據以下數據直接寫純文字報告：\n\nReddit:\n{safe_to_string(reddit_df)}\n\nStockTwits:\n{safe_to_string(twits_df)}\n\nX:\n{safe_to_string(x_df)}\n\nInsiders:\n{safe_to_string(insider_df)}\n\nCongress:\n{safe_to_string(congress_df)}\n\n只輸出最終報告正文，不要 JSON 或代碼塊。"
     return extract_cantonese_report(call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}], timeout=80))
 
@@ -665,7 +675,7 @@ def fetch_single_stock_news(ticker):
 
 def analyze_single_stock_sentiment(ticker, news_items):
     if not news_items: return "【⚖️ 中性觀望】\n\n缺乏近期專屬新聞，暫時未見足夠催化劑，較適合先觀望。"
-    sys_p = "You are a Hong Kong financial AI.\n規則：\n1. 第一行必須完全等於以下其中一個：【🔥 極度看好】【📈 偏向樂觀】【⚖️ 中性觀望】【📉 偏向悲觀】【🧊 極度看淡】\n2. 第一行之後用廣東話自然分析。\n3. 唔可以輸出 JSON、XML 或 markdown code block。\n4. 唔可以輸出 tool_calls 殘留。\n如果好淡混雜，優先選【⚖️ 中性觀望】。"
+    sys_p = "You are a Hong Kong financial AI.\n規則：\n1. 第一行必須完全等於以下其中一個：【🔥 極度看好】【📈 偏向樂觀】【⚖️ 中性觀望】【📉 偏向悲觀】【🧊 極度看淡】\n2. 第一行之後用廣東話自然分析。\n3. 唔可以輸出 JSON、XML 或 markdown code block。\n4. 唔可以輸出 tool_calls 殘留。\n5. 絕對禁止輸出 (Note:...) 或任何括號解釋文字，只輸出正文。\n如果好淡混雜，優先選【⚖️ 中性觀望】。"
     r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': f"分析 {ticker} 近期新聞：\n{chr(10).join(news_items)}\n只輸出純文字最終答案。"}], timeout=25)
     label, body = extract_stock_sentiment_output(r)
     return f"{label}\n\n{body}"
