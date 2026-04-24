@@ -57,9 +57,21 @@ def clean_ai_response(text):
                     c = msg.get("content")
                     if isinstance(c, str) and c.strip(): return c.strip()
             if "content" in parsed and isinstance(parsed["content"], str): return parsed["content"].strip()
-            if parsed.get("role") == "assistant" and isinstance(parsed.get("content"), str): return parsed["content"].strip()
+            if parsed.get("role") == "assistant":
+                c = parsed.get("content")
+                if isinstance(c, str) and c.strip(): return c.strip()
             if isinstance(parsed.get("final"), str) and parsed["final"].strip(): return parsed["final"].strip()
+        elif isinstance(parsed, list) and parsed:
+            first = parsed[0]
+            if isinstance(first, dict):
+                c = first.get("content") or first.get("text") or ""
+                if c: return str(c).strip()
     except: pass
+    # Strip reasoning_content JSON wrapper pattern specifically
+    rc_match = re.search(r'"content"\s*:\s*"((?:[^"\]|\.)*)"\s*(?:,|\})', raw, re.DOTALL)
+    if rc_match:
+        candidate = rc_match.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\n', '\n')
+        if len(candidate) > 20: return candidate.strip()
     raw = re.sub(r'"reasoning_content"\s*:\s*".*?"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"role"\s*:\s*"assistant"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"content"\s*:\s*', '', raw, flags=re.DOTALL)
@@ -586,9 +598,43 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
 def analyze_news_ai(news_list):
     if not news_list: return '⚠️ 目前攞唔到新聞數據，請遲啲再試下。'
     news_text = '\n'.join([f"{i+1}. [{x['來源']}] 標題：{x['新聞標題']}\n摘要：{x['內文摘要']}\n" for i, x in enumerate(news_list)])
-    sys_p = "You are a Hong Kong financial analyst.\n規則：\n1. 全文必須用香港廣東話 + 繁體中文。\n2. 絕對唔可以輸出 JSON、XML 或 markdown code block。只輸出純文字與段落。\n3. 唔可以輸出 reasoning、thoughts、reasoning_content、tool_calls。\n4. 直接由標題開始寫。\n格式：\n【📉 近月市場焦點總結】\n（篇幅不限）\n【🚀 潛力爆發股全面掃描】\n（篇幅不限）"
-    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': f"請根據以下財經新聞寫一份香港廣東話分析。\n\n新聞：\n{news_text}\n\n只輸出純文字最終報告。"}], timeout=60)
+    sys_p = (
+        "你係一個香港財經分析師，專門用廣東話口語寫報告。\n"
+        "【鐵則 - 唔跟就廢】\n"
+        "1. 全文必須100%用香港廣東話口語，例如：呢、唔係、係咁話、好正、頂硬上、博一博。\n"
+        "2. 禁止夾英文句子，禁止用普通話詞語（例如唔可以用「这是」「因为」「所以」「已经」「我们」）。\n"
+        "3. 唔可以輸出 JSON、XML、markdown code block、reasoning_content、tool_calls。\n"
+        "4. 直接由格式標題開始，唔好有前言。\n"
+        "廣東話例子：\n"
+        "✅ 「呢隻股票近排好波動，投資者要小心博大霧。」\n"
+        "✅ 「NVDA而家係AI龍頭，但估值已經去到天花板，要量力而為。」\n"
+        "❌ 「这只股票最近很波动，投资者需要谨慎。」（普通話 - 唔可以用）\n"
+        "❌ 「This stock is very volatile recently.」（英文句子 - 唔可以用）\n"
+        "格式：\n"
+        "【📉 近月市場焦點總結】\n"
+        "（用廣東話寫3-5段分析）\n"
+        "【🚀 潛力爆發股全面掃描】\n"
+        "（用廣東話寫3-5段，逐隻股票分析）"
+    )
+    usr_p = (
+        f"根據以下財經新聞，用100%香港廣東話口語寫分析報告。\n"
+        f"記住：全文唔可以有普通話或英文句子，只可以有廣東話。\n\n"
+        f"新聞：\n{news_text}\n\n"
+        f"只輸出廣東話純文字報告，唔好有任何 JSON 或代碼。"
+    )
+    r = call_pollinations(
+        [{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}],
+        model='openai', timeout=75
+    )
     c = final_text_sanitize(r)
+    # If AI returned non-Cantonese (detected by Mandarin particles), re-translate
+    mandarin_markers = ['这是', '这也', '这个', '这样', '因为', '所以', '已经', '我们', '他们', '但是', '虽然', '然而', '对于', '市场', '产品', '发展', '需要', '收入', '增长', '可能会', '将会']
+    if any(m in c for m in mandarin_markers):
+        trans_sys = "你係翻譯員，將以下普通話財經分析翻譯成香港廣東話口語，保留所有股票代號同數字，唔好改變意思。"
+        c = final_text_sanitize(call_pollinations(
+            [{'role': 'system', 'content': trans_sys}, {'role': 'user', 'content': f"翻譯成廣東話：\n{c}"}],
+            model='openai', timeout=45
+        ))
     return c if "【📉 近月市場焦點總結】" in c else f"【📉 近月市場焦點總結】\n\n{c}"
 
 @st.cache_data(ttl=3600, show_spinner=False)
