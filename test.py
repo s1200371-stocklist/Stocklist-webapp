@@ -45,7 +45,6 @@ BAD_PATTERNS = [
 def clean_ai_response(text):
     if not isinstance(text, str): return str(text)
     raw = text.strip()
-    raw = re.sub(r'^```(?:json|text|markdown)?\s*', '', raw, flags=re.IGNORECASE)
     raw = re.sub(r'\s*```$', '', raw)
     raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL | re.IGNORECASE)
     try:
@@ -57,21 +56,9 @@ def clean_ai_response(text):
                     c = msg.get("content")
                     if isinstance(c, str) and c.strip(): return c.strip()
             if "content" in parsed and isinstance(parsed["content"], str): return parsed["content"].strip()
-            if parsed.get("role") == "assistant":
-                c = parsed.get("content")
-                if isinstance(c, str) and c.strip(): return c.strip()
+            if parsed.get("role") == "assistant" and isinstance(parsed.get("content"), str): return parsed["content"].strip()
             if isinstance(parsed.get("final"), str) and parsed["final"].strip(): return parsed["final"].strip()
-        elif isinstance(parsed, list) and parsed:
-            first = parsed[0]
-            if isinstance(first, dict):
-                c = first.get("content") or first.get("text") or ""
-                if c: return str(c).strip()
     except: pass
-    # Strip reasoning_content JSON wrapper pattern specifically
-    rc_match = re.search(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, re.DOTALL)
-    if rc_match:
-        candidate = rc_match.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\n', '\n')
-        if len(candidate) > 20: return candidate.strip()
     raw = re.sub(r'"reasoning_content"\s*:\s*".*?"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"role"\s*:\s*"assistant"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"content"\s*:\s*', '', raw, flags=re.DOTALL)
@@ -592,55 +579,59 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
     return pd.DataFrame(res) if res else empty
 
 # ==========================================
-# AI 分析
+# AI 分析 (已優化 Prompt，防止輸出邏輯與提示詞)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_news_ai(news_list):
     if not news_list: return '⚠️ 目前攞唔到新聞數據，請遲啲再試下。'
     news_text = '\n'.join([f"{i+1}. [{x['來源']}] 標題：{x['新聞標題']}\n摘要：{x['內文摘要']}\n" for i, x in enumerate(news_list)])
-    sys_p = (
-        "你係一個香港財經分析師，專門用廣東話口語寫報告。\n"
-        "【鐵則 - 唔跟就廢】\n"
-        "1. 全文必須100%用香港廣東話口語，例如：呢、唔係、係咁話、好正、頂硬上、博一博。\n"
-        "2. 禁止夾英文句子，禁止用普通話詞語（例如唔可以用「这是」「因为」「所以」「已经」「我们」）。\n"
-        "3. 唔可以輸出 JSON、XML、markdown code block、reasoning_content、tool_calls。\n"
-        "4. 直接由格式標題開始，唔好有前言。\n"
-        "廣東話例子：\n"
-        "✅ 「呢隻股票近排好波動，投資者要小心博大霧。」\n"
-        "✅ 「NVDA而家係AI龍頭，但估值已經去到天花板，要量力而為。」\n"
-        "❌ 「这只股票最近很波动，投资者需要谨慎。」（普通話 - 唔可以用）\n"
-        "❌ 「This stock is very volatile recently.」（英文句子 - 唔可以用）\n"
-        "格式：\n"
-        "【📉 近月市場焦點總結】\n"
-        "（用廣東話寫3-5段分析）\n"
-        "【🚀 潛力爆發股全面掃描】\n"
-        "（用廣東話寫3-5段，逐隻股票分析）"
-    )
-    usr_p = (
-        f"根據以下財經新聞，用100%香港廣東話口語寫分析報告。\n"
-        f"記住：全文唔可以有普通話或英文句子，只可以有廣東話。\n\n"
-        f"新聞：\n{news_text}\n\n"
-        f"只輸出廣東話純文字報告，唔好有任何 JSON 或代碼。"
-    )
-    r = call_pollinations(
-        [{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}],
-        model='openai', timeout=75
-    )
+    
+    # 優化：全中文設定，並強烈要求「直接輸出結果」
+    sys_p = "你是一位資深的香港華爾街財經專家。你的任務是直接撰寫市場報告，全程使用「香港廣東話（口語）」及繁體中文。請直接輸出最終的報告內容，絕對禁止包含任何思考過程、JSON格式、代碼塊或重複我的指令。"
+    
+    user_p = f"""請根據以下最新財經新聞，寫一份香港廣東話版本的市場分析報告。
+
+新聞數據：
+{news_text}
+
+請直接輸出最終的分析報告，並且必須包含以下兩個標題（請直接由標題開始寫，不要有任何開場白）：
+【📉 近月市場焦點總結】
+（在此寫出你的廣東話總結）
+
+【🚀 潛力爆發股全面掃描】
+（在此寫出你的廣東話分析）"""
+
+    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': user_p}], timeout=60)
     c = final_text_sanitize(r)
-    # If AI returned non-Cantonese (detected by Mandarin particles), re-translate
-    mandarin_markers = ['这是', '这也', '这个', '这样', '因为', '所以', '已经', '我们', '他们', '但是', '虽然', '然而', '对于', '市场', '产品', '发展', '需要', '收入', '增长', '可能会', '将会']
-    if any(m in c for m in mandarin_markers):
-        trans_sys = "你係翻譯員，將以下普通話財經分析翻譯成香港廣東話口語，保留所有股票代號同數字，唔好改變意思。"
-        c = final_text_sanitize(call_pollinations(
-            [{'role': 'system', 'content': trans_sys}, {'role': 'user', 'content': f"翻譯成廣東話：\n{c}"}],
-            model='openai', timeout=45
-        ))
     return c if "【📉 近月市場焦點總結】" in c else f"【📉 近月市場焦點總結】\n\n{c}"
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, x_df, insider_df, congress_df):
-    sys_p = "You are a Hong Kong financial analyst.\n嚴格規則：\n1. 必須用香港廣東話口語 + 繁體中文。\n2. 絕對唔可以輸出 JSON、XML 或 markdown code block。只輸出純文字段落。\n3. 唔可以解釋分析過程，亦唔可以輸出 tool_calls 或 reasoning_content。\n4. 包含以下詞語：瘋狂吸籌、探氪、春江鴨、人踩人風險。\n格式：\n【🕵️ 另類數據 AI 偵測深度報告】\n【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】\n【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】\n【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"
-    usr_p = f"請根據以下數據直接寫純文字報告：\n\nReddit:\n{safe_to_string(reddit_df)}\n\nStockTwits:\n{safe_to_string(twits_df)}\n\nX:\n{safe_to_string(x_df)}\n\nInsiders:\n{safe_to_string(insider_df)}\n\nCongress:\n{safe_to_string(congress_df)}\n\n只輸出最終報告正文，不要 JSON 或代碼塊。"
+    sys_p = "你是一位資深的香港華爾街財經專家。請直接使用「香港廣東話（口語）」及繁體中文輸出深度報告。絕對禁止輸出任何代碼、JSON格式、內部思考過程或提示詞。請直接給出純文字分析結果。"
+    usr_p = f"""請根據以下另類數據直接寫一份純文字的廣東話報告：
+
+Reddit:
+{safe_to_string(reddit_df)}
+
+StockTwits:
+{safe_to_string(twits_df)}
+
+X:
+{safe_to_string(x_df)}
+
+Insiders:
+{safe_to_string(insider_df)}
+
+Congress:
+{safe_to_string(congress_df)}
+
+請務必包含以下標題（不要有任何開場白，直接由標題開始）：
+【🕵️ 另類數據 AI 偵測深度報告】
+【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】
+【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
+【🎯 終極五維共振：最強爆發潛力股與高危陷阱】
+
+（提示：請在內文自然運用「瘋狂吸籌」、「探氪」、「春江鴨」、「人踩人風險」等字眼）"""
     return extract_cantonese_report(call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}], timeout=80))
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -665,8 +656,16 @@ def fetch_single_stock_news(ticker):
 
 def analyze_single_stock_sentiment(ticker, news_items):
     if not news_items: return "【⚖️ 中性觀望】\n\n缺乏近期專屬新聞，暫時未見足夠催化劑，較適合先觀望。"
-    sys_p = "You are a Hong Kong financial AI.\n規則：\n1. 第一行必須完全等於以下其中一個：【🔥 極度看好】【📈 偏向樂觀】【⚖️ 中性觀望】【📉 偏向悲觀】【🧊 極度看淡】\n2. 第一行之後用廣東話自然分析。\n3. 唔可以輸出 JSON、XML 或 markdown code block。\n4. 唔可以輸出 tool_calls 殘留。\n如果好淡混雜，優先選【⚖️ 中性觀望】。"
-    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': f"分析 {ticker} 近期新聞：\n{chr(10).join(news_items)}\n只輸出純文字最終答案。"}], timeout=25)
+    sys_p = "你是一位專業的香港華爾街財經AI。請直接使用香港廣東話（口語）進行分析。嚴禁輸出任何代碼、內部思考過程或提示詞。"
+    usr_p = f"""分析 {ticker} 近期新聞：
+{chr(10).join(news_items)}
+
+規則：
+1. 第一行必須完全等於以下其中一個，不要加其他字：【🔥 極度看好】或【📈 偏向樂觀】或【⚖️ 中性觀望】或【📉 偏向悲觀】或【🧊 極度看淡】。
+2. 第一行之後，請用廣東話自然分析並解釋原因。
+
+請直接輸出最終答案，不要任何開場白。"""
+    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}], timeout=25)
     label, body = extract_stock_sentiment_output(r)
     return f"{label}\n\n{body}"
 
