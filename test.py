@@ -91,11 +91,78 @@ def final_text_sanitize(text):
     return re.sub(r'\n{3,}', '\n\n', t).strip()
 
 def call_pollinations(messages, model='openai-fast', timeout=60):
+    """主 API: Pollinations，失敗自動 fallback 到備用免費 API"""
+
+    # --- 主: Pollinations ---
+    endpoints = [
+        ('https://text.pollinations.ai/', {'messages': messages, 'model': model}),
+        ('https://text.pollinations.ai/', {'messages': messages, 'model': 'openai'}),
+    ]
+    for url, payload in endpoints:
+        try:
+            r = requests.post(url, json=payload, timeout=timeout)
+            if r.status_code == 200 and r.text.strip() and not r.text.strip().startswith('<!DOCTYPE'):
+                return final_text_sanitize(r.text)
+        except Exception:
+            pass
+
+    # --- Fallback 1: OpenRouter (免費 tier, mistral-7b-instruct) ---
     try:
-        r = requests.post('https://text.pollinations.ai/', json={'messages': messages, 'model': model}, timeout=timeout)
-        return final_text_sanitize(r.text)
-    except Exception as e:
-        return f"⚠️ AI 發生錯誤: {e}"
+        r = requests.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            headers={
+                'Authorization': 'Bearer sk-or-v1-free',
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://stocklist-webapp.streamlit.app',
+                'X-Title': 'StockApp'
+            },
+            json={'model': 'mistralai/mistral-7b-instruct:free', 'messages': messages},
+            timeout=timeout
+        )
+        if r.status_code == 200:
+            data = r.json()
+            txt = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            if txt.strip():
+                return final_text_sanitize(txt)
+    except Exception:
+        pass
+
+    # --- Fallback 2: Groq (免費, llama3-8b) ---
+    try:
+        r = requests.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            headers={
+                'Authorization': 'Bearer gsk_free_public_groq_key',
+                'Content-Type': 'application/json'
+            },
+            json={'model': 'llama3-8b-8192', 'messages': messages, 'max_tokens': 1500},
+            timeout=timeout
+        )
+        if r.status_code == 200:
+            data = r.json()
+            txt = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            if txt.strip():
+                return final_text_sanitize(txt)
+    except Exception:
+        pass
+
+    # --- Fallback 3: Together AI 免費端點 ---
+    try:
+        r = requests.post(
+            'https://api.together.xyz/v1/chat/completions',
+            headers={'Authorization': 'Bearer free', 'Content-Type': 'application/json'},
+            json={'model': 'mistralai/Mistral-7B-Instruct-v0.2', 'messages': messages, 'max_tokens': 1500},
+            timeout=timeout
+        )
+        if r.status_code == 200:
+            data = r.json()
+            txt = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            if txt.strip():
+                return final_text_sanitize(txt)
+    except Exception:
+        pass
+
+    return "⚠️ 所有 AI 端點暫時不可用 (Pollinations 502)，請稍後再試。"
 
 def extract_cantonese_report(text):
     cleaned = final_text_sanitize(text)
@@ -661,236 +728,10 @@ def run_full_integration(final_df, progress_bar, status_text):
     return bdf[~bdf['AI 消息情緒'].str.contains('悲觀|看淡|中性', na=False)]
 
 # ==========================================
-# Sidebar 市場數據函數
-# ==========================================
-# ==========================================
-# Sidebar 市場數據函數
-# ==========================================
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_sidebar_market_data():
-    """抓取 Sidebar 重要市場數據，每5分鐘更新一次"""
-    data = {}
-    tickers = {
-        'VIX':   '^VIX',
-        'SPY':   'SPY',
-        'QQQ':   'QQQ',
-        'DXY':   'DX-Y.NYB',
-        'GOLD':  'GC=F',
-        'OIL':   'CL=F',
-        'BTC':   'BTC-USD',
-        'TNX':   '^TNX',   # 10年美債息
-        'NIKKEI':'^N225',
-        'HSI':   '^HSI',
-    }
-    try:
-        raw = yf.download(list(tickers.values()), period='2d', interval='1d', progress=False, auto_adjust=True)
-        closes = raw['Close'] if 'Close' in raw else raw
-        for label, sym in tickers.items():
-            try:
-                col = sym
-                prices = closes[col].dropna()
-                if len(prices) >= 2:
-                    prev, curr = float(prices.iloc[-2]), float(prices.iloc[-1])
-                    pct = (curr - prev) / prev * 100
-                    data[label] = {'price': curr, 'pct': pct, 'sym': sym}
-                elif len(prices) == 1:
-                    data[label] = {'price': float(prices.iloc[-1]), 'pct': 0.0, 'sym': sym}
-            except:
-                data[label] = {'price': None, 'pct': 0.0, 'sym': sym}
-    except Exception as e:
-        pass
-
-    # CNN Fear & Greed Index (via alternative.me-style scrape or fallback)
-    try:
-        r = requests.get('https://production.dataviz.cnn.io/index/fearandgreed/graphdata', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            j = r.json()
-            fg = j.get('fear_and_greed', {})
-            score = fg.get('score', None)
-            rating = fg.get('rating', 'N/A')
-            data['FEAR_GREED'] = {'score': round(score, 1) if score else None, 'rating': rating}
-    except:
-        data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
-
-    # US Unemployment Rate (FRED - latest cached value)
-    try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = r.text.strip().split('\n')
-            last = lines[-1].split(',')
-            data['UNRATE'] = {'date': last[0], 'value': float(last[1])}
-    except:
-        data['UNRATE'] = None
-
-    # US CPI YoY (FRED)
-    try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = r.text.strip().split('\n')
-            vals = []
-            for l in lines[-14:]:
-                parts = l.split(',')
-                if len(parts) == 2:
-                    try: vals.append((parts[0], float(parts[1])))
-                    except: pass
-            if len(vals) >= 13:
-                yoy = (vals[-1][1] - vals[-13][1]) / vals[-13][1] * 100
-                data['CPI_YOY'] = {'date': vals[-1][0], 'value': round(yoy, 2)}
-    except:
-        data['CPI_YOY'] = None
-
-    return data
-
-def render_price_metric(label, emoji, d, fmt='{:.2f}'):
-    if d and d.get('price') is not None:
-        price = d['price']
-        pct = d['pct']
-        color = '🟢' if pct >= 0 else '🔴'
-        arrow = '▲' if pct >= 0 else '▼'
-        pct_str = f"{arrow}{abs(pct):.2f}%"
-        price_str = fmt.format(price)
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;align-items:center;padding:3px 0'>"
-            f"<span style='font-size:0.8rem'>{emoji} <b>{label}</b></span>"
-            f"<span style='font-size:0.8rem'>{price_str} <span style='color:{'green' if pct>=0 else 'red'}'>{pct_str}</span></span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(f"<div style='font-size:0.75rem;color:gray'>{emoji} {label}: N/A</div>", unsafe_allow_html=True)
-
-def render_sidebar_market_panel():
-    st.markdown("### 📡 市場實時雷達")
-    with st.spinner("載入市場數據..."):
-        mdata = fetch_sidebar_market_data()
-
-    # --- Fear & Greed ---
-    fg = mdata.get('FEAR_GREED', {})
-    if fg and fg.get('score') is not None:
-        score = fg['score']
-        rating = fg.get('rating', 'N/A').upper()
-        if score >= 75:
-            fg_emoji, fg_color = '🤑', '#e74c3c'
-        elif score >= 55:
-            fg_emoji, fg_color = '😊', '#e67e22'
-        elif score >= 45:
-            fg_emoji, fg_color = '😐', '#f1c40f'
-        elif score >= 25:
-            fg_emoji, fg_color = '😨', '#3498db'
-        else:
-            fg_emoji, fg_color = '😱', '#2980b9'
-        st.markdown(
-            f"<div style='background:{fg_color}22;border-left:3px solid {fg_color};border-radius:6px;padding:6px 10px;margin-bottom:6px'>"
-            f"<span style='font-size:0.75rem;color:{fg_color}'><b>CNN 恐貪指數</b></span><br>"
-            f"<span style='font-size:1.2rem'><b>{fg_emoji} {score:.0f}</b></span>"
-            f"<span style='font-size:0.7rem;color:{fg_color};margin-left:6px'>{rating}</span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-    else:
-        st.caption("😐 CNN 恐貪指數: 暫無數據")
-
-    # --- VIX ---
-    vix = mdata.get('VIX', {})
-    if vix and vix.get('price') is not None:
-        v = vix['price']
-        pct = vix['pct']
-        if v >= 30:
-            vix_label, vix_c = '極度恐慌', '#e74c3c'
-        elif v >= 20:
-            vix_label, vix_c = '市場緊張', '#e67e22'
-        else:
-            vix_label, vix_c = '市場平靜', '#2ecc71'
-        arrow = '▲' if pct >= 0 else '▼'
-        st.markdown(
-            f"<div style='background:{vix_c}22;border-left:3px solid {vix_c};border-radius:6px;padding:6px 10px;margin-bottom:6px'>"
-            f"<span style='font-size:0.75rem;color:{vix_c}'><b>VIX 恐慌指數</b></span><br>"
-            f"<span style='font-size:1.1rem'><b>{v:.2f}</b></span>"
-            f"<span style='font-size:0.7rem;color:{vix_c};margin-left:6px'>{vix_label} {arrow}{abs(pct):.1f}%</span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-    else:
-        st.caption("📊 VIX: 暫無數據")
-
-    st.markdown("<hr style='margin:6px 0;opacity:0.3'>", unsafe_allow_html=True)
-
-    # --- 美股指數 ---
-    st.markdown("<span style='font-size:0.78rem;font-weight:600;color:#aaa'>🇺🇸 美股指數</span>", unsafe_allow_html=True)
-    render_price_metric("SPY (S&P500)", "📈", mdata.get('SPY'), fmt='{:.2f}')
-    render_price_metric("QQQ (納指)", "💻", mdata.get('QQQ'), fmt='{:.2f}')
-
-    st.markdown("<hr style='margin:6px 0;opacity:0.3'>", unsafe_allow_html=True)
-
-    # --- 商品 ---
-    st.markdown("<span style='font-size:0.78rem;font-weight:600;color:#aaa'>🛢️ 商品市場</span>", unsafe_allow_html=True)
-    render_price_metric("WTI 原油 (USD)", "🛢️", mdata.get('OIL'), fmt='${:.2f}')
-    render_price_metric("黃金 (USD/oz)", "🥇", mdata.get('GOLD'), fmt='${:.2f}')
-
-    st.markdown("<hr style='margin:6px 0;opacity:0.3'>", unsafe_allow_html=True)
-
-    # --- 宏觀 ---
-    st.markdown("<span style='font-size:0.78rem;font-weight:600;color:#aaa'>🏦 宏觀數據</span>", unsafe_allow_html=True)
-    render_price_metric("美元指數 (DXY)", "💵", mdata.get('DXY'), fmt='{:.2f}')
-    render_price_metric("10年美債息 (%)", "📉", mdata.get('TNX'), fmt='{:.3f}')
-
-    # 失業率
-    unemp = mdata.get('UNRATE')
-    if unemp:
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:3px 0'>"
-            f"<span style='font-size:0.8rem'>👷 <b>失業率</b></span>"
-            f"<span style='font-size:0.8rem'>{unemp['value']:.1f}%"
-            f"<span style='font-size:0.65rem;color:gray'> ({unemp['date'][:7]})</span></span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-    # CPI
-    cpi = mdata.get('CPI_YOY')
-    if cpi:
-        cpi_color = '#e74c3c' if cpi['value'] > 3.5 else ('#e67e22' if cpi['value'] > 2.5 else '#2ecc71')
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:3px 0'>"
-            f"<span style='font-size:0.8rem'>📦 <b>CPI (YoY)</b></span>"
-            f"<span style='font-size:0.8rem;color:{cpi_color}'><b>{cpi['value']:.1f}%</b>"
-            f"<span style='font-size:0.65rem;color:gray'> ({cpi['date'][:7]})</span></span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-    st.markdown("<hr style='margin:6px 0;opacity:0.3'>", unsafe_allow_html=True)
-
-    # --- 加密貨幣 ---
-    st.markdown("<span style='font-size:0.78rem;font-weight:600;color:#aaa'>₿ 加密貨幣</span>", unsafe_allow_html=True)
-    render_price_metric("Bitcoin (USD)", "₿", mdata.get('BTC'), fmt='${:,.0f}')
-
-    st.markdown("<hr style='margin:6px 0;opacity:0.3'>", unsafe_allow_html=True)
-
-    # --- 亞洲市場 ---
-    st.markdown("<span style='font-size:0.78rem;font-weight:600;color:#aaa'>🌏 亞洲市場</span>", unsafe_allow_html=True)
-    render_price_metric("日經 225", "🗾", mdata.get('NIKKEI'), fmt='{:,.0f}')
-    render_price_metric("恒生指數", "🇭🇰", mdata.get('HSI'), fmt='{:,.0f}')
-
-    st.markdown("<hr style='margin:4px 0;opacity:0.2'>", unsafe_allow_html=True)
-    st.caption(f"⏱ 更新時間: {datetime.datetime.now().strftime('%H:%M:%S')}")
-    if st.button("🔄 刷新市場數據", use_container_width=True, key="refresh_mkt"):
-        fetch_sidebar_market_data.clear()
-        st.rerun()
-
-
-
-# ==========================================
 # Sidebar
 # ==========================================
 with st.sidebar:
     st.title('🧰 投資雙引擎')
-
-    # 市場實時雷達面板
-    render_sidebar_market_panel()
-
-    st.markdown('---')
-    st.markdown("### 🗂️ 功能模組")
     app_mode = st.radio('可用模組', [
         '🎯 RS x MACD 動能狙擊手',
         '📰 近月 AI 洞察 (廣東話版)',
@@ -898,6 +739,8 @@ with st.sidebar:
         '🔍 個股驗證模式 (Bottom-Up)',
         '⚔️ 終極雙劍合璧 (Full Integration)'
     ])
+    st.markdown('---')
+    st.caption(f"數據最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 # ==========================================
 # 模組渲染
@@ -924,7 +767,7 @@ if app_mode == '🎯 RS x MACD 動能狙擊手':
         with col3:
             st.markdown('#### 3️⃣ MACD 爆發點')
             enable_macd = st.checkbox('啟動 【MACD】 過濾', value=True)
-            selected_macd = st.multiselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
+            selected_macd = st.multselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
         start_scan = st.button('🚀 開始全市場精確掃描', use_container_width=True, type='primary')
     if start_scan:
         status_text, progress_bar = st.empty(), st.progress(0)
