@@ -924,7 +924,7 @@ if app_mode == '🎯 RS x MACD 動能狙擊手':
         with col3:
             st.markdown('#### 3️⃣ MACD 爆發點')
             enable_macd = st.checkbox('啟動 【MACD】 過濾', value=True)
-            selected_macd = st.multselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
+            selected_macd = st.multiselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
         start_scan = st.button('🚀 開始全市場精確掃描', use_container_width=True, type='primary')
     if start_scan:
         status_text, progress_bar = st.empty(), st.progress(0)
