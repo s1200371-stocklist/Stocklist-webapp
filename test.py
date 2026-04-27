@@ -1,3 +1,4 @@
+
 import os, re, json, time, random, datetime, requests
 import pandas as pd
 import streamlit as st
@@ -45,18 +46,8 @@ BAD_PATTERNS = [
 def clean_ai_response(text):
     if not isinstance(text, str): return str(text)
     raw = text.strip()
-    raw = re.sub(r'^```(?:json|text|markdown)?\s*', '', raw, flags=re.IGNORECASE)
     raw = re.sub(r'\s*```$', '', raw)
     raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL | re.IGNORECASE)
-    # Remove meta-commentary (Note:...) patterns
-    raw = re.sub(r'\(Note:[^)]*\)', '', raw, flags=re.IGNORECASE)
-    raw = re.sub(r'（注：[^）]*）', '', raw)
-    raw = re.sub(r'\(注:[^)]*\)', '', raw)
-    raw = re.sub(r'\(Translation note:[^)]*\)', '', raw, flags=re.IGNORECASE)
-    raw = re.sub(r'\(Translator\'s note:[^)]*\)', '', raw, flags=re.IGNORECASE)
-    raw = re.sub(r'\[Note:[^\]]*\]', '', raw, flags=re.IGNORECASE)
-    raw = re.sub(r'\(This (?:sentence|phrase|expression|text)[^)]*\)', '', raw, flags=re.IGNORECASE)
-    raw = re.sub(r'\(此(?:句|段|表達)[^）]*）', '', raw)
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
@@ -66,21 +57,9 @@ def clean_ai_response(text):
                     c = msg.get("content")
                     if isinstance(c, str) and c.strip(): return c.strip()
             if "content" in parsed and isinstance(parsed["content"], str): return parsed["content"].strip()
-            if parsed.get("role") == "assistant":
-                c = parsed.get("content")
-                if isinstance(c, str) and c.strip(): return c.strip()
+            if parsed.get("role") == "assistant" and isinstance(parsed.get("content"), str): return parsed["content"].strip()
             if isinstance(parsed.get("final"), str) and parsed["final"].strip(): return parsed["final"].strip()
-        elif isinstance(parsed, list) and parsed:
-            first = parsed[0]
-            if isinstance(first, dict):
-                c = first.get("content") or first.get("text") or ""
-                if c: return str(c).strip()
     except: pass
-    # Strip reasoning_content JSON wrapper pattern specifically
-    rc_match = re.search(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, re.DOTALL)
-    if rc_match:
-        candidate = rc_match.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\n', '\n')
-        if len(candidate) > 20: return candidate.strip()
     raw = re.sub(r'"reasoning_content"\s*:\s*".*?"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"role"\s*:\s*"assistant"\s*,?', '', raw, flags=re.DOTALL)
     raw = re.sub(r'"content"\s*:\s*', '', raw, flags=re.DOTALL)
@@ -141,16 +120,39 @@ def extract_cantonese_report(text):
 
 def extract_stock_sentiment_output(text):
     LABELS = ["【🔥 極度看好】", "【📈 偏向樂觀】", "【⚖️ 中性觀望】", "【📉 偏向悲觀】", "【🧊 極度看淡】"]
-    FB_BODY = "市場消息面暫時未有一面倒優勢，利好與風險並存，現階段較適合保持審慎，等待更多業績、指引或催化消息再判斷後續方向。"
+    FB_BODY = "市場消息面暫時未有一一面倒優勢，利好與風險並存，現階段較適合保持審慎，等待更多業績、指引或催化消息再判斷後續方向。"
     cleaned = final_text_sanitize(text)
+    
+    # 強制截斷：尋找第一個出現的標籤，將前面的所有 AI 思考過程全部刪除
+    first_label_idx = -1
+    for l in LABELS:
+        idx = cleaned.find(l)
+        if idx != -1 and (first_label_idx == -1 or idx < first_label_idx):
+            first_label_idx = idx
+            
+    if first_label_idx != -1:
+        cleaned = cleaned[first_label_idx:]
+
     lines = [l.strip() for l in cleaned.split('\n') if l.strip()]
     label, body_lines = "【⚖️ 中性觀望】", []
+    label_found = False
+    
     for line in lines:
-        if line in LABELS: label = line; continue
+        if line in LABELS or any(l in line for l in LABELS):
+            for l in LABELS:
+                if l in line:
+                    label = l
+                    label_found = True
+                    break
+            continue
+            
+        if not label_found: continue
+        
         low = line.lower()
-        if any(k in low for k in ["reasoning_content", "tool_calls", '"role"', '"content"']): continue
+        if any(k in low for k in ["reasoning_content", "tool_calls", '"role"', '"content"', "let's", "i will"]): continue
         if line.startswith("{") and line.endswith("}"): continue
         body_lines.append(line)
+        
     body = final_text_sanitize('\n\n'.join(body_lines).strip())
     return label, body if body else FB_BODY
 
@@ -319,122 +321,45 @@ def fetch_x_sentiment():
     ]), "🔴 離線備援 (X / FinTwit)"
 
 # ==========================================
-# Part 4: 真實 Insider 買入 (SEC EDGAR Form 4)
+# Part 4: 全市場真實 Insider 買入 (全新 OpenInsider 抓取器)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
-    edgar_headers = {'User-Agent': 'stockapp research@stockapp.com'}
-    company_ciks = {
-        'NVDA': '1045810', 'AAPL': '320193', 'TSLA': '1318605',
-        'MSFT': '789019', 'META': '1326801', 'AMD': '2488',
-        'PLTR': '1321655', 'AMZN': '1018724', 'GOOGL': '1652044',
-        'CRWD': '1535527', 'COIN': '1679788', 'MARA': '764038',
-        'ASTS': '1780243', 'MSTR': '1050446', 'NFLX': '1065280',
-        'UBER': '1543151', 'HOOD': '1783879', 'SOFI': '1818502',
-        'RBLX': '1326110', 'SNAP': '1564408',
-    }
-    cutoff = (datetime.datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
-    all_results = []
+    # 首選方案：OpenInsider (市場公認最準確、最快更新的全市場高管買入追蹤)
+    try:
+        url = 'http://openinsider.com/insider-purchases-25k' # 專門抓 25K 美金以上嘅大額買入
+        res = requests.get(url, headers=get_headers(), timeout=12)
+        if res.status_code == 200:
+            dfs = pd.read_html(res.text)
+            for df in dfs:
+                if 'Ticker' in df.columns and 'Value' in df.columns:
+                    df = df.dropna(subset=['Ticker', 'Value'])
+                    df = df[['Trade Date', 'Ticker', 'Insider Name', 'Title', 'Price', 'Value']]
+                    df = df.rename(columns={'Trade Date': 'Date', 'Insider Name': 'Insider'})
+                    df['Ticker'] = df['Ticker'].astype(str).str.upper()
+                    if not df.empty:
+                        return df.head(10), '🟢 OpenInsider 真實數據 (最新 >$25k 買入)'
+    except Exception as e: 
+        pass
 
-    def scan_company(ticker, cik):
-        local = []
-        try:
-            r = requests.get(
-                f'https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json',
-                headers=edgar_headers, timeout=8
-            )
-            if r.status_code == 429: return local
-            sub = r.json()
-            f = sub.get('filings', {}).get('recent', {})
-            forms = f.get('form', [])
-            dates = f.get('filingDate', [])
-            acc_nos = f.get('accessionNumber', [])
-            cik_num = str(cik).lstrip('0')
-            for i, (form, date) in enumerate(zip(forms, dates)):
-                if form != '4' or date < cutoff or i >= len(acc_nos): continue
-                acc = acc_nos[i]
-                acc_clean = acc.replace('-', '')
-                try:
-                    idx_r = requests.get(
-                        f'https://www.sec.gov/Archives/edgar/data/{cik_num}/{acc_clean}/',
-                        headers=edgar_headers, timeout=6
-                    )
-                    if idx_r.status_code == 429: break
-                    xml_files = re.findall(r'href="(/Archives/edgar/data/[^"]+\.xml)"', idx_r.text)
-                    if not xml_files: continue
-                    xml_r = requests.get(f'https://www.sec.gov{xml_files[0]}', headers=edgar_headers, timeout=6)
-                    if xml_r.status_code == 429: break
-                    xml = xml_r.text
-                    if '<transactionCode>P</transactionCode>' not in xml: continue
-                    name_m = re.search(r'<rptOwnerName>([^<]+)</rptOwnerName>', xml)
-                    title_m = re.search(r'<officerTitle>([^<]+)</officerTitle>', xml)
-                    for blk in re.findall(r'<nonDerivativeTransaction>(.*?)</nonDerivativeTransaction>', xml, re.DOTALL):
-                        code_m = re.search(r'<transactionCode>([^<]+)</transactionCode>', blk)
-                        if not code_m or code_m.group(1).strip() != 'P': continue
-                        s_m = re.search(r'<transactionShares>\s*<value>([^<]+)</value>', blk)
-                        p_m = re.search(r'<transactionPricePerShare>\s*<value>([^<]+)</value>', blk)
-                        d_m = re.search(r'<transactionDate>\s*<value>([^<]+)</value>', blk)
-                        s = float(s_m.group(1)) if s_m else 0
-                        p = float(p_m.group(1)) if p_m else 0
-                        val = s * p
-                        if val >= 10000:
-                            local.append({
-                                'Ticker': ticker,
-                                'Insider': name_m.group(1).strip().title() if name_m else 'N/A',
-                                'Title': title_m.group(1).strip().title() if title_m else 'Officer',
-                                'Date': d_m.group(1).strip() if d_m else date,
-                                'Price': f'${p:.2f}',
-                                'Value': f'${val:,.0f}',
-                                '_val_num': val,
-                            })
-                        break
-                    if local: break
-                except: continue
-                time.sleep(0.12)
-        except: pass
-        return local
+    # 備援方案：Finviz Insider
+    try:
+        from finvizfinance.insider import Insider
+        insider = Insider(option='top owner buys')
+        df = insider.get_insider()
+        if not df.empty:
+            df = df[['Date', 'Ticker', 'Owner', 'Relationship', 'Cost', 'Value ($)']]
+            df = df.rename(columns={'Owner': 'Insider', 'Relationship': 'Title', 'Cost': 'Price', 'Value ($)': 'Value'})
+            df['Value'] = df['Value'].apply(lambda x: f"${x:,.0f}" if isinstance(x, (int, float)) else str(x))
+            return df.head(10), '🟢 Finviz 真實數據 (Top Owner Buys)'
+    except: 
+        pass
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        futures = {ex.submit(scan_company, t, c): t for t, c in company_ciks.items()}
-        for future in concurrent.futures.as_completed(futures):
-            all_results.extend(future.result() or [])
-
-    if all_results:
-        df = pd.DataFrame(all_results).sort_values('_val_num', ascending=False).drop(columns=['_val_num']).head(10).reset_index(drop=True)
-        return df
-
-    # Fallback: yfinance
-    tickers_list = list(company_ciks.keys())
-    random.shuffle(tickers_list)
-    fb = []
-    cutoff_ts = pd.Timestamp.now(tz=None) - timedelta(days=60)
-    def fetch_yf(ticker):
-        try:
-            tkr = yf.Ticker(ticker)
-            trades = tkr.insider_transactions
-            if trades is None or trades.empty: return
-            df2 = trades.reset_index()
-            dc = next((c for c in df2.columns if 'date' in str(c).lower()), None)
-            if dc:
-                df2[dc] = pd.to_datetime(df2[dc], errors='coerce').dt.tz_localize(None)
-                df2 = df2[df2[dc] >= cutoff_ts]
-            tc = next((c for c in df2.columns if 'text' in str(c).lower() or 'trans' in str(c).lower()), None)
-            if tc and not df2.empty:
-                buys = df2[df2[tc].astype(str).str.contains('Buy|Purchase', case=False, na=False)]
-                for _, row in buys.head(2).iterrows():
-                    s, v = row.get('Shares', 0), row.get('Value', 0)
-                    if pd.notna(v) and float(v) > 0:
-                        fb.append({'Ticker': ticker, 'Insider': str(row.get('Insider', row.get('Name', 'N/A'))).title(), 'Title': str(row.get('Position', row.get('Title', 'Officer'))).title(), 'Date': str(row.get('Start Date', row.get('Date', 'N/A')))[:10], 'Price': f"${float(v)/float(s):.2f}" if pd.notna(s) and float(s) > 0 else 'N/A', 'Value': f"${float(v):,.0f}", '_val_num': float(v)})
-        except: pass
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        concurrent.futures.wait([ex.submit(fetch_yf, t) for t in tickers_list[:10]])
-    if fb:
-        return pd.DataFrame(fb).sort_values('_val_num', ascending=False).drop(columns=['_val_num']).head(10).reset_index(drop=True)
-
+    # 靜態備援 (避免系統崩潰)
     return pd.DataFrame([
-        {'Ticker': 'ASTS', 'Insider': 'Abel Avellan', 'Title': 'CEO', 'Date': '2026-03-15', 'Price': '$24.50', 'Value': '$2,500,000'},
-        {'Ticker': 'PLTR', 'Insider': 'Peter Thiel', 'Title': 'Director', 'Date': '2026-03-10', 'Price': '$82.00', 'Value': '$1,230,000'},
-    ])
+        {'Date': datetime.datetime.now().strftime('%Y-%m-%d'), 'Ticker': 'ASTS', 'Insider': 'Abel Avellan', 'Title': 'CEO', 'Price': '$24.50', 'Value': '$2,500,000'},
+        {'Date': (datetime.datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'), 'Ticker': 'PLTR', 'Insider': 'Peter Thiel', 'Title': 'Director', 'Price': '$82.00', 'Value': '$1,230,000'},
+    ]), '🔴 離線備援數據'
 
 # ==========================================
 # Part 5: 真實國會交易 (QuiverQuant API)
@@ -601,56 +526,73 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
     return pd.DataFrame(res) if res else empty
 
 # ==========================================
-# AI 分析
+# AI 分析 (已加入強硬截斷防護)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_news_ai(news_list):
     if not news_list: return '⚠️ 目前攞唔到新聞數據，請遲啲再試下。'
     news_text = '\n'.join([f"{i+1}. [{x['來源']}] 標題：{x['新聞標題']}\n摘要：{x['內文摘要']}\n" for i, x in enumerate(news_list)])
-    sys_p = (
-        "你係一個香港財經分析師，專門用廣東話口語寫報告。\n"
-        "【鐵則 - 唔跟就廢】\n"
-        "1. 全文必須100%用香港廣東話口語，例如：呢、唔係、係咁話、好正、頂硬上、博一博。\n"
-        "2. 禁止夾英文句子，禁止用普通話詞語（例如唔可以用「这是」「因为」「所以」「已经」「我们」）。\n"
-        "3. 唔可以輸出 JSON、XML、markdown code block、reasoning_content、tool_calls。\n"
-        "4. 直接由格式標題開始，唔好有前言。\n"
-        "5. 絕對禁止輸出任何括號內嘅解釋、meta-commentary 或 (Note:...) 格式文字，只輸出正文內容。\n"
-        "廣東話例子：\n"
-        "✅ 「呢隻股票近排好波動，投資者要小心博大霧。」\n"
-        "✅ 「NVDA而家係AI龍頭，但估值已經去到天花板，要量力而為。」\n"
-        "❌ 「这只股票最近很波动，投资者需要谨慎。」（普通話 - 唔可以用）\n"
-        "❌ 「This stock is very volatile recently.」（英文句子 - 唔可以用）\n"
-        "格式：\n"
-        "【📉 近月市場焦點總結】\n"
-        "（用廣東話寫3-5段分析）\n"
-        "【🚀 潛力爆發股全面掃描】\n"
-        "（用廣東話寫3-5段，逐隻股票分析）"
-    )
-    usr_p = (
-        f"根據以下財經新聞，用100%香港廣東話口語寫分析報告。\n"
-        f"記住：全文唔可以有普通話或英文句子，只可以有廣東話。\n\n"
-        f"新聞：\n{news_text}\n\n"
-        f"只輸出廣東話純文字報告，唔好有任何 JSON 或代碼。"
-    )
-    r = call_pollinations(
-        [{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}],
-        model='openai', timeout=75
-    )
+    
+    sys_p = "你是一位資深的香港華爾街財經專家。你的任務是直接撰寫市場報告，全程使用「香港廣東話（口語）」及繁體中文。請直接輸出最終的報告內容，絕對禁止包含任何思考過程或英文邏輯推理。"
+    
+    user_p = f"""請根據以下最新財經新聞，寫一份香港廣東話版本的市場分析報告。
+
+新聞數據：
+{news_text}
+
+[嚴重警告：請直接由標題開始寫，不要輸出任何 "Let's produce", "In the first section" 等思考過程。如果輸出任何分析計劃，系統會崩潰！]
+
+必須嚴格包含以下兩個標題，並由標題開始輸出：
+【📉 近月市場焦點總結】
+（你的廣東話總結）
+
+【🚀 潛力爆發股全面掃描】
+（你的廣東話分析）"""
+
+    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': user_p}], timeout=60)
     c = final_text_sanitize(r)
-    # If AI returned non-Cantonese (detected by Mandarin particles), re-translate
-    mandarin_markers = ['这是', '这也', '这个', '这样', '因为', '所以', '已经', '我们', '他们', '但是', '虽然', '然而', '对于', '市场', '产品', '发展', '需要', '收入', '增长', '可能会', '将会']
-    if any(m in c for m in mandarin_markers):
-        trans_sys = "你係翻譯員，將以下普通話財經分析翻譯成香港廣東話口語，保留所有股票代號同數字，唔好改變意思。"
-        c = final_text_sanitize(call_pollinations(
-            [{'role': 'system', 'content': trans_sys}, {'role': 'user', 'content': f"翻譯成廣東話：\n{c}"}],
-            model='openai', timeout=45
-        ))
-    return c if "【📉 近月市場焦點總結】" in c else f"【📉 近月市場焦點總結】\n\n{c}"
+    
+    # 🔪 終極殺手鐧：尋找預設標題，將標題前面的所有「推理廢話」直接切斷拋棄
+    anchor = "【📉 近月市場焦點總結】"
+    idx = c.find(anchor)
+    if idx != -1:
+        c = c[idx:]  # 只保留標題及之後的內容
+    else:
+        # 容錯：如果 AI 稍微改了標題
+        alt_idx = c.find("近月市場焦點總結")
+        if alt_idx != -1:
+            c = anchor + "\n" + c[alt_idx + len("近月市場焦點總結"):]
+        else:
+            c = f"{anchor}\n\n{c}"
+
+    return c
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_alt_data_ai(reddit_df, twits_df, x_df, insider_df, congress_df):
-    sys_p = "You are a Hong Kong financial analyst.\n嚴格規則：\n1. 必須用香港廣東話口語 + 繁體中文。\n2. 絕對唔可以輸出 JSON、XML 或 markdown code block。只輸出純文字段落。\n3. 唔可以解釋分析過程，亦唔可以輸出 tool_calls 或 reasoning_content。\n4. 包含以下詞語：瘋狂吸籌、探氪、春江鴨、人踩人風險。\n5. 絕對禁止輸出 (Note:...) 或任何括號解釋文字，只輸出正文。\n格式：\n【🕵️ 另類數據 AI 偵測深度報告】\n【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】\n【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】\n【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"
-    usr_p = f"請根據以下數據直接寫純文字報告：\n\nReddit:\n{safe_to_string(reddit_df)}\n\nStockTwits:\n{safe_to_string(twits_df)}\n\nX:\n{safe_to_string(x_df)}\n\nInsiders:\n{safe_to_string(insider_df)}\n\nCongress:\n{safe_to_string(congress_df)}\n\n只輸出最終報告正文，不要 JSON 或代碼塊。"
+    sys_p = "你是一位資深的香港華爾街財經專家。請直接使用「香港廣東話（口語）」及繁體中文輸出深度報告。絕對禁止輸出任何英文思考過程。請直接給出純文字分析結果。"
+    usr_p = f"""請根據以下另類數據直接寫一份純文字的廣東話報告：
+
+Reddit:
+{safe_to_string(reddit_df)}
+
+StockTwits:
+{safe_to_string(twits_df)}
+
+X:
+{safe_to_string(x_df)}
+
+Insiders:
+{safe_to_string(insider_df)}
+
+Congress:
+{safe_to_string(congress_df)}
+
+請務必包含以下標題（直接由標題開始寫，不要有任何英文開場白）：
+【🕵️ 另類數據 AI 偵測深度報告】
+【🔥 社交熱度雙引擎：Reddit、StockTwits、X 正喺度推高邊啲股票？】
+【🏛️ 聰明錢與政客追蹤：終極內幕買緊乜？】
+【🎯 終極五維共振：最強爆發潛力股與高危陷阱】"""
+
     return extract_cantonese_report(call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}], timeout=80))
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -675,8 +617,16 @@ def fetch_single_stock_news(ticker):
 
 def analyze_single_stock_sentiment(ticker, news_items):
     if not news_items: return "【⚖️ 中性觀望】\n\n缺乏近期專屬新聞，暫時未見足夠催化劑，較適合先觀望。"
-    sys_p = "You are a Hong Kong financial AI.\n規則：\n1. 第一行必須完全等於以下其中一個：【🔥 極度看好】【📈 偏向樂觀】【⚖️ 中性觀望】【📉 偏向悲觀】【🧊 極度看淡】\n2. 第一行之後用廣東話自然分析。\n3. 唔可以輸出 JSON、XML 或 markdown code block。\n4. 唔可以輸出 tool_calls 殘留。\n5. 絕對禁止輸出 (Note:...) 或任何括號解釋文字，只輸出正文。\n如果好淡混雜，優先選【⚖️ 中性觀望】。"
-    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': f"分析 {ticker} 近期新聞：\n{chr(10).join(news_items)}\n只輸出純文字最終答案。"}], timeout=25)
+    sys_p = "你是一位專業的香港華爾街財經AI。請直接使用香港廣東話（口語）進行分析。嚴禁輸出任何英文思考過程。"
+    usr_p = f"""分析 {ticker} 近期新聞：
+{chr(10).join(news_items)}
+
+規則：
+1. 第一行必須完全等於以下其中一個，不要加其他字：【🔥 極度看好】或【📈 偏向樂觀】或【⚖️ 中性觀望】或【📉 偏向悲觀】或【🧊 極度看淡】。
+2. 第一行之後，請用廣東話自然分析並解釋原因。
+
+請直接輸出最終答案，不要任何英文或思考廢話。"""
+    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}], timeout=25)
     label, body = extract_stock_sentiment_output(r)
     return f"{label}\n\n{body}"
 
@@ -815,9 +765,10 @@ elif app_mode == '🕵️ 另類數據雷達 (6大維度)':
         x_df, x_msg = fetch_x_sentiment()
         st.caption(x_msg); st.dataframe(x_df.head(10), use_container_width=True, hide_index=True)
     with c4:
-        st.markdown('**4. 高層 Insider 真金白銀買入 (SEC EDGAR)**')
-        with st.spinner('🔍 從 SEC EDGAR 抓取真實 Form 4 數據...'):
-            i_df = fetch_insider_buying()
+        st.markdown('**4. 高層 Insider 真金白銀買入 (全市場)**')
+        with st.spinner('🔍 抓取全市場真實 Insider 買入數據...'):
+            i_df, i_msg = fetch_insider_buying()
+        st.caption(i_msg)
         st.dataframe(i_df.head(10), use_container_width=True, hide_index=True)
     c5, c6 = st.columns(2)
     with c5:
@@ -894,3 +845,7 @@ elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
                 status_text.markdown('✅ 掃描完成。'); st.warning("無股票同時符合嚴格雙突破條件。")
         else:
             status_text.markdown('⚠️ 暫時攞唔到 Finviz 股票清單。')
+
+
+
+
