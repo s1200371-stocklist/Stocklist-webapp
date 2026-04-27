@@ -91,78 +91,86 @@ def final_text_sanitize(text):
     return re.sub(r'\n{3,}', '\n\n', t).strip()
 
 def call_pollinations(messages, model='openai-fast', timeout=60):
-    """主 API: Pollinations，失敗自動 fallback 到備用免費 API"""
+    """主 API: Pollinations，失敗自動 fallback 到其他免費 API"""
 
-    # --- 主: Pollinations ---
-    endpoints = [
-        ('https://text.pollinations.ai/', {'messages': messages, 'model': model}),
-        ('https://text.pollinations.ai/', {'messages': messages, 'model': 'openai'}),
-    ]
-    for url, payload in endpoints:
+    def _is_valid(text):
+        t = (text or '').strip()
+        return bool(t) and not t.startswith('<!DOCTYPE') and not t.startswith('<html') and len(t) > 20
+
+    # --- 主: Pollinations (兩個模型) ---
+    for m in [model, 'openai']:
         try:
-            r = requests.post(url, json=payload, timeout=timeout)
-            if r.status_code == 200 and r.text.strip() and not r.text.strip().startswith('<!DOCTYPE'):
+            r = requests.post(
+                'https://text.pollinations.ai/',
+                json={'messages': messages, 'model': m},
+                timeout=timeout
+            )
+            if r.status_code == 200 and _is_valid(r.text):
                 return final_text_sanitize(r.text)
         except Exception:
             pass
 
-    # --- Fallback 1: OpenRouter (免費 tier, mistral-7b-instruct) ---
+    # --- Fallback 1: Pollinations GET endpoint ---
     try:
-        r = requests.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': 'Bearer sk-or-v1-free',
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'https://stocklist-webapp.streamlit.app',
-                'X-Title': 'StockApp'
-            },
-            json={'model': 'mistralai/mistral-7b-instruct:free', 'messages': messages},
+        import urllib.parse
+        prompt = messages[-1].get('content', '') if messages else ''
+        system = next((m.get('content','') for m in messages if m.get('role')=='system'), '')
+        full_prompt = f"{system}\n\n{prompt}".strip()
+        encoded = urllib.parse.quote(full_prompt[:800])
+        r = requests.get(
+            f'https://text.pollinations.ai/{encoded}?model=openai&seed=42',
             timeout=timeout
         )
-        if r.status_code == 200:
-            data = r.json()
-            txt = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-            if txt.strip():
-                return final_text_sanitize(txt)
+        if r.status_code == 200 and _is_valid(r.text):
+            return final_text_sanitize(r.text)
     except Exception:
         pass
 
-    # --- Fallback 2: Groq (免費, llama3-8b) ---
-    try:
-        r = requests.post(
-            'https://api.groq.com/openai/v1/chat/completions',
-            headers={
-                'Authorization': 'Bearer gsk_free_public_groq_key',
-                'Content-Type': 'application/json'
-            },
-            json={'model': 'llama3-8b-8192', 'messages': messages, 'max_tokens': 1500},
-            timeout=timeout
-        )
-        if r.status_code == 200:
-            data = r.json()
-            txt = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-            if txt.strip():
-                return final_text_sanitize(txt)
-    except Exception:
-        pass
+    # --- Fallback 2: OpenRouter 免費 tier ---
+    openrouter_key = os.environ.get('OPENROUTER_API_KEY', '')
+    if openrouter_key:
+        try:
+            r = requests.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {openrouter_key}',
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'https://stocklist-webapp.streamlit.app',
+                    'X-Title': 'StockApp'
+                },
+                json={'model': 'mistralai/mistral-7b-instruct:free', 'messages': messages},
+                timeout=timeout
+            )
+            if r.status_code == 200:
+                txt = r.json().get('choices', [{}])[0].get('message', {}).get('content', '')
+                if _is_valid(txt):
+                    return final_text_sanitize(txt)
+        except Exception:
+            pass
 
-    # --- Fallback 3: Together AI 免費端點 ---
-    try:
-        r = requests.post(
-            'https://api.together.xyz/v1/chat/completions',
-            headers={'Authorization': 'Bearer free', 'Content-Type': 'application/json'},
-            json={'model': 'mistralai/Mistral-7B-Instruct-v0.2', 'messages': messages, 'max_tokens': 1500},
-            timeout=timeout
-        )
-        if r.status_code == 200:
-            data = r.json()
-            txt = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-            if txt.strip():
-                return final_text_sanitize(txt)
-    except Exception:
-        pass
+    # --- Fallback 3: Groq 免費 tier (需要 GROQ_API_KEY) ---
+    groq_key = os.environ.get('GROQ_API_KEY', '')
+    if not groq_key:
+        try:
+            groq_key = st.secrets.get('GROQ_API_KEY', '')
+        except Exception:
+            pass
+    if groq_key:
+        try:
+            r = requests.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                headers={'Authorization': f'Bearer {groq_key}', 'Content-Type': 'application/json'},
+                json={'model': 'llama3-8b-8192', 'messages': messages, 'max_tokens': 2000},
+                timeout=timeout
+            )
+            if r.status_code == 200:
+                txt = r.json().get('choices', [{}])[0].get('message', {}).get('content', '')
+                if _is_valid(txt):
+                    return final_text_sanitize(txt)
+        except Exception:
+            pass
 
-    return "⚠️ 所有 AI 端點暫時不可用 (Pollinations 502)，請稍後再試。"
+    return "⚠️ 所有 AI 端點暫時不可用 (Pollinations 502)，請稍後再試。如需穩定服務，請在 Streamlit secrets 加入 GROQ_API_KEY。"
 
 def extract_cantonese_report(text):
     cleaned = final_text_sanitize(text)
@@ -767,7 +775,7 @@ if app_mode == '🎯 RS x MACD 動能狙擊手':
         with col3:
             st.markdown('#### 3️⃣ MACD 爆發點')
             enable_macd = st.checkbox('啟動 【MACD】 過濾', value=True)
-            selected_macd = st.multselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
+            selected_macd = st.multiselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
         start_scan = st.button('🚀 開始全市場精確掃描', use_container_width=True, type='primary')
     if start_scan:
         status_text, progress_bar = st.empty(), st.progress(0)
