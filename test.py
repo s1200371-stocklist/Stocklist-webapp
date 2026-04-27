@@ -526,7 +526,7 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
     return pd.DataFrame(res) if res else empty
 
 # ==========================================
-# AI 分析 (已加入強硬截斷防護)
+# AI 分析 (加入板塊與受惠名單)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_news_ai(news_list):
@@ -542,12 +542,16 @@ def analyze_news_ai(news_list):
 
 [嚴重警告：請直接由標題開始寫，不要輸出任何 "Let's produce", "In the first section" 等思考過程。如果輸出任何分析計劃，系統會崩潰！]
 
-必須嚴格包含以下兩個標題，並由標題開始輸出：
+必須嚴格包含以下三個標題，並由標題開始按順序輸出：
+
 【📉 近月市場焦點總結】
-（你的廣東話總結）
+（用廣東話總結大市氣氛同宏觀焦點）
+
+【🎯 焦點板塊與受惠名單】
+（請明確提取新聞中提及或隱含嘅「強勢/弱勢板塊」，並必定要標明相關嘅「美股代號 Ticker」或「指標性公司名稱」，例如：板塊：半導體 👉 相關個股：NVDA, AMD。請用清晰嘅點列形式列出）
 
 【🚀 潛力爆發股全面掃描】
-（你的廣東話分析）"""
+（根據板塊同資金流向，用廣東話做深度分析同前瞻）"""
 
     r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': user_p}], timeout=60)
     c = final_text_sanitize(r)
@@ -697,7 +701,7 @@ if app_mode == '🎯 RS x MACD 動能狙擊手':
         with col3:
             st.markdown('#### 3️⃣ MACD 爆發點')
             enable_macd = st.checkbox('啟動 【MACD】 過濾', value=True)
-            selected_macd = st.multiselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
+            selected_macd = st.multselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
         start_scan = st.button('🚀 開始全市場精確掃描', use_container_width=True, type='primary')
     if start_scan:
         status_text, progress_bar = st.empty(), st.progress(0)
