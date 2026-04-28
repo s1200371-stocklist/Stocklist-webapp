@@ -827,138 +827,214 @@ def analyze_hot_sectors_ai_dynamic(perf_summary: str):
         {'role': 'user', 'content': usr_p}
     ], timeout=60)
 
-def render_sector_network_chart_dynamic(sector_stocks, perf_data):
-    """用 matplotlib 畫板塊關係網絡圖"""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    import math, io
+def _perf_badge(val):
+    """根據漲跌幅返回帶顏色的 HTML badge"""
+    if val > 5:    bg, txt = '#00573A', '#00C851'
+    elif val > 0:  bg, txt = '#1A3A2A', '#26A69A'
+    elif val > -5: bg, txt = '#3A2000', '#FF6D00'
+    else:          bg, txt = '#3A0000', '#FF4444'
+    arrow = '▲' if val >= 0 else '▼'
+    return (f"<span style='background:{bg};color:{txt};padding:1px 5px;"
+            f"border-radius:4px;font-size:0.78rem;font-weight:bold'>"
+            f"{arrow}{abs(val):.1f}%</span>")
 
-    selected = list(sector_stocks.keys())
-    n_sectors = len(selected)
+@st.cache_data(ttl=3600, show_spinner=False)
+def ai_generate_company_relations(headlines: str):
+    """
+    AI 根據新聞生成:
+    1. 熱門板塊清單 + 代表股票
+    2. 公司之間的合作/競爭/供應鏈關係
+    """
+    sys_p = """你係一位專業美股分析師。根據最新市場新聞，識別今日熱門板塊及公司間關係。
+請只返回純 JSON，格式如下：
+{
+  "sectors": [
+    {
+      "name": "板塊名（中文）",
+      "emoji": "emoji",
+      "desc": "簡短描述",
+      "stocks": {"TICKER": "公司名", ...}
+    }
+  ],
+  "relations": [
+    {
+      "company_a": "TICKER_A",
+      "company_b": "TICKER_B",
+      "type": "合作/供應商/競爭/投資/客戶",
+      "desc": "關係描述（中文，20字內）",
+      "strength": "強/中/弱"
+    }
+  ]
+}
+要求：
+- sectors: 5-7個最熱門板塊，每個5-6隻代表股票
+- relations: 15-25條公司間關係，涵蓋合作、供應鏈、客戶、競爭等
+- 重點放在AI、晶片、數據中心、能源等當前熱門領域
+- 只返回 JSON，不要任何其他文字"""
 
-    fig, ax = plt.subplots(figsize=(18, 14))
-    fig.patch.set_facecolor('#0E1117')
-    ax.set_facecolor('#0E1117')
-    ax.axis('off')
+    usr_p = f"最新市場新聞：\n{headlines}"
+    raw = call_pollinations([
+        {'role': 'system', 'content': sys_p},
+        {'role': 'user', 'content': usr_p}
+    ], timeout=75)
 
-    for i, sector_name in enumerate(selected):
-        sector_data = sector_stocks[sector_name]
-        stocks = sector_data['stocks']
-        hex_color = sector_data['color']
-        avg_5d = get_sector_avg_perf_dynamic(sector_data, perf_data)
+    try:
+        import re, json
+        for pattern in [r'```json\s*(.*?)\s*```', r'```\s*(.*?)\s*```', r'(\{.*\})']:
+            m = re.search(pattern, raw, re.DOTALL)
+            if m:
+                data = json.loads(m.group(1))
+                if 'sectors' in data and 'relations' in data:
+                    return data, True
+        data = json.loads(raw)
+        if 'sectors' in data and 'relations' in data:
+            return data, True
+    except:
+        pass
+    return None, False
 
-        angle = 2 * math.pi * i / n_sectors - math.pi / 2
-        radius = 4.5
-        sx = radius * math.cos(angle)
-        sy = radius * math.sin(angle)
+# 備用關係數據
+FALLBACK_RELATIONS = [
+    {"company_a":"NVDA","company_b":"MSFT","type":"合作","desc":"Azure AI加速器供應商","strength":"強"},
+    {"company_a":"NVDA","company_b":"GOOGL","type":"合作","desc":"GCP GPU雲端合作","strength":"強"},
+    {"company_a":"NVDA","company_b":"AMZN","type":"合作","desc":"AWS GPU實例供應","strength":"強"},
+    {"company_a":"NVDA","company_b":"META","type":"客戶","desc":"META大量採購H100","strength":"強"},
+    {"company_a":"NVDA","company_b":"TSLA","type":"供應商","desc":"FSD訓練晶片供應商","strength":"中"},
+    {"company_a":"NVDA","company_b":"PLTR","type":"合作","desc":"AI平台聯合部署","strength":"中"},
+    {"company_a":"AVGO","company_b":"GOOGL","type":"合作","desc":"Google TPU晶片設計","strength":"強"},
+    {"company_a":"AVGO","company_b":"META","type":"客戶","desc":"Meta自研AI晶片","strength":"強"},
+    {"company_a":"AMD","company_b":"MSFT","type":"合作","desc":"Azure MI300X部署","strength":"中"},
+    {"company_a":"AMD","company_b":"NVDA","type":"競爭","desc":"GPU市場直接競爭","strength":"強"},
+    {"company_a":"VRT","company_b":"NVDA","type":"客戶","desc":"數據中心冷卻系統","strength":"強"},
+    {"company_a":"VRT","company_b":"MSFT","type":"客戶","desc":"Azure數據中心冷卻","strength":"強"},
+    {"company_a":"VRT","company_b":"AMZN","type":"客戶","desc":"AWS數據中心設備","strength":"強"},
+    {"company_a":"SMCI","company_b":"NVDA","type":"合作","desc":"GPU伺服器整合商","strength":"強"},
+    {"company_a":"MU","company_b":"NVDA","type":"供應商","desc":"HBM3記憶體供應","strength":"強"},
+    {"company_a":"PLTR","company_b":"MSFT","type":"合作","desc":"Azure平台整合","strength":"中"},
+    {"company_a":"CEG","company_b":"MSFT","type":"合作","desc":"核電數據中心供電協議","strength":"強"},
+    {"company_a":"CEG","company_b":"GOOGL","type":"合作","desc":"核能購電長期合約","strength":"強"},
+    {"company_a":"CRWD","company_b":"MSFT","type":"合作","desc":"Azure安全整合","strength":"中"},
+    {"company_a":"CRWD","company_b":"NVDA","type":"合作","desc":"AI驅動威脅偵測","strength":"中"},
+    {"company_a":"AMZN","company_b":"MSFT","type":"競爭","desc":"雲端市場主要競爭","strength":"強"},
+    {"company_a":"GOOGL","company_b":"MSFT","type":"競爭","desc":"AI及雲端全面競爭","strength":"強"},
+    {"company_a":"RKLB","company_b":"ASTS","type":"合作","desc":"衛星發射合作夥伴","strength":"中"},
+    {"company_a":"CCJ","company_b":"CEG","type":"供應商","desc":"鈾燃料供應商","strength":"強"},
+    {"company_a":"SNOW","company_b":"NVDA","type":"合作","desc":"GPU加速數據分析","strength":"中"},
+]
 
-        circle = plt.Circle((sx, sy), 0.55, color=hex_color, zorder=4, alpha=0.95)
-        ax.add_patch(circle)
+RELATION_TYPE_COLOR = {
+    '合作': ('#1A3A5A', '#4FC3F7', '🤝'),
+    '供應商': ('#2A3A1A', '#AED581', '🔗'),
+    '客戶': ('#3A2A1A', '#FFB74D', '💰'),
+    '競爭': ('#3A1A1A', '#EF9A9A', '⚔️'),
+    '投資': ('#2A1A3A', '#CE93D8', '💼'),
+}
 
-        label = sector_name.split(' ', 1)[-1]
-        short = label[:8] if len(label) > 8 else label
-        perf_str = f"{avg_5d:+.1f}%"
-        ax.text(sx, sy + 0.12, short, ha='center', va='center',
-                fontsize=7.5, fontweight='bold', color='white', zorder=5)
-        ax.text(sx, sy - 0.18, perf_str, ha='center', va='center',
-                fontsize=7, color='#00C851' if avg_5d >= 0 else '#FF4444', zorder=5, fontweight='bold')
+def render_relations_html(relations, perf_data):
+    """用 HTML 表格顯示公司合作關係"""
+    type_filter = list(RELATION_TYPE_COLOR.keys())
 
-        n_stocks = len(stocks)
-        for j, (ticker, name) in enumerate(stocks.items()):
-            stock_angle = angle + (2 * math.pi * j / max(n_stocks, 1)) * 0.55 - 0.27 * math.pi
-            stock_radius = 1.9
-            ex = sx + stock_radius * math.cos(stock_angle)
-            ey = sy + stock_radius * math.sin(stock_angle)
+    rows_html = []
+    for r in relations:
+        ca = r.get('company_a','').upper()
+        cb = r.get('company_b','').upper()
+        rtype = r.get('type','合作')
+        desc  = r.get('desc','')
+        strength = r.get('strength','中')
 
-            pdata = perf_data.get(ticker, {})
-            chg5d = pdata.get('5d', 0)
-            price = pdata.get('price', 0)
+        tc = RELATION_TYPE_COLOR.get(rtype, ('#1A1A2A','#aaa','🔗'))
+        bg_c, txt_c, emoji = tc
 
-            if chg5d > 5:   scolor = '#00C851'
-            elif chg5d > 0: scolor = '#26A69A'
-            elif chg5d > -5:scolor = '#FF6D00'
-            else:           scolor = '#D50000'
+        pa = perf_data.get(ca, {})
+        pb = perf_data.get(cb, {})
+        pa5 = pa.get('5d', 0)
+        pb5 = pb.get('5d', 0)
 
-            ax.plot([sx, ex], [sy, ey], color='#444444', linewidth=0.7, zorder=1, alpha=0.6)
-            scircle = plt.Circle((ex, ey), 0.28, color=scolor, zorder=3, alpha=0.92)
-            ax.add_patch(scircle)
-            ax.text(ex, ey + 0.04, ticker, ha='center', va='center',
-                    fontsize=6.5, fontweight='bold', color='white', zorder=4)
-            ax.text(ex, ey - 0.16, f"{chg5d:+.1f}%", ha='center', va='center',
-                    fontsize=5.5, color='white', zorder=4)
+        str_stars = {'強':'⭐⭐⭐','中':'⭐⭐','弱':'⭐'}.get(strength,'⭐⭐')
 
-    legend_items = [
-        mpatches.Patch(color='#00C851', label='>+5%  強勢'),
-        mpatches.Patch(color='#26A69A', label='0~+5%  溫和'),
-        mpatches.Patch(color='#FF6D00', label='0~-5%  輕微回調'),
-        mpatches.Patch(color='#D50000', label='<-5%  明顯下跌'),
-    ]
-    ax.legend(handles=legend_items, loc='lower right',
-              facecolor='#1E1E2E', edgecolor='#444', labelcolor='white',
-              fontsize=8, title='5日表現', title_fontsize=8, framealpha=0.85)
+        rows_html.append(
+            f"<tr>"
+            f"<td style='padding:6px 8px;font-weight:bold;color:white'>{ca}</td>"
+            f"<td style='padding:6px 8px'>{_perf_badge(pa5)}</td>"
+            f"<td style='padding:6px 8px;text-align:center'>"
+            f"<span style='background:{bg_c};color:{txt_c};padding:2px 8px;border-radius:12px;font-size:0.8rem'>"
+            f"{emoji} {rtype}</span></td>"
+            f"<td style='padding:6px 8px;font-weight:bold;color:white'>{cb}</td>"
+            f"<td style='padding:6px 8px'>{_perf_badge(pb5)}</td>"
+            f"<td style='padding:6px 8px;color:#ccc;font-size:0.82rem'>{desc}</td>"
+            f"<td style='padding:6px 8px;text-align:center;font-size:0.78rem'>{str_stars}</td>"
+            f"</tr>"
+        )
 
-    ax.set_title('🔥 今日熱門板塊關係圖  (大圓=板塊 / 小圓=個股)',
-                 color='white', fontsize=13, fontweight='bold', pad=12)
-    lim = 7.5
-    ax.set_xlim(-lim, lim)
-    ax.set_ylim(-lim, lim)
-    ax.set_aspect('equal')
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=130, bbox_inches='tight', facecolor='#0E1117')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+    table_html = f"""
+<style>
+.rel-table {{ width:100%;border-collapse:collapse;font-family:sans-serif }}
+.rel-table th {{ background:#1E1E2E;color:#aaa;padding:8px;font-size:0.8rem;text-align:left;border-bottom:1px solid #333 }}
+.rel-table tr:nth-child(even) {{ background:#0E1117 }}
+.rel-table tr:nth-child(odd)  {{ background:#161B22 }}
+.rel-table tr:hover           {{ background:#1F2937 }}
+</style>
+<table class="rel-table">
+<thead><tr>
+<th>公司 A</th><th>5日表現</th><th style='text-align:center'>關係類型</th>
+<th>公司 B</th><th>5日表現</th><th>關係描述</th><th style='text-align:center'>強度</th>
+</tr></thead>
+<tbody>{''.join(rows_html)}</tbody>
+</table>"""
+    return table_html
 
 def render_hot_sectors_module():
-    st.title('🔥 熱門板塊關係圖')
-    st.caption('AI 自動識別今日最熱門板塊及代表股票，每小時更新')
+    st.title('🔥 熱門板塊 & 公司合作關係')
+    st.caption('AI 自動識別今日熱門板塊及公司間合作/供應鏈/競爭關係，每小時更新')
 
     col_ctrl1, col_ctrl2 = st.columns([4, 1])
     with col_ctrl2:
         st.markdown('<br>', unsafe_allow_html=True)
         if st.button('🔄 強制刷新', use_container_width=True, key='refresh_sectors'):
-            ai_generate_hot_sectors.clear()
+            ai_generate_company_relations.clear()
             fetch_sector_performance_dynamic.clear()
-            analyze_hot_sectors_ai_dynamic.clear()
             st.rerun()
 
-    # ── Step 1: 抓新聞作為 AI 輸入 ──
+    # ── Step 1: 抓新聞 ──
     with st.spinner('📰 抓取最新市場新聞...'):
         news_list = fetch_top_news()
     headlines = '\n'.join([
         f"- {n.get('新聞標題','')}" for n in news_list[:20]
         if n.get('新聞標題','')
-    ]) if news_list else "市場整體平穩，科技股持續受關注"
+    ]) if news_list else "AI、晶片、數據中心、核能持續受關注"
 
-    # ── Step 2: AI 生成板塊 ──
-    with st.spinner('🤖 AI 識別今日熱門板塊及股票...'):
-        ai_sectors, ai_ok = ai_generate_hot_sectors(headlines)
+    # ── Step 2: AI 生成板塊 + 合作關係 ──
+    with st.spinner('🤖 AI 分析板塊及公司關係...'):
+        ai_data, ai_ok = ai_generate_company_relations(headlines)
 
-    if ai_ok and ai_sectors:
-        sector_stocks = build_sector_stocks_from_ai(ai_sectors)
-        st.success(f'✅ AI 成功識別到 {len(sector_stocks)} 個熱門板塊')
+    if ai_ok and ai_data:
+        raw_sectors   = ai_data.get('sectors', [])
+        raw_relations = ai_data.get('relations', [])
+        sector_stocks = build_sector_stocks_from_ai(raw_sectors) if raw_sectors else build_sector_stocks_fallback()
+        relations     = raw_relations if raw_relations else FALLBACK_RELATIONS
+        st.success(f'✅ AI 識別到 {len(sector_stocks)} 個板塊，{len(relations)} 條公司關係')
     else:
         sector_stocks = build_sector_stocks_fallback()
-        st.info('ℹ️ AI 暫時未能生成板塊，使用預設板塊清單')
+        relations     = FALLBACK_RELATIONS
+        st.info('ℹ️ 使用預設板塊及關係數據')
 
-    # ── Step 3: 抓取股票表現 ──
+    # ── Step 3: 抓股票表現 ──
     all_tickers = list(set(
         t for sd in sector_stocks.values() for t in sd['stocks'].keys()
+    ) | set(
+        r.get('company_a','') for r in relations
+    ) | set(
+        r.get('company_b','') for r in relations
     ))
-    ticker_key = ','.join(sorted(all_tickers))
-    with st.spinner('📡 抓取各板塊股票實時表現...'):
+    all_tickers = [t for t in all_tickers if t]
+    ticker_key  = ','.join(sorted(all_tickers))
+    with st.spinner('📡 抓取股票實時表現...'):
         perf_data = fetch_sector_performance_dynamic(ticker_key, tuple(sorted(all_tickers)))
 
     # ── Step 4: AI 板塊輪動分析 ──
     st.markdown('---')
     st.markdown('### 🤖 AI 板塊輪動分析（廣東話）')
-
-    sector_perf_list = []
-    perf_lines = []
+    sector_perf_list, perf_lines = [], []
     for sname, sdata in sector_stocks.items():
         avg = get_sector_avg_perf_dynamic(sdata, perf_data)
         sector_perf_list.append((sname, avg))
@@ -978,25 +1054,42 @@ def render_hot_sectors_module():
                 f"<div style='display:flex;justify-content:space-between;padding:2px 0;font-size:0.82rem'>"
                 f"<span>{rank}. {sname.split()[0]} {sname.split(' ',1)[-1][:12]}</span>"
                 f"<span style='color:{'#00C851' if avg>=0 else '#FF4444'}'><b>{avg:+.1f}%</b></span>"
-                f"</div>", unsafe_allow_html=True
-            )
+                f"</div>", unsafe_allow_html=True)
 
-    # ── Step 5: 關係網絡圖 ──
+    # ── Step 5: 公司合作關係表 ──
     st.markdown('---')
-    st.markdown('### 🕸️ 板塊關係網絡圖')
-    st.caption('大圓圈 = AI識別板塊  |  小圓圈 = 代表個股  |  顏色 = 5日漲跌')
+    st.markdown('### 🔗 公司合作 / 供應鏈 / 競爭關係')
 
-    leg_cols = st.columns(4)
-    for col, (label, color) in zip(leg_cols, [
-        ('🟢 >+5%', '#00C851'), ('🟩 0~+5%', '#26A69A'),
-        ('🟠 0~-5%', '#FF6D00'), ('🔴 <-5%', '#D50000')
-    ]):
-        col.markdown(f"<span style='color:{color}'>■</span> {label}", unsafe_allow_html=True)
+    # 圖例
+    leg_cols = st.columns(5)
+    for col, (rtype, (bg, tc, emoji)) in zip(leg_cols, RELATION_TYPE_COLOR.items()):
+        col.markdown(
+            f"<span style='background:{bg};color:{tc};padding:2px 8px;border-radius:10px;font-size:0.78rem'>"
+            f"{emoji} {rtype}</span>", unsafe_allow_html=True)
 
-    img_buf = render_sector_network_chart_dynamic(sector_stocks, perf_data)
-    st.image(img_buf, use_container_width=True)
+    # 關係類型篩選
+    st.markdown('<br>', unsafe_allow_html=True)
+    filter_types = st.multiselect(
+        '篩選關係類型:',
+        list(RELATION_TYPE_COLOR.keys()),
+        default=list(RELATION_TYPE_COLOR.keys()),
+        key='rel_type_filter'
+    )
 
-    # ── Step 6: 個股詳細數據 ──
+    filtered_rels = [r for r in relations if r.get('type','合作') in filter_types]
+
+    st.markdown(
+        f"<div style='color:#888;font-size:0.8rem;margin-bottom:8px'>"
+        f"顯示 {len(filtered_rels)} / {len(relations)} 條關係</div>",
+        unsafe_allow_html=True
+    )
+
+    if filtered_rels:
+        st.markdown(render_relations_html(filtered_rels, perf_data), unsafe_allow_html=True)
+    else:
+        st.warning('請至少選擇一種關係類型')
+
+    # ── Step 6: 板塊個股表 ──
     st.markdown('---')
     st.markdown('### 📋 板塊個股詳細數據')
     tab_names = [s.split(' ', 1)[-1][:14] for s in sector_stocks.keys()]
