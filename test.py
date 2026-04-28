@@ -1025,7 +1025,9 @@ def render_hot_sectors_module():
     with col_ctrl2:
         st.markdown('<br>', unsafe_allow_html=True)
         if st.button('🔄 強制刷新', use_container_width=True, key='refresh_sectors'):
-            ai_generate_company_relations.clear()
+            ai_generate_sectors_only.clear()
+            ai_generate_relations_only.clear()
+            analyze_hot_sectors_ai_dynamic.clear()
             fetch_sector_performance_dynamic.clear()
             st.rerun()
 
