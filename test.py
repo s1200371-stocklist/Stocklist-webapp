@@ -1016,12 +1016,252 @@ def render_hot_sectors_module():
             st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
+
+# ==========================================
+# Sidebar 市場雷達函數
+# ==========================================
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_sidebar_market_data():
+    data = {}
+    tickers = {
+        'VIX': '^VIX', 'SPY': 'SPY', 'QQQ': 'QQQ', 'DIA': 'DIA',
+        'DXY': 'DX-Y.NYB', 'GOLD': 'GC=F', 'OIL': 'CL=F',
+        'NG': 'NG=F', 'BTC': 'BTC-USD', 'ETH': 'ETH-USD',
+        'TNX': '^TNX', 'TYX': '^TYX', 'NIKKEI': '^N225', 'HSI': '^HSI',
+        'SHCOMP': '000001.SS', 'SILVER': 'SI=F',
+    }
+    try:
+        raw = yf.download(list(tickers.values()), period='2d', interval='1d', progress=False, auto_adjust=True)
+        closes = raw['Close'] if 'Close' in raw.columns.get_level_values(0) else raw
+        for label, sym in tickers.items():
+            try:
+                prices = closes[sym].dropna()
+                if len(prices) >= 2:
+                    prev, curr = float(prices.iloc[-2]), float(prices.iloc[-1])
+                    pct = (curr - prev) / prev * 100
+                    data[label] = {'price': curr, 'pct': pct}
+                elif len(prices) == 1:
+                    data[label] = {'price': float(prices.iloc[-1]), 'pct': 0.0}
+                else:
+                    data[label] = {'price': None, 'pct': 0.0}
+            except:
+                data[label] = {'price': None, 'pct': 0.0}
+    except:
+        pass
+
+    # CNN Fear & Greed
+    try:
+        r = requests.get('https://production.dataviz.cnn.io/index/fearandgreed/graphdata', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            fg = r.json().get('fear_and_greed', {})
+            score = fg.get('score')
+            data['FEAR_GREED'] = {'score': round(float(score), 1) if score else None, 'rating': fg.get('rating', 'N/A')}
+    except:
+        data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
+
+    # FRED: Unemployment Rate
+    try:
+        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            lines = r.text.strip().split('\n')
+            last = lines[-1].split(',')
+            data['UNRATE'] = {'date': last[0], 'value': float(last[1])}
+    except:
+        data['UNRATE'] = None
+
+    # FRED: CPI YoY
+    try:
+        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            lines = r.text.strip().split('\n')
+            vals = []
+            for l in lines[-14:]:
+                parts = l.split(',')
+                if len(parts) == 2:
+                    try: vals.append((parts[0], float(parts[1])))
+                    except: pass
+            if len(vals) >= 13:
+                yoy = (vals[-1][1] - vals[-13][1]) / vals[-13][1] * 100
+                data['CPI_YOY'] = {'date': vals[-1][0], 'value': round(yoy, 2)}
+    except:
+        data['CPI_YOY'] = None
+
+    # FRED: Fed Funds Rate
+    try:
+        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            lines = r.text.strip().split('\n')
+            last = lines[-1].split(',')
+            data['FEDFUNDS'] = {'date': last[0], 'value': float(last[1])}
+    except:
+        data['FEDFUNDS'] = None
+
+    # FRED: Initial Jobless Claims
+    try:
+        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            lines = r.text.strip().split('\n')
+            last = lines[-1].split(',')
+            data['JOBLESS'] = {'date': last[0], 'value': int(float(last[1]))}
+    except:
+        data['JOBLESS'] = None
+
+    return data
+
+def _pm(label, emoji, d, fmt='{:.2f}'):
+    if d and d.get('price') is not None:
+        p, pct = d['price'], d['pct']
+        arrow = '▲' if pct >= 0 else '▼'
+        color = '#00C851' if pct >= 0 else '#FF4444'
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;align-items:center;padding:2px 0'>"
+            f"<span style='font-size:0.78rem'>{emoji} <b>{label}</b></span>"
+            f"<span style='font-size:0.78rem'>{fmt.format(p)} "
+            f"<span style='color:{color};font-size:0.7rem'>{arrow}{abs(pct):.1f}%</span></span>"
+            f"</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div style='font-size:0.72rem;color:#666'>{emoji} {label}: N/A</div>", unsafe_allow_html=True)
+
+def _section(title):
+    st.markdown(f"<div style='font-size:0.72rem;font-weight:700;color:#888;margin:6px 0 2px'>{title}</div>", unsafe_allow_html=True)
+
+def _divider():
+    st.markdown("<hr style='margin:5px 0;opacity:0.2'>", unsafe_allow_html=True)
+
+def render_sidebar_market_panel():
+    st.markdown("### 📡 市場實時雷達")
+    with st.spinner("載入..."):
+        m = fetch_sidebar_market_data()
+
+    # ── Fear & Greed ──
+    fg = m.get('FEAR_GREED', {})
+    if fg and fg.get('score') is not None:
+        score = fg['score']
+        rating = fg.get('rating', 'N/A').upper()
+        if score >= 75:   fg_emoji, fg_c = '🤑', '#e74c3c'
+        elif score >= 55: fg_emoji, fg_c = '😊', '#e67e22'
+        elif score >= 45: fg_emoji, fg_c = '😐', '#f1c40f'
+        elif score >= 25: fg_emoji, fg_c = '😨', '#3498db'
+        else:             fg_emoji, fg_c = '😱', '#2980b9'
+        st.markdown(
+            f"<div style='background:{fg_c}22;border-left:3px solid {fg_c};border-radius:5px;padding:5px 8px;margin-bottom:5px'>"
+            f"<span style='font-size:0.72rem;color:{fg_c}'><b>CNN 恐貪指數</b></span><br>"
+            f"<span style='font-size:1.15rem'><b>{fg_emoji} {score:.0f}</b></span> "
+            f"<span style='font-size:0.68rem;color:{fg_c}'>{rating}</span></div>", unsafe_allow_html=True)
+    else:
+        st.caption("😐 CNN 恐貪指數: 暫無數據")
+
+    # ── VIX ──
+    vix = m.get('VIX', {})
+    if vix and vix.get('price') is not None:
+        v, pct = vix['price'], vix['pct']
+        if v >= 30:   vl, vc = '極度恐慌', '#e74c3c'
+        elif v >= 20: vl, vc = '市場緊張', '#e67e22'
+        else:         vl, vc = '市場平靜', '#2ecc71'
+        arrow = '▲' if pct >= 0 else '▼'
+        st.markdown(
+            f"<div style='background:{vc}22;border-left:3px solid {vc};border-radius:5px;padding:5px 8px;margin-bottom:5px'>"
+            f"<span style='font-size:0.72rem;color:{vc}'><b>VIX 恐慌指數</b></span><br>"
+            f"<span style='font-size:1.1rem'><b>{v:.2f}</b></span> "
+            f"<span style='font-size:0.68rem;color:{vc}'>{vl} {arrow}{abs(pct):.1f}%</span></div>", unsafe_allow_html=True)
+    else:
+        st.caption("VIX: N/A")
+
+    _divider()
+
+    # ── 美股三大指數 ──
+    _section("🇺🇸 美股三大指數")
+    _pm("S&P500 (SPY)", "📈", m.get('SPY'))
+    _pm("納指 (QQQ)", "💻", m.get('QQQ'))
+    _pm("道指 (DIA)", "🏛️", m.get('DIA'))
+    _divider()
+
+    # ── 商品 ──
+    _section("🛢️ 商品市場")
+    _pm("WTI 原油 (USD)", "🛢️", m.get('OIL'), fmt='${:.2f}')
+    _pm("黃金 (USD/oz)", "🥇", m.get('GOLD'), fmt='${:.2f}')
+    _pm("白銀 (USD/oz)", "🥈", m.get('SILVER'), fmt='${:.2f}')
+    _pm("天然氣 (USD)", "🔥", m.get('NG'), fmt='${:.3f}')
+    _divider()
+
+    # ── 宏觀/債息 ──
+    _section("🏦 宏觀 & 債市")
+    _pm("美元指數 (DXY)", "💵", m.get('DXY'))
+    _pm("10年美債息 (%)", "📉", m.get('TNX'), fmt='{:.3f}')
+    _pm("30年美債息 (%)", "📉", m.get('TYX'), fmt='{:.3f}')
+
+    # Fed Funds Rate
+    ff = m.get('FEDFUNDS')
+    if ff:
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
+            f"<span style='font-size:0.78rem'>🏛️ <b>聯儲息率</b></span>"
+            f"<span style='font-size:0.78rem;color:#f1c40f'><b>{ff['value']:.2f}%</b>"
+            f"<span style='font-size:0.65rem;color:#666'> ({ff['date'][:7]})</span></span></div>", unsafe_allow_html=True)
+
+    _divider()
+
+    # ── 就業數據 ──
+    _section("👷 就業數據")
+    unemp = m.get('UNRATE')
+    if unemp:
+        uc = '#e74c3c' if unemp['value'] > 5 else ('#e67e22' if unemp['value'] > 4 else '#2ecc71')
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
+            f"<span style='font-size:0.78rem'>📊 <b>失業率</b></span>"
+            f"<span style='font-size:0.78rem;color:{uc}'><b>{unemp['value']:.1f}%</b>"
+            f"<span style='font-size:0.65rem;color:#666'> ({unemp['date'][:7]})</span></span></div>", unsafe_allow_html=True)
+
+    jl = m.get('JOBLESS')
+    if jl:
+        jc = '#e74c3c' if jl['value'] > 250000 else ('#e67e22' if jl['value'] > 220000 else '#2ecc71')
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
+            f"<span style='font-size:0.78rem'>📋 <b>首次申領失業</b></span>"
+            f"<span style='font-size:0.78rem;color:{jc}'><b>{jl['value']:,}</b>"
+            f"<span style='font-size:0.65rem;color:#666'> ({jl['date']})</span></span></div>", unsafe_allow_html=True)
+
+    # CPI
+    cpi = m.get('CPI_YOY')
+    if cpi:
+        cc = '#e74c3c' if cpi['value'] > 3.5 else ('#e67e22' if cpi['value'] > 2.5 else '#2ecc71')
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
+            f"<span style='font-size:0.78rem'>📦 <b>CPI 通脹 (YoY)</b></span>"
+            f"<span style='font-size:0.78rem;color:{cc}'><b>{cpi['value']:.1f}%</b>"
+            f"<span style='font-size:0.65rem;color:#666'> ({cpi['date'][:7]})</span></span></div>", unsafe_allow_html=True)
+
+    _divider()
+
+    # ── 加密貨幣 ──
+    _section("₿ 加密貨幣")
+    _pm("Bitcoin (USD)", "₿", m.get('BTC'), fmt='${:,.0f}')
+    _pm("Ethereum (USD)", "⟠", m.get('ETH'), fmt='${:,.0f}')
+    _divider()
+
+    # ── 亞洲市場 ──
+    _section("🌏 亞洲市場")
+    _pm("日經 225", "🗾", m.get('NIKKEI'), fmt='{:,.0f}')
+    _pm("恒生指數", "🇭🇰", m.get('HSI'), fmt='{:,.0f}')
+    _pm("上證指數", "🇨🇳", m.get('SHCOMP'), fmt='{:,.0f}')
+
+    _divider()
+    st.caption(f"⏱ {datetime.datetime.now().strftime('%H:%M:%S')} 更新")
+    if st.button("🔄 刷新數據", use_container_width=True, key="refresh_mkt_sb"):
+        fetch_sidebar_market_data.clear()
+        st.rerun()
+
 # ==========================================
 # Sidebar
 # ==========================================
 with st.sidebar:
     st.title('🧰 投資雙引擎')
-    app_mode = st.radio('可用模組', [
+
+    render_sidebar_market_panel()
+
+    st.markdown('---')
+    st.markdown("### 🗂️ 功能模組")
+    app_mode = st.radio('選擇模組', [
         '🔥 熱門板塊關係圖',
         '🎯 RS x MACD 動能狙擊手',
         '📰 近月 AI 洞察 (廣東話版)',
@@ -1029,8 +1269,6 @@ with st.sidebar:
         '🔍 個股驗證模式 (Bottom-Up)',
         '⚔️ 終極雙劍合璧 (Full Integration)'
     ])
-    st.markdown('---')
-    st.caption(f"數據最後更新: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 # ==========================================
 # 模組渲染
