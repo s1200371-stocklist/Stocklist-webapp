@@ -858,14 +858,14 @@ def _robust_json_parse(raw):
         if m:
             chunk = m.group(1).strip()
             # 修復常見 JSON 錯誤：末尾多餘逗號
-            chunk = re.sub(r',\s*([}\]])', r'', chunk)
+            chunk = re.sub(r',\s*([}\]])', r'\1', chunk)
             try:
                 return json.loads(chunk)
             except:
                 pass
     # 直接 parse 全文
     text = raw.strip()
-    text = re.sub(r',\s*([}\]])', r'', text)
+    text = re.sub(r',\s*([}\]])', r'\1', text)
     try:
         return json.loads(text)
     except:
