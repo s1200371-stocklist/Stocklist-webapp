@@ -839,58 +839,92 @@ def _perf_badge(val):
             f"{arrow}{abs(val):.1f}%</span>")
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def ai_generate_company_relations(headlines: str):
-    """
-    AI 根據新聞生成:
-    1. 熱門板塊清單 + 代表股票
-    2. 公司之間的合作/競爭/供應鏈關係
-    """
-    sys_p = """你係一位專業美股分析師。根據最新市場新聞，識別今日熱門板塊及公司間關係。
-請只返回純 JSON，格式如下：
-{
-  "sectors": [
-    {
-      "name": "板塊名（中文）",
-      "emoji": "emoji",
-      "desc": "簡短描述",
-      "stocks": {"TICKER": "公司名", ...}
-    }
-  ],
-  "relations": [
-    {
-      "company_a": "TICKER_A",
-      "company_b": "TICKER_B",
-      "type": "合作/供應商/競爭/投資/客戶",
-      "desc": "關係描述（中文，20字內）",
-      "strength": "強/中/弱"
-    }
-  ]
-}
-要求：
-- sectors: 5-7個最熱門板塊，每個5-6隻代表股票
-- relations: 15-25條公司間關係，涵蓋合作、供應鏈、客戶、競爭等
-- 重點放在AI、晶片、數據中心、能源等當前熱門領域
-- 只返回 JSON，不要任何其他文字"""
-
-    usr_p = f"最新市場新聞：\n{headlines}"
-    raw = call_pollinations([
-        {'role': 'system', 'content': sys_p},
-        {'role': 'user', 'content': usr_p}
-    ], timeout=75)
-
+def _robust_json_parse(raw):
+    """強力 JSON 解析，容錯多種格式"""
+    import re, json
+    if not raw or not isinstance(raw, str):
+        return None
+    # 過濾 HTML 錯誤頁
+    if raw.strip().startswith('<!DOCTYPE') or raw.strip().startswith('<html'):
+        return None
+    # 嘗試多種 pattern
+    patterns = [
+        r'```json\s*(.*?)\s*```',
+        r'```\s*([\[{].*?[}\]])\s*```',
+        r'([\[{][\s\S]*[}\]])',
+    ]
+    for p in patterns:
+        m = re.search(p, raw, re.DOTALL)
+        if m:
+            chunk = m.group(1).strip()
+            # 修復常見 JSON 錯誤：末尾多餘逗號
+            chunk = re.sub(r',\s*([}\]])', r'', chunk)
+            try:
+                return json.loads(chunk)
+            except:
+                pass
+    # 直接 parse 全文
+    text = raw.strip()
+    text = re.sub(r',\s*([}\]])', r'', text)
     try:
-        import re, json
-        for pattern in [r'```json\s*(.*?)\s*```', r'```\s*(.*?)\s*```', r'(\{.*\})']:
-            m = re.search(pattern, raw, re.DOTALL)
-            if m:
-                data = json.loads(m.group(1))
-                if 'sectors' in data and 'relations' in data:
-                    return data, True
-        data = json.loads(raw)
-        if 'sectors' in data and 'relations' in data:
-            return data, True
+        return json.loads(text)
     except:
         pass
+    return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def ai_generate_sectors_only(headlines: str):
+    """呼叫 1: 只生成板塊清單（簡單JSON，成功率高）"""
+    sys_p = """你係美股板塊專家。根據新聞，返回今日最熱門的5-6個板塊。
+只返回 JSON array，格式：
+[{"name":"板塊名","emoji":"emoji","desc":"描述","stocks":{"TICKER":"公司名"}}]
+每個板塊包含5-6隻代表股票。只返回JSON，不要其他文字。"""
+    raw = call_pollinations([
+        {'role': 'system', 'content': sys_p},
+        {'role': 'user',   'content': f"新聞：\n{headlines}"}
+    ], timeout=50)
+    data = _robust_json_parse(raw)
+    if isinstance(data, list) and len(data) >= 3:
+        return data, True
+    return None, False
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def ai_generate_relations_only(headlines: str, ticker_list: str):
+    """呼叫 2: 只生成公司關係（獨立，唔依賴板塊結果）"""
+    sys_p = """你係美股分析師。根據新聞及以下股票清單，生成公司間關係。
+只返回 JSON array，格式：
+[{"company_a":"TICKER","company_b":"TICKER","type":"合作","desc":"描述20字內","strength":"強"}]
+type 只可以係：合作、供應商、客戶、競爭、投資
+生成15-20條關係，涵蓋 AI晶片、數據中心、能源、安全等熱門領域。只返回JSON。"""
+    raw = call_pollinations([
+        {'role': 'system', 'content': sys_p},
+        {'role': 'user',   'content': f"新聞：\n{headlines}\n\n相關股票：{ticker_list}"}
+    ], timeout=60)
+    data = _robust_json_parse(raw)
+    if isinstance(data, list) and len(data) >= 5:
+        return data, True
+    return None, False
+
+def ai_generate_company_relations(headlines: str):
+    """
+    拆成兩次獨立 AI 呼叫，提高成功率：
+    呼叫1: 板塊清單
+    呼叫2: 公司關係
+    """
+    # 固定常用 ticker 列表給關係生成參考
+    default_tickers = "NVDA,AMD,MSFT,GOOGL,AMZN,META,AAPL,PLTR,VRT,SMCI,MU,AVGO,ARM,CRWD,PANW,CEG,VST,CCJ,RKLB,ASTS,TSLA,SNOW,DDOG,CRM,NET"
+
+    sectors, sec_ok   = ai_generate_sectors_only(headlines)
+    relations, rel_ok = ai_generate_relations_only(headlines, default_tickers)
+
+    result = {}
+    if sec_ok:
+        result['sectors'] = sectors
+    if rel_ok:
+        result['relations'] = relations
+
+    if sec_ok or rel_ok:
+        return result, True
     return None, False
 
 # 備用關係數據
@@ -1007,16 +1041,15 @@ def render_hot_sectors_module():
     with st.spinner('🤖 AI 分析板塊及公司關係...'):
         ai_data, ai_ok = ai_generate_company_relations(headlines)
 
-    if ai_ok and ai_data:
-        raw_sectors   = ai_data.get('sectors', [])
-        raw_relations = ai_data.get('relations', [])
-        sector_stocks = build_sector_stocks_from_ai(raw_sectors) if raw_sectors else build_sector_stocks_fallback()
-        relations     = raw_relations if raw_relations else FALLBACK_RELATIONS
-        st.success(f'✅ AI 識別到 {len(sector_stocks)} 個板塊，{len(relations)} 條公司關係')
-    else:
-        sector_stocks = build_sector_stocks_fallback()
-        relations     = FALLBACK_RELATIONS
-        st.info('ℹ️ 使用預設板塊及關係數據')
+    raw_sectors   = ai_data.get('sectors',   []) if ai_data else []
+    raw_relations = ai_data.get('relations', []) if ai_data else []
+
+    sector_stocks = build_sector_stocks_from_ai(raw_sectors) if raw_sectors else build_sector_stocks_fallback()
+    relations     = raw_relations if raw_relations else FALLBACK_RELATIONS
+
+    sec_src = f"AI識別 {len(sector_stocks)} 個板塊" if raw_sectors else "預設板塊"
+    rel_src = f"AI生成 {len(relations)} 條關係" if raw_relations else "預設關係數據"
+    st.info(f"📊 {sec_src}　｜　🔗 {rel_src}")
 
     # ── Step 3: 抓股票表現 ──
     all_tickers = list(set(
