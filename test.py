@@ -91,12 +91,30 @@ def final_text_sanitize(text):
     t = t.replace('","tool_calls":[]', '').replace('"tool_calls":[]', '')
     return re.sub(r'\n{3,}', '\n\n', t).strip()
 
-def call_pollinations(messages, model='openai-fast', timeout=60):
-    try:
-        r = requests.post('https://text.pollinations.ai/', json={'messages': messages, 'model': model}, timeout=timeout)
-        return final_text_sanitize(r.text)
-    except Exception as e:
-        return f"⚠️ AI 發生錯誤: {e}"
+def call_pollinations(messages, model='openai', timeout=60):
+    """呼叫 Pollinations AI，自動 retry + 429 fallback"""
+    import time
+    models_to_try = [model, 'openai', 'openai-large']
+    for attempt, m in enumerate(models_to_try):
+        try:
+            r = requests.post(
+                'https://text.pollinations.ai/',
+                json={'messages': messages, 'model': m},
+                timeout=timeout
+            )
+            if r.status_code == 429:
+                time.sleep(3 + attempt * 2)
+                continue
+            if r.status_code == 200 and r.text.strip():
+                return final_text_sanitize(r.text)
+        except requests.exceptions.Timeout:
+            if attempt < len(models_to_try) - 1:
+                time.sleep(2)
+                continue
+            return f"⚠️ AI 逾時"
+        except Exception as e:
+            return f"⚠️ AI 發生錯誤: {e}"
+    return f"⚠️ AI 暫時繁忙，請稍後重試"
 
 def extract_cantonese_report(text):
     cleaned = final_text_sanitize(text)
