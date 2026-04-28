@@ -1049,9 +1049,22 @@ def render_hot_sectors_module():
     sector_stocks = build_sector_stocks_from_ai(raw_sectors) if raw_sectors else build_sector_stocks_fallback()
     relations     = raw_relations if raw_relations else FALLBACK_RELATIONS
 
-    sec_src = f"AI識別 {len(sector_stocks)} 個板塊" if raw_sectors else "預設板塊"
-    rel_src = f"AI生成 {len(relations)} 條關係" if raw_relations else "預設關係數據"
-    st.info(f"📊 {sec_src}　｜　🔗 {rel_src}")
+    sec_src = f"✅ AI識別 {len(raw_sectors)} 個板塊" if raw_sectors else "⚠️ 預設板塊"
+    rel_src = f"✅ AI生成 {len(raw_relations)} 條關係" if raw_relations else "⚠️ 預設關係數據"
+    if raw_sectors and raw_relations:
+        st.success(f"📊 {sec_src}　｜　🔗 {rel_src}")
+    elif raw_sectors or raw_relations:
+        st.warning(f"📊 {sec_src}　｜　🔗 {rel_src}")
+    else:
+        st.error(f"📊 {sec_src}　｜　🔗 {rel_src}")
+
+    with st.expander("🔧 Debug: 查看 AI 原始輸出（出問題時展開）", expanded=False):
+        sec_raw, _ = ai_generate_sectors_only(headlines)
+        rel_raw, _ = ai_generate_relations_only(headlines, "NVDA,AMD,MSFT,GOOGL,AMZN,PLTR,VRT,CRWD,CEG")
+        st.caption("板塊 AI 原始返回:")
+        st.code(str(sec_raw)[:800] if sec_raw else "None / 解析失敗")
+        st.caption("關係 AI 原始返回:")
+        st.code(str(rel_raw)[:800] if rel_raw else "None / 解析失敗")
 
     # ── Step 3: 抓股票表現 ──
     all_tickers = list(set(
