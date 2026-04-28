@@ -663,416 +663,348 @@ def run_full_integration(final_df, progress_bar, status_text):
 
 
 # ==========================================
-# 熱門板塊關係圖 模組
+# 熱門板塊關係圖 模組 (方案B: AI全動態)
 # ==========================================
 
-# 板塊 → 代表股票 對照表 (可人手擴充)
-SECTOR_STOCKS = {
-    '🤖 人工智能 AI': {
-        'color': '#FF6B6B',
-        'desc': 'AI模型、推理、軟件平台',
-        'stocks': {
-            'PLTR': 'Palantir (AI平台)',
-            'AI': 'C3.ai (企業AI)',
-            'BBAI': 'BigBear.ai',
-            'SOUN': 'SoundHound (語音AI)',
-            'GFAI': 'Guardforce AI',
-            'MSFT': 'Microsoft (Copilot)',
-            'GOOGL': 'Google (Gemini)',
-        }
-    },
-    '⚡ 晶片/半導體': {
-        'color': '#4ECDC4',
-        'desc': '晶片設計、製造、設備',
-        'stocks': {
-            'NVDA': 'NVIDIA (GPU之王)',
-            'AMD': 'AMD (CPU/GPU)',
-            'AVGO': 'Broadcom (AI晶片)',
-            'QCOM': 'Qualcomm (手機晶片)',
-            'MRVL': 'Marvell (數據中心)',
-            'ARM': 'ARM Holdings',
-            'AMAT': 'Applied Materials (設備)',
-            'ASML': 'ASML (EUV設備)',
-        }
-    },
-    '🗄️ 數據儲存/SSD': {
-        'color': '#45B7D1',
-        'desc': 'NAND Flash、SSD、數據中心儲存',
-        'stocks': {
-            'WDC': 'Western Digital',
-            'STX': 'Seagate',
-            'MU': 'Micron (HBM/NAND)',
-            'SNDK': 'SanDisk (NAND)',
-            'NANO': 'Nanometrics',
-            'NTAP': 'NetApp',
-            'PSTG': 'Pure Storage',
-        }
-    },
-    '❄️ 冷卻/電力基建': {
-        'color': '#96CEB4',
-        'desc': '數據中心冷卻、電力管理',
-        'stocks': {
-            'VRT': 'Vertiv (冷卻系統)',
-            'SMCI': 'Super Micro (伺服器)',
-            'ETN': 'Eaton (電力管理)',
-            'HUBB': 'Hubbell (電氣設備)',
-            'AIXI': 'Xiao-I Corp',
-            'VNET': 'VNET Group (IDC)',
-            'GEV': 'GE Vernova (電力)',
-        }
-    },
-    '☁️ 雲端/數據中心': {
-        'color': '#FFEAA7',
-        'desc': '雲端服務、IDC基建',
-        'stocks': {
-            'AMZN': 'Amazon (AWS)',
-            'MSFT': 'Microsoft (Azure)',
-            'GOOGL': 'Google (GCP)',
-            'META': 'Meta (AI基建)',
-            'CRM': 'Salesforce',
-            'SNOW': 'Snowflake',
-            'DDOG': 'Datadog',
-        }
-    },
-    '🛡️ 網絡安全': {
-        'color': '#DDA0DD',
-        'desc': 'AI驅動安全、零信任架構',
-        'stocks': {
-            'CRWD': 'CrowdStrike',
-            'PANW': 'Palo Alto Networks',
-            'ZS': 'Zscaler',
-            'S': 'SentinelOne',
-            'FTNT': 'Fortinet',
-            'CYBR': 'CyberArk',
-            'OKTA': 'Okta (身份管理)',
-        }
-    },
-    '🤖 人形機器人': {
-        'color': '#F0A500',
-        'desc': '人形機器人、工業自動化',
-        'stocks': {
-            'TSLA': 'Tesla (Optimus)',
-            'NVDA': 'NVIDIA (機器人AI)',
-            'ABB': 'ABB (工業機械)',
-            'FANUC': 'Fanuc',
-            'IRBT': 'iRobot',
-            'BDTX': 'Blueprint Medicines',
-            'HON': 'Honeywell (自動化)',
-        }
-    },
-    '⚛️ 核能/新能源': {
-        'color': '#98D8C8',
-        'desc': '核能發電、SMR、數據中心電力',
-        'stocks': {
-            'CEG': 'Constellation Energy',
-            'VST': 'Vistra Energy',
-            'NRG': 'NRG Energy',
-            'CCJ': 'Cameco (鈾礦)',
-            'UEC': 'Uranium Energy',
-            'OKLO': 'Oklo (SMR)',
-            'NNE': 'Nano Nuclear Energy',
-        }
-    },
-    '💊 生物科技/AI醫療': {
-        'color': '#FFB6C1',
-        'desc': 'AI藥物研發、基因治療',
-        'stocks': {
-            'RXRX': 'Recursion Pharma',
-            'SDGR': 'Schrodinger',
-            'EXAS': 'Exact Sciences',
-            'ILMN': 'Illumina (基因)',
-            'NVAX': 'Novavax',
-            'CRSP': 'CRISPR Therapeutics',
-            'BEAM': 'Beam Therapeutics',
-        }
-    },
-    '🚀 太空/國防科技': {
-        'color': '#B8860B',
-        'desc': '商業太空、衛星、國防AI',
-        'stocks': {
-            'RKLB': 'Rocket Lab',
-            'ASTS': 'AST SpaceMobile',
-            'LUNR': 'Intuitive Machines',
-            'SPCE': 'Virgin Galactic',
-            'KTOS': 'Kratos Defense',
-            'PLTR': 'Palantir (國防AI)',
-            'LMT': 'Lockheed Martin',
-        }
-    },
+# ==========================================
+# 熱門板塊關係圖 模組 (方案B: AI全動態)
+# ==========================================
+
+# 顏色池（板塊用）
+SECTOR_COLORS = [
+    '#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7',
+    '#DDA0DD','#F0A500','#98D8C8','#FFB6C1','#B8860B',
+    '#87CEEB','#FFA07A','#90EE90','#DEB887','#ADD8E6',
+]
+
+# 固定備用板塊（當AI失敗時用）
+FALLBACK_SECTOR_STOCKS = {
+    '🤖 人工智能 AI': {'stocks': {'PLTR':'Palantir','AI':'C3.ai','MSFT':'Microsoft','GOOGL':'Google','SOUN':'SoundHound'}},
+    '⚡ 晶片/半導體':  {'stocks': {'NVDA':'NVIDIA','AMD':'AMD','AVGO':'Broadcom','AMAT':'Applied Materials','ARM':'ARM'}},
+    '🗄️ 數據儲存':    {'stocks': {'MU':'Micron','WDC':'Western Digital','SNDK':'SanDisk','STX':'Seagate','PSTG':'Pure Storage'}},
+    '❄️ 冷卻/電力基建':{'stocks': {'VRT':'Vertiv','SMCI':'SuperMicro','ETN':'Eaton','GEV':'GE Vernova','HUBB':'Hubbell'}},
+    '☁️ 雲端/數據中心':{'stocks': {'AMZN':'Amazon','SNOW':'Snowflake','DDOG':'Datadog','NET':'Cloudflare','CRM':'Salesforce'}},
+    '🛡️ 網絡安全':    {'stocks': {'CRWD':'CrowdStrike','PANW':'Palo Alto','ZS':'Zscaler','S':'SentinelOne','OKTA':'Okta'}},
+    '⚛️ 核能/新能源': {'stocks': {'CEG':'Constellation','VST':'Vistra','CCJ':'Cameco','OKLO':'Oklo','NNE':'Nano Nuclear'}},
+    '🚀 太空/國防':   {'stocks': {'RKLB':'Rocket Lab','ASTS':'AST SpaceMobile','KTOS':'Kratos','PLTR':'Palantir','LMT':'Lockheed'}},
 }
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_sector_performance():
-    """抓取各板塊代表股票嘅近期表現數據"""
-    all_tickers = list(set(
-        ticker for sector_data in SECTOR_STOCKS.values()
-        for ticker in sector_data['stocks'].keys()
-    ))
-    perf = {}
-    try:
-        raw = yf.download(all_tickers, period='5d', interval='1d', progress=False, auto_adjust=True)
-        closes = raw['Close'] if 'Close' in raw.columns.get_level_values(0) else raw
-        for ticker in all_tickers:
+def _parse_ai_sector_json(raw_text):
+    """解析 AI 返回的板塊 JSON，容錯處理"""
+    import re, json
+    text = raw_text.strip()
+    # 提取 JSON block
+    for pattern in [r'```json\s*(.*?)\s*```', r'```\s*(.*?)\s*```', r'(\[.*\])', r'(\{.*\})']:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
             try:
-                prices = closes[ticker].dropna()
+                data = json.loads(m.group(1))
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict) and 'sectors' in data:
+                    return data['sectors']
+            except:
+                continue
+    # 直接 parse 整段
+    try:
+        data = json.loads(text)
+        if isinstance(data, list): return data
+        if isinstance(data, dict) and 'sectors' in data: return data['sectors']
+    except:
+        pass
+    return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def ai_generate_hot_sectors(news_headlines: str):
+    """
+    叫 AI 根據最新新聞，自動生成今日最熱門板塊 + 代表股票 (JSON格式)
+    返回: list of dict [{name, emoji, desc, stocks: {TICKER: name, ...}}, ...]
+    """
+    sys_p = """你係一位美股板塊專家。根據用戶提供的最新市場新聞標題，識別今日最熱門的5-7個美股板塊。
+請用以下 JSON 格式回覆，只需返回 JSON，不要其他文字：
+[
+  {
+    "name": "板塊名稱（中文）",
+    "emoji": "一個相關emoji",
+    "desc": "簡短描述（10字內）",
+    "stocks": {
+      "TICKER1": "公司名",
+      "TICKER2": "公司名",
+      "TICKER3": "公司名",
+      "TICKER4": "公司名",
+      "TICKER5": "公司名",
+      "TICKER6": "公司名"
+    }
+  }
+]
+要求：
+- 每個板塊包含5-7隻最具代表性的美股 ticker（必須係真實存在的美股代號）
+- 板塊要反映當前新聞熱點，例如AI、晶片、核能、機器人、國防等
+- stocks 裡面必須係有效的美股ticker，例如NVDA、PLTR、AMZN等
+- 只返回純 JSON，不要markdown，不要解釋"""
+
+    usr_p = f"最新市場新聞標題：\n{news_headlines}"
+
+    raw = call_pollinations([
+        {'role': 'system', 'content': sys_p},
+        {'role': 'user', 'content': usr_p}
+    ], timeout=60)
+
+    sectors = _parse_ai_sector_json(raw)
+    if sectors and len(sectors) >= 3:
+        return sectors, True  # True = AI生成成功
+    return None, False
+
+def build_sector_stocks_from_ai(ai_sectors):
+    """將 AI 返回的 list 轉換成 SECTOR_STOCKS 格式"""
+    result = {}
+    for i, s in enumerate(ai_sectors):
+        emoji = s.get('emoji', '📊')
+        name = s.get('name', f'板塊{i+1}')
+        key = f"{emoji} {name}"
+        result[key] = {
+            'color': SECTOR_COLORS[i % len(SECTOR_COLORS)],
+            'desc': s.get('desc', ''),
+            'stocks': {k.upper().strip(): v for k, v in s.get('stocks', {}).items()}
+        }
+    return result
+
+def build_sector_stocks_fallback():
+    """備用：使用預設板塊，加顏色"""
+    result = {}
+    for i, (key, val) in enumerate(FALLBACK_SECTOR_STOCKS.items()):
+        result[key] = {
+            'color': SECTOR_COLORS[i % len(SECTOR_COLORS)],
+            'desc': '',
+            'stocks': val['stocks']
+        }
+    return result
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_sector_performance_dynamic(ticker_list_key: str, tickers_tuple):
+    """抓取指定股票近期表現，用 ticker_list_key 作 cache key"""
+    tickers = list(tickers_tuple)
+    perf = {}
+    if not tickers:
+        return perf
+    try:
+        raw = yf.download(tickers, period='5d', interval='1d', progress=False, auto_adjust=True)
+        if hasattr(raw.columns, 'levels'):
+            closes = raw['Close']
+        else:
+            closes = raw
+        for ticker in tickers:
+            try:
+                prices = closes[ticker].dropna() if ticker in closes.columns else pd.Series(dtype=float)
                 if len(prices) >= 2:
-                    chg = (float(prices.iloc[-1]) - float(prices.iloc[-2])) / float(prices.iloc[-2]) * 100
-                    chg5d = (float(prices.iloc[-1]) - float(prices.iloc[0])) / float(prices.iloc[0]) * 100
-                    perf[ticker] = {'1d': round(chg, 2), '5d': round(chg5d, 2), 'price': round(float(prices.iloc[-1]), 2)}
+                    chg1d = (float(prices.iloc[-1]) - float(prices.iloc[-2])) / float(prices.iloc[-2]) * 100
+                    chg5d = (float(prices.iloc[-1]) - float(prices.iloc[0]))  / float(prices.iloc[0])  * 100
+                    perf[ticker] = {'1d': round(chg1d, 2), '5d': round(chg5d, 2), 'price': round(float(prices.iloc[-1]), 2)}
+                elif len(prices) == 1:
+                    perf[ticker] = {'1d': 0.0, '5d': 0.0, 'price': round(float(prices.iloc[-1]), 2)}
             except:
                 perf[ticker] = {'1d': 0.0, '5d': 0.0, 'price': 0.0}
     except:
         pass
     return perf
 
-def get_sector_avg_perf(sector_name, perf_data):
-    """計算板塊平均5日表現"""
-    stocks = SECTOR_STOCKS[sector_name]['stocks']
+def get_sector_avg_perf_dynamic(sector_data, perf_data):
+    stocks = sector_data.get('stocks', {})
     vals = [perf_data.get(t, {}).get('5d', 0) for t in stocks]
-    return round(sum(vals) / len(vals), 2) if vals else 0
-
-def render_sector_network_chart(selected_sectors, perf_data):
-    """用 Plotly 畫板塊關係網絡圖"""
-    import plotly.graph_objects as go
-    import math
-
-    nodes_x, nodes_y, node_text, node_color, node_size, node_hover, node_type = [], [], [], [], [], [], []
-    edge_x, edge_y = [], []
-    
-    n_sectors = len(selected_sectors)
-    
-    for i, sector_name in enumerate(selected_sectors):
-        sector_data = SECTOR_STOCKS[sector_name]
-        stocks = sector_data['stocks']
-        color = sector_data['color']
-        
-        # 板塊中心節點位置 (圓形排列)
-        angle = 2 * math.pi * i / n_sectors
-        radius = 3.0
-        sx = radius * math.cos(angle)
-        sy = radius * math.sin(angle)
-        
-        avg_5d = get_sector_avg_perf(sector_name, perf_data)
-        
-        nodes_x.append(sx)
-        nodes_y.append(sy)
-        node_text.append(sector_name.split(' ', 1)[-1][:10])
-        node_color.append(color)
-        node_size.append(50)
-        node_hover.append(f"<b>{sector_name}</b><br>{sector_data['desc']}<br>5日均漲: {avg_5d:+.1f}%")
-        node_type.append('sector')
-        
-        # 個股節點 (圍繞板塊中心)
-        n_stocks = len(stocks)
-        for j, (ticker, name) in enumerate(stocks.items()):
-            stock_angle = angle + (2 * math.pi * j / n_stocks) * 0.6 - 0.3 * math.pi
-            stock_radius = 1.4
-            ex = sx + stock_radius * math.cos(stock_angle)
-            ey = sy + stock_radius * math.sin(stock_angle)
-            
-            pdata = perf_data.get(ticker, {})
-            chg1d = pdata.get('1d', 0)
-            chg5d = pdata.get('5d', 0)
-            price = pdata.get('price', 0)
-            
-            # 節點顏色根據5日表現
-            if chg5d > 5:
-                scolor = '#00C851'
-            elif chg5d > 0:
-                scolor = '#00897B'
-            elif chg5d > -5:
-                scolor = '#FF6D00'
-            else:
-                scolor = '#D50000'
-            
-            nodes_x.append(ex)
-            nodes_y.append(ey)
-            node_text.append(ticker)
-            node_color.append(scolor)
-            node_size.append(22)
-            node_hover.append(
-                f"<b>{ticker}</b><br>{name}<br>"
-                f"💰 ${price:.2f}<br>"
-                f"📅 1日: {chg1d:+.1f}%<br>"
-                f"📅 5日: {chg5d:+.1f}%"
-            )
-            node_type.append('stock')
-            
-            # 連線 (板塊中心 → 個股)
-            edge_x += [sx, ex, None]
-            edge_y += [sy, ey, None]
-    
-    fig = go.Figure()
-    
-    # 連線
-    fig.add_trace(go.Scatter(
-        x=edge_x, y=edge_y,
-        mode='lines',
-        line=dict(width=0.8, color='rgba(180,180,180,0.4)'),
-        hoverinfo='none',
-        showlegend=False
-    ))
-    
-    # 個股節點
-    stock_mask = [t == 'stock' for t in node_type]
-    fig.add_trace(go.Scatter(
-        x=[x for x, m in zip(nodes_x, stock_mask) if m],
-        y=[y for y, m in zip(nodes_y, stock_mask) if m],
-        mode='markers+text',
-        marker=dict(
-            size=[s for s, m in zip(node_size, stock_mask) if m],
-            color=[c for c, m in zip(node_color, stock_mask) if m],
-            line=dict(width=1.5, color='rgba(255,255,255,0.6)'),
-            opacity=0.9
-        ),
-        text=[t for t, m in zip(node_text, stock_mask) if m],
-        textposition='top center',
-        textfont=dict(size=9, color='white'),
-        hovertext=[h for h, m in zip(node_hover, stock_mask) if m],
-        hoverinfo='text',
-        name='個股',
-        showlegend=False
-    ))
-    
-    # 板塊中心節點
-    sector_mask = [t == 'sector' for t in node_type]
-    fig.add_trace(go.Scatter(
-        x=[x for x, m in zip(nodes_x, sector_mask) if m],
-        y=[y for y, m in zip(nodes_y, sector_mask) if m],
-        mode='markers+text',
-        marker=dict(
-            size=[s for s, m in zip(node_size, sector_mask) if m],
-            color=[c for c, m in zip(node_color, sector_mask) if m],
-            symbol='circle',
-            line=dict(width=2, color='white'),
-            opacity=1.0
-        ),
-        text=[t for t, m in zip(node_text, sector_mask) if m],
-        textposition='middle center',
-        textfont=dict(size=10, color='white', family='Arial Black'),
-        hovertext=[h for h, m in zip(node_hover, sector_mask) if m],
-        hoverinfo='text',
-        name='板塊',
-        showlegend=False
-    ))
-    
-    fig.update_layout(
-        title=dict(text='🔥 熱門板塊關係圖 — 滑鼠懸停查看詳情', font=dict(size=16, color='white'), x=0.5),
-        paper_bgcolor='#0E1117',
-        plot_bgcolor='#0E1117',
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        height=720,
-        margin=dict(l=20, r=20, t=60, b=20),
-        font=dict(color='white')
-    )
-    
-    return fig
+    return round(sum(vals) / len(vals), 2) if vals else 0.0
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def analyze_hot_sectors_ai(perf_summary: str):
-    """用 AI 分析目前哪些板塊最熱門"""
-    sys_p = """你係一位專業美股板塊分析師。請用廣東話回答。根據以下各板塊近5日表現數據，分析：
-1. 目前最熱門嘅2-3個板塊係咩，點解佢哋咁熱？
-2. 有咩宏觀催化劑在背後推動？
-3. 有冇板塊出現輪動跡象？
-4. 投資者應該點樣部署？
-請用清晰嘅廣東話，加上bullet points，全文唔超過400字。"""
-    usr_p = f"以下係各板塊近5日平均表現：\n{perf_summary}"
+def analyze_hot_sectors_ai_dynamic(perf_summary: str):
+    sys_p = """你係一位專業美股板塊分析師。請用廣東話分析以下各板塊近5日表現，指出：
+1. 最熱門嘅2-3個板塊係咩，點解佢哋咁熱？
+2. 背後有咩宏觀催化劑？
+3. 有冇板塊輪動訊號？
+4. 投資者點樣部署？
+請用清晰廣東話加bullet points，唔超過400字。"""
+    usr_p = f"各板塊近5日平均表現：\n{perf_summary}"
     return call_pollinations([
         {'role': 'system', 'content': sys_p},
         {'role': 'user', 'content': usr_p}
     ], timeout=60)
 
+def render_sector_network_chart_dynamic(sector_stocks, perf_data):
+    """用 matplotlib 畫板塊關係網絡圖"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import math, io
+
+    selected = list(sector_stocks.keys())
+    n_sectors = len(selected)
+
+    fig, ax = plt.subplots(figsize=(18, 14))
+    fig.patch.set_facecolor('#0E1117')
+    ax.set_facecolor('#0E1117')
+    ax.axis('off')
+
+    for i, sector_name in enumerate(selected):
+        sector_data = sector_stocks[sector_name]
+        stocks = sector_data['stocks']
+        hex_color = sector_data['color']
+        avg_5d = get_sector_avg_perf_dynamic(sector_data, perf_data)
+
+        angle = 2 * math.pi * i / n_sectors - math.pi / 2
+        radius = 4.5
+        sx = radius * math.cos(angle)
+        sy = radius * math.sin(angle)
+
+        circle = plt.Circle((sx, sy), 0.55, color=hex_color, zorder=4, alpha=0.95)
+        ax.add_patch(circle)
+
+        label = sector_name.split(' ', 1)[-1]
+        short = label[:8] if len(label) > 8 else label
+        perf_str = f"{avg_5d:+.1f}%"
+        ax.text(sx, sy + 0.12, short, ha='center', va='center',
+                fontsize=7.5, fontweight='bold', color='white', zorder=5)
+        ax.text(sx, sy - 0.18, perf_str, ha='center', va='center',
+                fontsize=7, color='#00C851' if avg_5d >= 0 else '#FF4444', zorder=5, fontweight='bold')
+
+        n_stocks = len(stocks)
+        for j, (ticker, name) in enumerate(stocks.items()):
+            stock_angle = angle + (2 * math.pi * j / max(n_stocks, 1)) * 0.55 - 0.27 * math.pi
+            stock_radius = 1.9
+            ex = sx + stock_radius * math.cos(stock_angle)
+            ey = sy + stock_radius * math.sin(stock_angle)
+
+            pdata = perf_data.get(ticker, {})
+            chg5d = pdata.get('5d', 0)
+            price = pdata.get('price', 0)
+
+            if chg5d > 5:   scolor = '#00C851'
+            elif chg5d > 0: scolor = '#26A69A'
+            elif chg5d > -5:scolor = '#FF6D00'
+            else:           scolor = '#D50000'
+
+            ax.plot([sx, ex], [sy, ey], color='#444444', linewidth=0.7, zorder=1, alpha=0.6)
+            scircle = plt.Circle((ex, ey), 0.28, color=scolor, zorder=3, alpha=0.92)
+            ax.add_patch(scircle)
+            ax.text(ex, ey + 0.04, ticker, ha='center', va='center',
+                    fontsize=6.5, fontweight='bold', color='white', zorder=4)
+            ax.text(ex, ey - 0.16, f"{chg5d:+.1f}%", ha='center', va='center',
+                    fontsize=5.5, color='white', zorder=4)
+
+    legend_items = [
+        mpatches.Patch(color='#00C851', label='>+5%  強勢'),
+        mpatches.Patch(color='#26A69A', label='0~+5%  溫和'),
+        mpatches.Patch(color='#FF6D00', label='0~-5%  輕微回調'),
+        mpatches.Patch(color='#D50000', label='<-5%  明顯下跌'),
+    ]
+    ax.legend(handles=legend_items, loc='lower right',
+              facecolor='#1E1E2E', edgecolor='#444', labelcolor='white',
+              fontsize=8, title='5日表現', title_fontsize=8, framealpha=0.85)
+
+    ax.set_title('🔥 今日熱門板塊關係圖  (大圓=板塊 / 小圓=個股)',
+                 color='white', fontsize=13, fontweight='bold', pad=12)
+    lim = 7.5
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect('equal')
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=130, bbox_inches='tight', facecolor='#0E1117')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
 def render_hot_sectors_module():
     st.title('🔥 熱門板塊關係圖')
-    st.caption('實時追蹤各大科技板塊及代表股票走勢，AI自動分析板塊輪動')
-    
-    # ── 板塊選擇 ──
-    all_sector_names = list(SECTOR_STOCKS.keys())
-    
-    col_ctrl1, col_ctrl2 = st.columns([3, 1])
-    with col_ctrl1:
-        selected_sectors = st.multiselect(
-            '選擇要顯示的板塊（可多選）:',
-            all_sector_names,
-            default=all_sector_names[:6],
-            key='sector_select'
-        )
+    st.caption('AI 自動識別今日最熱門板塊及代表股票，每小時更新')
+
+    col_ctrl1, col_ctrl2 = st.columns([4, 1])
     with col_ctrl2:
         st.markdown('<br>', unsafe_allow_html=True)
-        if st.button('🔄 刷新數據', use_container_width=True, key='refresh_sectors'):
-            fetch_sector_performance.clear()
-            analyze_hot_sectors_ai.clear()
+        if st.button('🔄 強制刷新', use_container_width=True, key='refresh_sectors'):
+            ai_generate_hot_sectors.clear()
+            fetch_sector_performance_dynamic.clear()
+            analyze_hot_sectors_ai_dynamic.clear()
             st.rerun()
-    
-    if not selected_sectors:
-        st.warning('請至少選擇一個板塊')
-        return
-    
-    # ── 抓取數據 ──
-    with st.spinner('📡 抓取各板塊股票表現數據...'):
-        perf_data = fetch_sector_performance()
-    
-    # ── AI 板塊分析 ──
+
+    # ── Step 1: 抓新聞作為 AI 輸入 ──
+    with st.spinner('📰 抓取最新市場新聞...'):
+        news_list = fetch_top_news()
+    headlines = '\n'.join([
+        f"- {n.get('新聞標題','')}" for n in news_list[:20]
+        if n.get('新聞標題','')
+    ]) if news_list else "市場整體平穩，科技股持續受關注"
+
+    # ── Step 2: AI 生成板塊 ──
+    with st.spinner('🤖 AI 識別今日熱門板塊及股票...'):
+        ai_sectors, ai_ok = ai_generate_hot_sectors(headlines)
+
+    if ai_ok and ai_sectors:
+        sector_stocks = build_sector_stocks_from_ai(ai_sectors)
+        st.success(f'✅ AI 成功識別到 {len(sector_stocks)} 個熱門板塊')
+    else:
+        sector_stocks = build_sector_stocks_fallback()
+        st.info('ℹ️ AI 暫時未能生成板塊，使用預設板塊清單')
+
+    # ── Step 3: 抓取股票表現 ──
+    all_tickers = list(set(
+        t for sd in sector_stocks.values() for t in sd['stocks'].keys()
+    ))
+    ticker_key = ','.join(sorted(all_tickers))
+    with st.spinner('📡 抓取各板塊股票實時表現...'):
+        perf_data = fetch_sector_performance_dynamic(ticker_key, tuple(sorted(all_tickers)))
+
+    # ── Step 4: AI 板塊輪動分析 ──
     st.markdown('---')
-    st.markdown('### 🤖 AI 板塊輪動分析')
-    
-    # 計算板塊表現摘要
-    perf_lines = []
+    st.markdown('### 🤖 AI 板塊輪動分析（廣東話）')
+
     sector_perf_list = []
-    for sname in all_sector_names:
-        avg = get_sector_avg_perf(sname, perf_data)
+    perf_lines = []
+    for sname, sdata in sector_stocks.items():
+        avg = get_sector_avg_perf_dynamic(sdata, perf_data)
         sector_perf_list.append((sname, avg))
         perf_lines.append(f"• {sname}: {avg:+.1f}%")
-    
     sector_perf_list.sort(key=lambda x: x[1], reverse=True)
-    
+
     ai_col1, ai_col2 = st.columns([2, 1])
     with ai_col1:
         with st.spinner('🧠 AI 分析緊板塊輪動...'):
-            ai_analysis = final_text_sanitize(analyze_hot_sectors_ai('\n'.join(perf_lines)))
+            ai_analysis = final_text_sanitize(analyze_hot_sectors_ai_dynamic('\n'.join(perf_lines)))
         with st.container(border=True):
             st.markdown(ai_analysis)
-    
     with ai_col2:
         st.markdown('#### 📊 板塊5日表現排名')
-        for rank, (sname, avg) in enumerate(sector_perf_list[:8], 1):
-            bar_color = '🟢' if avg > 0 else '🔴'
+        for rank, (sname, avg) in enumerate(sector_perf_list, 1):
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:2px 0;font-size:0.82rem'>"
                 f"<span>{rank}. {sname.split()[0]} {sname.split(' ',1)[-1][:12]}</span>"
-                f"<span style='color:{'#00C851' if avg>0 else '#FF4444'}'><b>{avg:+.1f}%</b></span>"
-                f"</div>",
-                unsafe_allow_html=True
+                f"<span style='color:{'#00C851' if avg>=0 else '#FF4444'}'><b>{avg:+.1f}%</b></span>"
+                f"</div>", unsafe_allow_html=True
             )
-    
-    # ── 關係網絡圖 ──
+
+    # ── Step 5: 關係網絡圖 ──
     st.markdown('---')
     st.markdown('### 🕸️ 板塊關係網絡圖')
-    st.caption('💡 滑鼠懸停在節點上查看詳細數據 | 大圓圈 = 板塊中心 | 小圓圈 = 個股（顏色代表5日漲跌）')
-    
-    # 顏色圖例
+    st.caption('大圓圈 = AI識別板塊  |  小圓圈 = 代表個股  |  顏色 = 5日漲跌')
+
     leg_cols = st.columns(4)
-    legends = [('🟢 > +5%', '#00C851'), ('🟩 0~+5%', '#00897B'), ('🟠 0~-5%', '#FF6D00'), ('🔴 < -5%', '#D50000')]
-    for i, (label, color) in enumerate(legends):
-        leg_cols[i].markdown(f"<span style='color:{color}'>■</span> {label}", unsafe_allow_html=True)
-    
-    fig = render_sector_network_chart(selected_sectors, perf_data)
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # ── 個股詳細數據表 ──
+    for col, (label, color) in zip(leg_cols, [
+        ('🟢 >+5%', '#00C851'), ('🟩 0~+5%', '#26A69A'),
+        ('🟠 0~-5%', '#FF6D00'), ('🔴 <-5%', '#D50000')
+    ]):
+        col.markdown(f"<span style='color:{color}'>■</span> {label}", unsafe_allow_html=True)
+
+    img_buf = render_sector_network_chart_dynamic(sector_stocks, perf_data)
+    st.image(img_buf, use_container_width=True)
+
+    # ── Step 6: 個股詳細數據 ──
     st.markdown('---')
     st.markdown('### 📋 板塊個股詳細數據')
-    
-    tab_names = [s.split(' ', 1)[-1][:12] for s in selected_sectors]
+    tab_names = [s.split(' ', 1)[-1][:14] for s in sector_stocks.keys()]
     tabs = st.tabs(tab_names)
-    
-    for tab, sector_name in zip(tabs, selected_sectors):
+    for tab, (sector_name, sdata) in zip(tabs, sector_stocks.items()):
         with tab:
-            sector_data = SECTOR_STOCKS[sector_name]
             rows = []
-            for ticker, name in sector_data['stocks'].items():
+            for ticker, name in sdata['stocks'].items():
                 p = perf_data.get(ticker, {})
                 rows.append({
                     'Ticker': ticker,
@@ -1125,7 +1057,7 @@ if app_mode == '🎯 RS x MACD 動能狙擊手':
         with col3:
             st.markdown('#### 3️⃣ MACD 爆發點')
             enable_macd = st.checkbox('啟動 【MACD】 過濾', value=True)
-            selected_macd = st.multselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
+            selected_macd = st.multiselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
         start_scan = st.button('🚀 開始全市場精確掃描', use_container_width=True, type='primary')
     if start_scan:
         status_text, progress_bar = st.empty(), st.progress(0)
