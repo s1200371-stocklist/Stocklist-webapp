@@ -1445,56 +1445,136 @@ with st.sidebar:
 # ==========================================
 if app_mode == '🎯 RS x MACD 動能狙擊手':
     st.title('🎯 美股 RS x MACD x 趨勢 狙擊手')
+
+    # ========= 參數設定 =========
     with st.expander('⚙️ 展開設定篩選參數', expanded=True):
         col1, col2, col3 = st.columns(3)
+
+        # 1) 基礎與趨勢
         with col1:
             st.markdown('#### 1️⃣ 基礎與趨勢')
             min_mcap = st.number_input('最低市值 (百萬 USD)', min_value=0.0, value=500.0, step=50.0)
+
             enable_sma = st.checkbox('啟動 【趨勢排列】 過濾', value=True)
             if enable_sma:
                 sub1, sub2 = st.columns(2)
                 sma_short = sub1.selectbox('短期 SMA', [10, 20, 25, 50], index=2)
                 sma_long = sub2.selectbox('長期 SMA', [50, 100, 125, 150, 200], index=2)
-                close_condition = st.selectbox('額外 Close 條件', ['唔揀', 'Close > 短期 SMA', 'Close > 長期 SMA', 'Close > 短期及長期 SMA'], index=1)
+                close_condition = st.selectbox(
+                    '額外 Close 條件',
+                    ['唔揀', 'Close > 短期 SMA', 'Close > 長期 SMA', 'Close > 短期及長期 SMA'],
+                    index=1
+                )
             else:
                 sma_short, sma_long, close_condition = 25, 125, '唔揀'
+
+        # 2) RS 動能
         with col2:
             st.markdown('#### 2️⃣ RS 動能')
             enable_rs = st.checkbox('啟動 【RS】 過濾', value=True)
-            selected_rs = st.multiselect('顯示 RS 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_rs else []
+            selected_rs = st.multiselect(
+                '顯示 RS 階段:',
+                ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'],
+                default=['🚀 啱啱突破']
+            ) if enable_rs else []
+
+        # 3) MACD 爆發點
         with col3:
             st.markdown('#### 3️⃣ MACD 爆發點')
             enable_macd = st.checkbox('啟動 【MACD】 過濾', value=True)
-            selected_macd = st.multiselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
+            selected_macd = st.multiselect(
+                '顯示 MACD 階段:',
+                ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'],
+                default=['🚀 啱啱突破']
+            ) if enable_macd else []
+
         start_scan = st.button('🚀 開始全市場精確掃描', use_container_width=True, type='primary')
+
+    # ========= 掃描流程 =========
     if start_scan:
         status_text, progress_bar = st.empty(), st.progress(0)
         status_text.markdown('**階段 1/3**: 搵緊 Finviz 基礎股票名單...')
+
         raw_data = fetch_finviz_data()
         progress_bar.progress(100)
+
         if not raw_data.empty:
+            # 1) 基礎過濾：市值
             df_p = raw_data.copy()
             df_p['Mcap_Numeric'] = df_p['Market Cap'].apply(convert_mcap_to_float)
             final_df = df_p[df_p['Mcap_Numeric'] >= min_mcap].copy()
+
             if enable_rs or enable_macd or enable_sma:
+                # 2) 技術指標計算
                 progress_bar.progress(0)
-                indicators = calculate_all_indicators(final_df['Ticker'].tolist(), sma_short, sma_long, close_condition, _progress_bar=progress_bar, _status_text=status_text)
+                indicators = calculate_all_indicators(
+                    final_df['Ticker'].tolist(),
+                    sma_short, sma_long, close_condition,
+                    _progress_bar=progress_bar,
+                    _status_text=status_text
+                )
+
                 final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators.get(x, {}).get('RS', '無'))
                 final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators.get(x, {}).get('MACD', '無'))
                 final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators.get(x, {}).get('SMA_Trend', False))
-                if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
-                if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
-                if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
+
+                # 3) 根據 UI 選項過濾
+                if enable_sma:
+                    final_df = final_df[final_df['SMA多頭'] == True]
+                if enable_rs:
+                    final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
+                if enable_macd:
+                    final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
+
                 if len(final_df) > 0:
+                    # 4) 抓取基本面 + Sales
                     progress_bar.progress(0)
-                    fund_df = fetch_fundamentals(final_df['Ticker'].tolist(), _progress_bar=progress_bar, _status_text=status_text)
+                    fund_df = fetch_fundamentals(
+                        final_df['Ticker'].tolist(),
+                        _progress_bar=progress_bar,
+                        _status_text=status_text
+                    )
                     final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
-                    status_text.markdown('✅ **全市場掃描搞掂！**'); progress_bar.progress(100)
+
+                    # ========= Sales 欄位處理 =========
+                    def _fmt_sales(val):
+                        try:
+                            if pd.isna(val):
+                                return 'N/A'
+                            s = str(val).upper().replace(' ', '')
+                            # 假設從 Finviz 來的是類似 "23.4B"、"850M"
+                            if s.endswith('B') or s.endswith('M'):
+                                return f"${s}"
+                            return s
+                        except:
+                            return str(val)
+
+                    if 'Sales' in final_df.columns:
+                        final_df['Sales'] = final_df['Sales'].apply(_fmt_sales)
+
+                    status_text.markdown('✅ **全市場掃描搞掂！**')
+                    progress_bar.progress(100)
                     st.success(f'成功搵到 {len(final_df)} 隻潛力股票。')
-                    cols = ['Ticker'] + [c for c in ['RS_階段', 'MACD_階段', 'Company', 'Sector', 'Market Cap', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales Growth (QoQ)'] if c in final_df.columns]
+
+                    # 5) 顯示結果表（已加入 Sales 欄位）
+                    cols = ['Ticker'] + [
+                        c for c in [
+                            'RS_階段',
+                            'MACD_階段',
+                            'Company',
+                            'Sector',
+                            'Market Cap',
+                            'Sales',                 # 🆕 新增營收欄位
+                            'EPS (近4季)',
+                            'EPS Growth (QoQ)',
+                            'Sales Growth (QoQ)',
+                        ]
+                        if c in final_df.columns
+                    ]
                     st.dataframe(final_df[cols], use_container_width=True, hide_index=True)
                 else:
-                    status_text.markdown('✅ **全市場掃描搞掂！**'); progress_bar.progress(100)
+                    status_text.markdown('✅ **全市場掃描搞掂！**')
+                    progress_bar.progress(100)
                     st.warning('⚠️ 搵唔到完全滿足條件嘅股票。')
         else:
             st.warning("⚠️ 暫時攞唔到 Finviz 股票清單。")
