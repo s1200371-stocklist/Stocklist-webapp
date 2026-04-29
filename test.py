@@ -933,7 +933,19 @@ def ai_generate_company_relations(headlines: str):
     default_tickers = "NVDA,AMD,MSFT,GOOGL,AMZN,META,AAPL,PLTR,VRT,SMCI,MU,AVGO,ARM,CRWD,PANW,CEG,VST,CCJ,RKLB,ASTS,TSLA,SNOW,DDOG,CRM,NET"
 
     sectors, sec_ok   = ai_generate_sectors_only(headlines)
-    relations, rel_ok = ai_generate_relations_only(headlines, default_tickers)
+    # ✅ 如果板塊 AI 成功，用板塊裡所有 tickers 做關係 AI 的輸入
+    if sec_ok and sectors:
+        dyn_tickers = sorted({
+            t.upper().strip()
+            for s in sectors
+            for t in (s.get("stocks") or {}).keys()
+            if t
+        })
+        ticker_list = ",".join(dyn_tickers) if dyn_tickers else default_tickers
+    else:
+        ticker_list = default_tickers
+
+    relations, rel_ok = ai_generate_relations_only(headlines, ticker_list)
 
     result = {}
     if sec_ok:
