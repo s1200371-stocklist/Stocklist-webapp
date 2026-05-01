@@ -856,91 +856,124 @@ def _perf_badge(val):
             f"border-radius:4px;font-size:0.78rem;font-weight:bold'>"
             f"{arrow}{abs(val):.1f}%</span>")
 
-def _robust_json_parse(raw):
-    """強力 JSON 解析，容錯多種格式"""
+def _extract_json_from_pollinations(raw):
+    """
+    專門處理 Pollinations 返回格式，直接從原始 response 提取 JSON array。
+    完全繞過 final_text_sanitize，避免清理過程破壞 JSON 結構。
+    支援三種格式：
+    1. {"role":"assistant","reasoning":"...","content":"[JSON]"}
+    2. ```json\n[JSON]\n```
+    3. 純 JSON array
+    """
     import re, json
     if not raw or not isinstance(raw, str):
         return None
-    # 過濾 HTML 錯誤頁 + AI 錯誤訊息
-    stripped = raw.strip()
-    if stripped.startswith('<!DOCTYPE') or stripped.startswith('<html'):
+    s = raw.strip()
+    # 過濾錯誤訊息
+    if s.startswith('⚠️') or 'AI 逾時' in s or 'AI 暫時繁忙' in s:
         return None
-    if stripped.startswith('⚠️') or stripped.startswith('WARNING'):
+    if s.startswith('<!DOCTYPE') or s.startswith('<html'):
         return None
-    # 嘗試多種 pattern
+
+    # Strategy 1: 解析外層 JSON wrapper，取出 content 字段
+    text_to_parse = s
+    try:
+        outer = json.loads(s)
+        if isinstance(outer, list) and len(outer) > 0:
+            return outer  # 直接係 list
+        if isinstance(outer, dict):
+            # 嘗試 choices[0].message.content (OpenAI 格式)
+            choices = outer.get('choices', [])
+            if choices and isinstance(choices, list):
+                msg = choices[0].get('message', {})
+                c = msg.get('content', '') if isinstance(msg, dict) else ''
+                if c and isinstance(c, str):
+                    text_to_parse = c.strip()
+            else:
+                # 直接取 content 字段
+                c = outer.get('content', '')
+                if c and isinstance(c, str):
+                    text_to_parse = c.strip()
+                elif isinstance(c, list):
+                    return c
+    except:
+        pass
+
+    # Strategy 2: 從 text_to_parse 裏面用 regex 提取 JSON array
     patterns = [
-        r'```json\s*(.*?)\s*```',
-        r'```\s*([\[{].*?[}\]])\s*```',
-        r'([\[{][\s\S]*[}\]])',
+        r'```json\s*([\s\S]*?)\s*```',
+        r'```\s*([\[{][\s\S]*?[}\]])\s*```',
+        r'(\[[\s\S]*\])',  # 貪婪匹配最長 array
     ]
     for p in patterns:
-        m = re.search(p, raw, re.DOTALL)
+        m = re.search(p, text_to_parse, re.DOTALL)
         if m:
             chunk = m.group(1).strip()
             chunk = re.sub(r',\s*([}\]])', r'\1', chunk)
             try:
-                return json.loads(chunk)
+                result = json.loads(chunk)
+                if isinstance(result, list) and len(result) > 0:
+                    return result
             except:
                 pass
-    # 直接 parse 全文
-    text = raw.strip()
-    text = re.sub(r',\s*([}\]])', r'\1', text)
+
+    # Strategy 3: 直接 parse text_to_parse
+    txt = text_to_parse.strip()
+    txt = re.sub(r',\s*([}\]])', r'\1', txt)
     try:
-        return json.loads(text)
+        result = json.loads(txt)
+        if isinstance(result, list):
+            return result
     except:
         pass
+
     return None
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def ai_generate_sectors_only(headlines: str):
-    """呼叫 1: 只生成板塊清單（簡單JSON，成功率高）"""
-    sys_p = """Return ONLY a JSON array. No explanation. Format:
-[{"name":"板塊中文名","emoji":"emoji","desc":"10字描述","stocks":{"TICKER":"公司名"}}]
-Generate 5-6 hot US stock sectors. Each sector has 5-6 tickers. Only return JSON array."""
-    raw = call_pollinations([
+    """呼叫 1: 只生成板塊清單"""
+    sys_p = """You are a US stock sector expert. Return ONLY a valid JSON array, no explanation, no markdown.
+Format: [{"name":"板塊中文名","emoji":"emoji","desc":"10字描述","stocks":{"TICKER":"公司名",...}}]
+Rules: 5-6 sectors, 5-6 tickers each, only real US stock tickers, only return the JSON array."""
+    raw_response = call_pollinations([
         {'role': 'system', 'content': sys_p},
-        {'role': 'user',   'content': f"News headlines:\n{headlines[:400]}"}
+        {'role': 'user',   'content': f"Latest news: {headlines[:500]}"}
     ], timeout=50)
-    # 檢查是否返回錯誤訊息
-    if not raw or raw.startswith('⚠️') or 'AI 逾時' in raw or 'AI 暫時繁忙' in raw:
-        return None, False
-    data = _robust_json_parse(raw)
+    data = _extract_json_from_pollinations(raw_response)
     if isinstance(data, list) and len(data) >= 3:
         return data, True
     return None, False
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def ai_generate_relations_only(headlines: str, ticker_list: str):
-    """呼叫 2: 只生成公司關係（獨立，唔依賴板塊結果）"""
-    sys_p = """Return ONLY a JSON array. No explanation. Format:
-[{"company_a":"TICKER","company_b":"TICKER","type":"合作","desc":"brief desc","strength":"強"}]
+    """呼叫 2: 只生成公司關係"""
+    sys_p = """You are a US stock analyst. Return ONLY a valid JSON array, no explanation, no markdown.
+Format: [{"company_a":"TICKER","company_b":"TICKER","type":"合作","desc":"brief desc","strength":"強"}]
 type must be one of: 合作,供應商,客戶,競爭,投資
-Generate exactly 8-10 relations. Only return JSON array."""
-    raw = call_pollinations([
+Generate exactly 8 relations. Only return the JSON array, nothing else."""
+    raw_response = call_pollinations([
         {'role': 'system', 'content': sys_p},
-        {'role': 'user',   'content': f"News:\n{headlines[:300]}\n\nTickers:{ticker_list[:200]}"}
+        {'role': 'user',   'content': f"News: {headlines[:300]}\nTickers: {ticker_list[:200]}"}
     ], timeout=45)
-    # 檢查是否返回錯誤訊息
-    if not raw or raw.startswith('⚠️') or 'AI 逾時' in raw or 'AI 暫時繁忙' in raw:
-        return None, False
-    data = _robust_json_parse(raw)
+    data = _extract_json_from_pollinations(raw_response)
     if isinstance(data, list) and len(data) >= 3:
         return data, True
     return None, False
 
+
 def ai_generate_company_relations(headlines: str):
     """
-    拆成兩次獨立 AI 呼叫，提高成功率：
+    拆成兩次獨立 AI 呼叫：
     呼叫1: 板塊清單
     呼叫2: 公司關係（帶 retry）
     """
     import time
     default_tickers = "NVDA,AMD,MSFT,GOOGL,AMZN,META,AAPL,PLTR,VRT,SMCI,MU,AVGO,ARM,CRWD,PANW,CEG,VST,CCJ,RKLB,ASTS,TSLA,SNOW,DDOG,CRM,NET"
 
-    # 呼叫1: 板塊
     sectors, sec_ok = ai_generate_sectors_only(headlines)
 
-    # 動態收集 ticker list
     if sec_ok and sectors:
         dyn_tickers = sorted({
             t.upper().strip()
@@ -952,14 +985,14 @@ def ai_generate_company_relations(headlines: str):
     else:
         ticker_list = default_tickers
 
-    # 呼叫2: 公司關係（最多 retry 2次）
+    # 最多 retry 2次
     relations, rel_ok = None, False
     for attempt in range(2):
         relations, rel_ok = ai_generate_relations_only(headlines, ticker_list)
         if rel_ok:
             break
         if attempt == 0:
-            time.sleep(2)  # 等2秒再試
+            time.sleep(3)
 
     result = {}
     if sec_ok:
