@@ -90,30 +90,36 @@ def final_text_sanitize(text):
     t = t.replace('","tool_calls":[]', '').replace('"tool_calls":[]', '')
     return re.sub(r'\n{3,}', '\n\n', t).strip()
 
-def call_pollinations(messages, model='openai', timeout=60):
+def call_pollinations(messages, model='openai', timeout=60, is_json=False):
     """呼叫 Pollinations AI，自動 retry + 429 fallback"""
     import time
     models_to_try = [model, 'openai', 'openai-large']
     for attempt, m in enumerate(models_to_try):
         try:
+            payload = {'messages': messages, 'model': m}
+            if is_json:
+                payload['jsonMode'] = True
             r = requests.post(
                 'https://text.pollinations.ai/',
-                json={'messages': messages, 'model': m},
+                json=payload,
                 timeout=timeout
             )
             if r.status_code == 429:
                 time.sleep(3 + attempt * 2)
                 continue
             if r.status_code == 200 and r.text.strip():
+                # 如果係拿 JSON，直接返回原汁原味文本，唔好進行破壞性 sanitize
+                if is_json:
+                    return r.text
                 return final_text_sanitize(r.text)
         except requests.exceptions.Timeout:
             if attempt < len(models_to_try) - 1:
                 time.sleep(2)
                 continue
-            return f"⚠️ AI 逾時"
+            return f"⚠️ AI 逾時" if not is_json else None
         except Exception as e:
-            return f"⚠️ AI 發生錯誤: {e}"
-    return f"⚠️ AI 暫時繁忙，請稍後重試"
+            return f"⚠️ AI 發生錯誤: {e}" if not is_json else None
+    return f"⚠️ AI 暫時繁忙，請稍後重試" if not is_json else None
 
 def extract_cantonese_report(text):
     cleaned = final_text_sanitize(text)
@@ -174,6 +180,58 @@ def extract_stock_sentiment_output(text):
     return label, body if body else FB_BODY
 
 # ==========================================
+# Upcoming Events (財報與宏觀日曆)
+# ==========================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_macro_events():
+    # 預設近期重要宏觀大事 (2026年)
+    events = [
+        {'日期': '2026-05-01', '事件': '🇺🇸 美國 4月非農就業人數 (NFP)', '重要性': '⭐⭐⭐', '預期影響': '影響減息預期及美元強弱'},
+        {'日期': '2026-05-06', '事件': '🏦 聯儲局 FOMC 利率決議', '重要性': '⭐⭐⭐⭐⭐', '預期影響': '決定大市方向，波幅極高'},
+        {'日期': '2026-05-13', '事件': '📦 美國 4月 CPI 通脹數據', '重要性': '⭐⭐⭐⭐', '預期影響': '通脹受控與否直接打擊科技股估值'},
+        {'日期': '2026-05-28', '事件': '🇺🇸 美國 第一季 GDP 修訂值', '重要性': '⭐⭐⭐', '預期影響': '反映經濟衰退/軟著陸風險'},
+        {'日期': '2026-06-17', '事件': '🏦 聯儲局 FOMC 利率決議 (連點陣圖)', '重要性': '⭐⭐⭐⭐⭐', '預期影響': '全年最重要政策指引之一'},
+    ]
+    return pd.DataFrame(events)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_stock_earnings(tickers):
+    results = []
+    def _fetch(t):
+        date_str = "即將公佈 / N/A"
+        try:
+            # 首選：利用 Finviz 抓取財報日
+            f = finvizfinance(t).ticker_fundament()
+            if 'Earnings' in f and f['Earnings'] != '-':
+                date_str = f['Earnings']
+        except:
+            try:
+                # 備援：YFinance
+                tkr = yf.Ticker(t)
+                cal = tkr.calendar
+                if isinstance(cal, dict) and 'Earnings Date' in cal:
+                    dates = cal['Earnings Date']
+                    if dates:
+                        date_str = dates[0].strftime('%b %d, %Y')
+            except: pass
+        return {'Ticker': t, '下期財報日子 (美東)': date_str}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        for r in ex.map(_fetch, tickers):
+            results.append(r)
+    return pd.DataFrame(results)
+
+def analyze_upcoming_events_ai(macro_df):
+    sys_p = "你是一位資深的香港華爾街財經專家。請直接使用「香港廣東話（口語）」及繁體中文輸出。絕對禁止輸出任何英文思考過程、代碼或開場白。"
+    usr_p = f"""請根據以下即將發生嘅宏觀大事，寫一段簡短嘅廣東話分析（大約2-3段），預測呢啲事件對美股大市（特別係科技股）嘅潛在影響及風險：
+
+{macro_df.to_string(index=False)}
+
+直接由正文開始，無需開場白或標題。"""
+    r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': usr_p}], timeout=45)
+    return final_text_sanitize(r)
+
+# ==========================================
 # 新聞
 # ==========================================
 def parse_rss_items(xml_text, source_name, limit=10):
@@ -189,7 +247,7 @@ def parse_rss_items(xml_text, source_name, limit=10):
     return items
 
 def fetch_rss_market_news():
-    sources = [('CNBC', 'https://search.cnbc.com/rs/search/combinedcms/view.xml?profile=120000000&id=10000664'), ('MarketWatch', 'https://feeds.content.dowjones.io/public/rss/mw_topstories')]
+    sources = [('CNBC', '[https://search.cnbc.com/rs/search/combinedcms/view.xml?profile=120000000&id=10000664](https://search.cnbc.com/rs/search/combinedcms/view.xml?profile=120000000&id=10000664)'), ('MarketWatch', '[https://feeds.content.dowjones.io/public/rss/mw_topstories](https://feeds.content.dowjones.io/public/rss/mw_topstories)')]
     items, seen = [], set()
     for name, url in sources:
         try:
@@ -242,7 +300,7 @@ def fetch_top_news():
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_reddit_sentiment():
     try:
-        res = requests.get('https://apewisdom.io/api/v1.0/filter/all-stocks/page/1', headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
+        res = requests.get('[https://apewisdom.io/api/v1.0/filter/all-stocks/page/1](https://apewisdom.io/api/v1.0/filter/all-stocks/page/1)', headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
         if res.status_code == 200:
             results = res.json().get('results', [])
             if results:
@@ -279,7 +337,7 @@ def fetch_reddit_sentiment():
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_stocktwits_trending():
     try:
-        res = requests.get('https://api.stocktwits.com/api/2/trending/symbols.json', headers=get_headers(), timeout=8)
+        res = requests.get('[https://api.stocktwits.com/api/2/trending/symbols.json](https://api.stocktwits.com/api/2/trending/symbols.json)', headers=get_headers(), timeout=8)
         if res.status_code == 200:
             symbols = res.json().get('symbols', [])
             if symbols:
@@ -314,7 +372,7 @@ def fetch_x_sentiment():
     api_key = os.getenv("X_SENTIMENT_API_KEY")
     if api_key:
         try:
-            res = requests.get("https://api.adanos.org/x-stocks/sentiment", headers={"Authorization": f"Bearer {api_key}"}, params={"limit": 10}, timeout=12)
+            res = requests.get("[https://api.adanos.org/x-stocks/sentiment](https://api.adanos.org/x-stocks/sentiment)", headers={"Authorization": f"Bearer {api_key}"}, params={"limit": 10}, timeout=12)
             if res.status_code == 200:
                 stocks = res.json().get("stocks", [])
                 if stocks:
@@ -337,14 +395,10 @@ def fetch_x_sentiment():
         {"Ticker": "CRWD", "Sentiment": "Bullish", "Mentions": 1090, "Bullish %": 59, "Trend": "Stable"},
     ]), "🔴 離線備援 (X / FinTwit)"
 
-# ==========================================
-# Part 4: 全市場真實 Insider 買入 (全新 OpenInsider 抓取器)
-# ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_insider_buying():
-    # 首選方案：OpenInsider (市場公認最準確、最快更新的全市場高管買入追蹤)
     try:
-        url = 'http://openinsider.com/insider-purchases-25k' # 專門抓 25K 美金以上嘅大額買入
+        url = '[http://openinsider.com/insider-purchases-25k](http://openinsider.com/insider-purchases-25k)'
         res = requests.get(url, headers=get_headers(), timeout=12)
         if res.status_code == 200:
             dfs = pd.read_html(res.text)
@@ -356,10 +410,7 @@ def fetch_insider_buying():
                     df['Ticker'] = df['Ticker'].astype(str).str.upper()
                     if not df.empty:
                         return df.head(10), '🟢 OpenInsider 真實數據 (最新 >$25k 買入)'
-    except Exception as e: 
-        pass
-
-    # 備援方案：Finviz Insider
+    except Exception as e: pass
     try:
         from finvizfinance.insider import Insider
         insider = Insider(option='top owner buys')
@@ -369,24 +420,18 @@ def fetch_insider_buying():
             df = df.rename(columns={'Owner': 'Insider', 'Relationship': 'Title', 'Cost': 'Price', 'Value ($)': 'Value'})
             df['Value'] = df['Value'].apply(lambda x: f"${x:,.0f}" if isinstance(x, (int, float)) else str(x))
             return df.head(10), '🟢 Finviz 真實數據 (Top Owner Buys)'
-    except: 
-        pass
-
-    # 靜態備援 (避免系統崩潰)
+    except: pass
     return pd.DataFrame([
         {'Date': datetime.datetime.now().strftime('%Y-%m-%d'), 'Ticker': 'ASTS', 'Insider': 'Abel Avellan', 'Title': 'CEO', 'Price': '$24.50', 'Value': '$2,500,000'},
         {'Date': (datetime.datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'), 'Ticker': 'PLTR', 'Insider': 'Peter Thiel', 'Title': 'Director', 'Price': '$82.00', 'Value': '$1,230,000'},
     ]), '🔴 離線備援數據'
 
-# ==========================================
-# Part 5: 真實國會交易 (QuiverQuant API)
-# ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_congress_trades():
     cutoff = (datetime.datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
     try:
         r = requests.get(
-            'https://api.quiverquant.com/beta/live/congresstrading',
+            '[https://api.quiverquant.com/beta/live/congresstrading](https://api.quiverquant.com/beta/live/congresstrading)',
             headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'},
             timeout=12
         )
@@ -402,7 +447,7 @@ def fetch_congress_trades():
                 ticker = str(d.get('Ticker') or '')
                 if not ticker or len(ticker) > 5 or not ticker.replace('.', '').isalpha(): continue
                 rng = str(d.get('Range') or '')
-                if rng in SMALL_RANGES: continue  # filter out small trades
+                if rng in SMALL_RANGES: continue
                 tx_date = str(d.get('TransactionDate') or '')
                 if tx_date < cutoff: continue
                 amt = float(d.get('Amount') or 0)
@@ -424,13 +469,6 @@ def fetch_congress_trades():
         {'Date': '2026-03-27', 'Politician': 'Josh Gottheimer',      'Party': 'D', 'Ticker': 'MSFT', 'Amount': '$500,001 - $1,000,000', 'House': 'Representatives'},
         {'Date': '2026-03-25', 'Politician': 'Josh Gottheimer',      'Party': 'D', 'Ticker': 'MSFT', 'Amount': '$50,001 - $100,000',    'House': 'Representatives'},
         {'Date': '2026-03-24', 'Politician': 'Maria Elvira Salazar', 'Party': 'R', 'Ticker': 'HON',  'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
-        {'Date': '2026-03-24', 'Politician': 'Maria Elvira Salazar', 'Party': 'R', 'Ticker': 'AMGN', 'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
-        {'Date': '2026-03-23', 'Politician': 'Tim Moore',            'Party': 'R', 'Ticker': 'CBRL', 'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
-        {'Date': '2026-03-20', 'Politician': 'Gilbert Cisneros',     'Party': 'D', 'Ticker': 'MIAX', 'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
-        {'Date': '2026-03-20', 'Politician': 'Tim Moore',            'Party': 'R', 'Ticker': 'LGIH', 'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
-        {'Date': '2026-03-19', 'Politician': 'Maria Elvira Salazar', 'Party': 'R', 'Ticker': 'RH',   'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
-        {'Date': '2026-03-19', 'Politician': 'Maria Elvira Salazar', 'Party': 'R', 'Ticker': 'GS',   'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
-        {'Date': '2026-03-19', 'Politician': 'Maria Elvira Salazar', 'Party': 'R', 'Ticker': 'CSCO', 'Amount': '$15,001 - $50,000',     'House': 'Representatives'},
     ]), '🔴 離線備援 (Congress)'
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -439,13 +477,6 @@ def fetch_5ch_sentiment():
         {"Ticker": "NVDA", "Name": "エヌビディア",        "Sentiment": "🚀 極度狂熱",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
         {"Ticker": "AMD",  "Name": "AMD",                 "Sentiment": "📈 偏向樂觀",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
         {"Ticker": "TSLA", "Name": "テスラ",               "Sentiment": "📉 悲觀/做空", "Trend": "📉 下跌",  "Source": "5ch/YahooJP"},
-        {"Ticker": "AAPL", "Name": "アップル",             "Sentiment": "⚖️ 中立",     "Trend": "▶ 平穩",  "Source": "5ch/YahooJP"},
-        {"Ticker": "PLTR", "Name": "パランティア",         "Sentiment": "📈 偏向樂觀",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
-        {"Ticker": "MSFT", "Name": "マイクロソフト",       "Sentiment": "⚖️ 中立",     "Trend": "▶ 平穩",  "Source": "5ch/YahooJP"},
-        {"Ticker": "META", "Name": "メタ",                 "Sentiment": "📈 偏向樂觀",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
-        {"Ticker": "COIN", "Name": "コインベース",         "Sentiment": "🚀 極度狂熱",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
-        {"Ticker": "MSTR", "Name": "マイクロストラテジー", "Sentiment": "🚀 極度狂熱",  "Trend": "📈 上升",  "Source": "5ch/YahooJP"},
-        {"Ticker": "INTC", "Name": "インテル",             "Sentiment": "📉 悲觀/做空", "Trend": "📉 下跌",  "Source": "5ch/YahooJP"},
     ]
     return pd.DataFrame(data), "🟢 日本 2ch/5ch 海外板塊情緒 (示意)"
 
@@ -543,7 +574,7 @@ def fetch_fundamentals(tickers, _progress_bar=None, _status_text=None):
     return pd.DataFrame(res) if res else empty
 
 # ==========================================
-# AI 分析 (加入板塊與受惠名單)
+# AI 分析
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_news_ai(news_list):
@@ -573,13 +604,11 @@ def analyze_news_ai(news_list):
     r = call_pollinations([{'role': 'system', 'content': sys_p}, {'role': 'user', 'content': user_p}], timeout=60)
     c = final_text_sanitize(r)
     
-    # 🔪 終極殺手鐧：尋找預設標題，將標題前面的所有「推理廢話」直接切斷拋棄
     anchor = "【📉 近月市場焦點總結】"
     idx = c.find(anchor)
     if idx != -1:
-        c = c[idx:]  # 只保留標題及之後的內容
+        c = c[idx:]
     else:
-        # 容錯：如果 AI 稍微改了標題
         alt_idx = c.find("近月市場焦點總結")
         if alt_idx != -1:
             c = anchor + "\n" + c[alt_idx + len("近月市場焦點總結"):]
@@ -678,10 +707,6 @@ def run_full_integration(final_df, progress_bar, status_text):
     bdf['AI 深度分析'] = reasons
     return bdf[~bdf['AI 消息情緒'].str.contains('悲觀|看淡|中性', na=False)]
 
-
-# ==========================================
-# 熱門板塊關係圖 模組 (方案B: AI全動態)
-# ==========================================
 
 # ==========================================
 # 熱門板塊關係圖 模組 (方案B: AI全動態)
@@ -864,6 +889,27 @@ def _robust_json_parse(raw):
     # 過濾 HTML 錯誤頁
     if raw.strip().startswith('<!DOCTYPE') or raw.strip().startswith('<html'):
         return None
+        
+    # 暴力提取陣列 [...]
+    m_arr = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
+    if m_arr:
+        try:
+            chunk = re.sub(r',\s*([}\]])', r'\1', m_arr.group(0))
+            return json.loads(chunk)
+        except: pass
+
+    # 暴力提取物件 {...}
+    m_obj = re.search(r'\{\s*".*?\s*\}', raw, re.DOTALL)
+    if m_obj:
+        try:
+            chunk = re.sub(r',\s*([}\]])', r'\1', m_obj.group(0))
+            data = json.loads(chunk)
+            if isinstance(data, dict):
+                if 'sectors' in data: return data['sectors']
+                if 'relations' in data: return data['relations']
+            return data
+        except: pass
+
     # 嘗試多種 pattern
     patterns = [
         r'```json\s*(.*?)\s*```',
@@ -899,7 +945,7 @@ def ai_generate_sectors_only(headlines: str):
     raw = call_pollinations([
         {'role': 'system', 'content': sys_p},
         {'role': 'user',   'content': f"新聞：\n{headlines}"}
-    ], timeout=50)
+    ], timeout=50, is_json=True)
     data = _robust_json_parse(raw)
     if isinstance(data, list) and len(data) >= 3:
         return data, True
@@ -916,7 +962,7 @@ type 只可以係：合作、供應商、客戶、競爭、投資
     raw = call_pollinations([
         {'role': 'system', 'content': sys_p},
         {'role': 'user',   'content': f"新聞：\n{headlines}\n\n相關股票：{ticker_list}"}
-    ], timeout=60)
+    ], timeout=60, is_json=True)
     data = _robust_json_parse(raw)
     if isinstance(data, list) and len(data) >= 5:
         return data, True
@@ -928,11 +974,9 @@ def ai_generate_company_relations(headlines: str):
     呼叫1: 板塊清單
     呼叫2: 公司關係
     """
-    # 固定常用 ticker 列表給關係生成參考
     default_tickers = "NVDA,AMD,MSFT,GOOGL,AMZN,META,AAPL,PLTR,VRT,SMCI,MU,AVGO,ARM,CRWD,PANW,CEG,VST,CCJ,RKLB,ASTS,TSLA,SNOW,DDOG,CRM,NET"
 
     sectors, sec_ok   = ai_generate_sectors_only(headlines)
-    # ✅ 如果板塊 AI 成功，用板塊裡所有 tickers 做關係 AI 的輸入
     if sec_ok and sectors:
         dyn_tickers = sorted({
             t.upper().strip()
@@ -994,7 +1038,6 @@ RELATION_TYPE_COLOR = {
 }
 
 def render_relations_html(relations, perf_data):
-    """用 HTML 表格顯示公司合作關係"""
     type_filter = list(RELATION_TYPE_COLOR.keys())
 
     rows_html = []
@@ -1060,7 +1103,6 @@ def render_hot_sectors_module():
             fetch_sector_performance_dynamic.clear()
             st.rerun()
 
-    # ── Step 1: 抓新聞 ──
     with st.spinner('📰 抓取最新市場新聞...'):
         news_list = fetch_top_news()
     headlines = '\n'.join([
@@ -1068,7 +1110,6 @@ def render_hot_sectors_module():
         if n.get('新聞標題','')
     ]) if news_list else "AI、晶片、數據中心、核能持續受關注"
 
-    # ── Step 2: AI 生成板塊 + 合作關係 ──
     with st.spinner('🤖 AI 分析板塊及公司關係...'):
         ai_data, ai_ok = ai_generate_company_relations(headlines)
 
@@ -1095,7 +1136,6 @@ def render_hot_sectors_module():
         st.caption("關係 AI 原始返回:")
         st.code(str(rel_raw)[:800] if rel_raw else "None / 解析失敗")
 
-    # ── Step 3: 抓股票表現 ──
     all_tickers = list(set(
         t for sd in sector_stocks.values() for t in sd['stocks'].keys()
     ) | set(
@@ -1108,7 +1148,6 @@ def render_hot_sectors_module():
     with st.spinner('📡 抓取股票實時表現...'):
         perf_data = fetch_sector_performance_dynamic(ticker_key, tuple(sorted(all_tickers)))
 
-    # ── Step 4: AI 板塊輪動分析 ──
     st.markdown('---')
     st.markdown('### 🤖 AI 板塊輪動分析（廣東話）')
     sector_perf_list, perf_lines = [], []
@@ -1133,18 +1172,15 @@ def render_hot_sectors_module():
                 f"<span style='color:{'#00C851' if avg>=0 else '#FF4444'}'><b>{avg:+.1f}%</b></span>"
                 f"</div>", unsafe_allow_html=True)
 
-    # ── Step 5: 公司合作關係表 ──
     st.markdown('---')
     st.markdown('### 🔗 公司合作 / 供應鏈 / 競爭關係')
 
-    # 圖例
     leg_cols = st.columns(5)
     for col, (rtype, (bg, tc, emoji)) in zip(leg_cols, RELATION_TYPE_COLOR.items()):
         col.markdown(
             f"<span style='background:{bg};color:{tc};padding:2px 8px;border-radius:10px;font-size:0.78rem'>"
             f"{emoji} {rtype}</span>", unsafe_allow_html=True)
 
-    # 關係類型篩選
     st.markdown('<br>', unsafe_allow_html=True)
     filter_types = st.multiselect(
         '篩選關係類型:',
@@ -1166,7 +1202,6 @@ def render_hot_sectors_module():
     else:
         st.warning('請至少選擇一種關係類型')
 
-    # ── Step 6: 板塊個股表 ──
     st.markdown('---')
     st.markdown('### 📋 板塊個股詳細數據')
     tab_names = [s.split(' ', 1)[-1][:14] for s in sector_stocks.keys()]
@@ -1184,7 +1219,6 @@ def render_hot_sectors_module():
                     '5日變幅': f"{p.get('5d', 0):+.1f}%",
                 })
             st.dataframe(rows, use_container_width=True, hide_index=True)
-
 
 
 # ==========================================
@@ -1219,9 +1253,8 @@ def fetch_sidebar_market_data():
     except:
         pass
 
-    # CNN Fear & Greed
     try:
-        r = requests.get('https://production.dataviz.cnn.io/index/fearandgreed/graphdata', headers=get_headers(), timeout=8)
+        r = requests.get('[https://production.dataviz.cnn.io/index/fearandgreed/graphdata](https://production.dataviz.cnn.io/index/fearandgreed/graphdata)', headers=get_headers(), timeout=8)
         if r.status_code == 200:
             fg = r.json().get('fear_and_greed', {})
             score = fg.get('score')
@@ -1229,9 +1262,8 @@ def fetch_sidebar_market_data():
     except:
         data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
 
-    # FRED: Unemployment Rate
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE', headers=get_headers(), timeout=8)
+        r = requests.get('[https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE](https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE)', headers=get_headers(), timeout=8)
         if r.status_code == 200:
             lines = r.text.strip().split('\n')
             last = lines[-1].split(',')
@@ -1239,9 +1271,8 @@ def fetch_sidebar_market_data():
     except:
         data['UNRATE'] = None
 
-    # FRED: CPI YoY
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL', headers=get_headers(), timeout=8)
+        r = requests.get('[https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL](https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL)', headers=get_headers(), timeout=8)
         if r.status_code == 200:
             lines = r.text.strip().split('\n')
             vals = []
@@ -1256,9 +1287,8 @@ def fetch_sidebar_market_data():
     except:
         data['CPI_YOY'] = None
 
-    # FRED: Fed Funds Rate
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS', headers=get_headers(), timeout=8)
+        r = requests.get('[https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS](https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS)', headers=get_headers(), timeout=8)
         if r.status_code == 200:
             lines = r.text.strip().split('\n')
             last = lines[-1].split(',')
@@ -1266,9 +1296,8 @@ def fetch_sidebar_market_data():
     except:
         data['FEDFUNDS'] = None
 
-    # FRED: Initial Jobless Claims
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA', headers=get_headers(), timeout=8)
+        r = requests.get('[https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA](https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA)', headers=get_headers(), timeout=8)
         if r.status_code == 200:
             lines = r.text.strip().split('\n')
             last = lines[-1].split(',')
@@ -1303,7 +1332,6 @@ def render_sidebar_market_panel():
     with st.spinner("載入..."):
         m = fetch_sidebar_market_data()
 
-    # ── Fear & Greed ──
     fg = m.get('FEAR_GREED', {})
     if fg and fg.get('score') is not None:
         score = fg['score']
@@ -1321,7 +1349,6 @@ def render_sidebar_market_panel():
     else:
         st.caption("😐 CNN 恐貪指數: 暫無數據")
 
-    # ── VIX ──
     vix = m.get('VIX', {})
     if vix and vix.get('price') is not None:
         v, pct = vix['price'], vix['pct']
@@ -1338,78 +1365,51 @@ def render_sidebar_market_panel():
         st.caption("VIX: N/A")
 
     _divider()
-
-    # ── 美股三大指數 ──
     _section("🇺🇸 美股三大指數")
     _pm("S&P500 (SPY)", "📈", m.get('SPY'))
     _pm("納指 (QQQ)", "💻", m.get('QQQ'))
     _pm("道指 (DIA)", "🏛️", m.get('DIA'))
+    
     _divider()
-
-    # ── 商品 ──
     _section("🛢️ 商品市場")
     _pm("WTI 原油 (USD)", "🛢️", m.get('OIL'), fmt='${:.2f}')
     _pm("黃金 (USD/oz)", "🥇", m.get('GOLD'), fmt='${:.2f}')
     _pm("白銀 (USD/oz)", "🥈", m.get('SILVER'), fmt='${:.2f}')
     _pm("天然氣 (USD)", "🔥", m.get('NG'), fmt='${:.3f}')
+    
     _divider()
-
-    # ── 宏觀/債息 ──
     _section("🏦 宏觀 & 債市")
     _pm("美元指數 (DXY)", "💵", m.get('DXY'))
     _pm("10年美債息 (%)", "📉", m.get('TNX'), fmt='{:.3f}')
     _pm("30年美債息 (%)", "📉", m.get('TYX'), fmt='{:.3f}')
 
-    # Fed Funds Rate
     ff = m.get('FEDFUNDS')
     if ff:
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>🏛️ <b>聯儲息率</b></span>"
-            f"<span style='font-size:0.78rem;color:#f1c40f'><b>{ff['value']:.2f}%</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({ff['date'][:7]})</span></span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='display:flex;justify-content:space-between;padding:2px 0'><span style='font-size:0.78rem'>🏛️ <b>聯儲息率</b></span><span style='font-size:0.78rem;color:#f1c40f'><b>{ff['value']:.2f}%</b><span style='font-size:0.65rem;color:#666'> ({ff['date'][:7]})</span></span></div>", unsafe_allow_html=True)
 
     _divider()
-
-    # ── 就業數據 ──
     _section("👷 就業數據")
     unemp = m.get('UNRATE')
     if unemp:
         uc = '#e74c3c' if unemp['value'] > 5 else ('#e67e22' if unemp['value'] > 4 else '#2ecc71')
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>📊 <b>失業率</b></span>"
-            f"<span style='font-size:0.78rem;color:{uc}'><b>{unemp['value']:.1f}%</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({unemp['date'][:7]})</span></span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='display:flex;justify-content:space-between;padding:2px 0'><span style='font-size:0.78rem'>📊 <b>失業率</b></span><span style='font-size:0.78rem;color:{uc}'><b>{unemp['value']:.1f}%</b><span style='font-size:0.65rem;color:#666'> ({unemp['date'][:7]})</span></span></div>", unsafe_allow_html=True)
 
     jl = m.get('JOBLESS')
     if jl:
         jc = '#e74c3c' if jl['value'] > 250000 else ('#e67e22' if jl['value'] > 220000 else '#2ecc71')
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>📋 <b>首次申領失業</b></span>"
-            f"<span style='font-size:0.78rem;color:{jc}'><b>{jl['value']:,}</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({jl['date']})</span></span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='display:flex;justify-content:space-between;padding:2px 0'><span style='font-size:0.78rem'>📋 <b>首次申領失業</b></span><span style='font-size:0.78rem;color:{jc}'><b>{jl['value']:,}</b><span style='font-size:0.65rem;color:#666'> ({jl['date']})</span></span></div>", unsafe_allow_html=True)
 
-    # CPI
     cpi = m.get('CPI_YOY')
     if cpi:
         cc = '#e74c3c' if cpi['value'] > 3.5 else ('#e67e22' if cpi['value'] > 2.5 else '#2ecc71')
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>📦 <b>CPI 通脹 (YoY)</b></span>"
-            f"<span style='font-size:0.78rem;color:{cc}'><b>{cpi['value']:.1f}%</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({cpi['date'][:7]})</span></span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='display:flex;justify-content:space-between;padding:2px 0'><span style='font-size:0.78rem'>📦 <b>CPI 通脹 (YoY)</b></span><span style='font-size:0.78rem;color:{cc}'><b>{cpi['value']:.1f}%</b><span style='font-size:0.65rem;color:#666'> ({cpi['date'][:7]})</span></span></div>", unsafe_allow_html=True)
 
     _divider()
-
-    # ── 加密貨幣 ──
     _section("₿ 加密貨幣")
     _pm("Bitcoin (USD)", "₿", m.get('BTC'), fmt='${:,.0f}')
     _pm("Ethereum (USD)", "⟠", m.get('ETH'), fmt='${:,.0f}')
+    
     _divider()
-
-    # ── 亞洲市場 ──
     _section("🌏 亞洲市場")
     _pm("日經 225", "🗾", m.get('NIKKEI'), fmt='{:,.0f}')
     _pm("恒生指數", "🇭🇰", m.get('HSI'), fmt='{:,.0f}')
@@ -1434,6 +1434,7 @@ with st.sidebar:
     app_mode = st.radio('選擇模組', [
         '🔥 熱門板塊關係圖',
         '🎯 RS x MACD 動能狙擊手',
+        '📅 財報與經濟日曆 (Upcoming Events)',
         '📰 近月 AI 洞察 (廣東話版)',
         '🕵️ 另類數據雷達 (6大維度)',
         '🔍 個股驗證模式 (Bottom-Up)',
@@ -1445,139 +1446,104 @@ with st.sidebar:
 # ==========================================
 if app_mode == '🎯 RS x MACD 動能狙擊手':
     st.title('🎯 美股 RS x MACD x 趨勢 狙擊手')
-
-    # ========= 參數設定 =========
     with st.expander('⚙️ 展開設定篩選參數', expanded=True):
         col1, col2, col3 = st.columns(3)
-
-        # 1) 基礎與趨勢
         with col1:
             st.markdown('#### 1️⃣ 基礎與趨勢')
             min_mcap = st.number_input('最低市值 (百萬 USD)', min_value=0.0, value=500.0, step=50.0)
-
             enable_sma = st.checkbox('啟動 【趨勢排列】 過濾', value=True)
             if enable_sma:
                 sub1, sub2 = st.columns(2)
                 sma_short = sub1.selectbox('短期 SMA', [10, 20, 25, 50], index=2)
                 sma_long = sub2.selectbox('長期 SMA', [50, 100, 125, 150, 200], index=2)
-                close_condition = st.selectbox(
-                    '額外 Close 條件',
-                    ['唔揀', 'Close > 短期 SMA', 'Close > 長期 SMA', 'Close > 短期及長期 SMA'],
-                    index=1
-                )
+                close_condition = st.selectbox('額外 Close 條件', ['唔揀', 'Close > 短期 SMA', 'Close > 長期 SMA', 'Close > 短期及長期 SMA'], index=1)
             else:
                 sma_short, sma_long, close_condition = 25, 125, '唔揀'
-
-        # 2) RS 動能
         with col2:
             st.markdown('#### 2️⃣ RS 動能')
             enable_rs = st.checkbox('啟動 【RS】 過濾', value=True)
-            selected_rs = st.multiselect(
-                '顯示 RS 階段:',
-                ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'],
-                default=['🚀 啱啱突破']
-            ) if enable_rs else []
-
-        # 3) MACD 爆發點
+            selected_rs = st.multiselect('顯示 RS 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_rs else []
         with col3:
             st.markdown('#### 3️⃣ MACD 爆發點')
             enable_macd = st.checkbox('啟動 【MACD】 過濾', value=True)
-            selected_macd = st.multiselect(
-                '顯示 MACD 階段:',
-                ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'],
-                default=['🚀 啱啱突破']
-            ) if enable_macd else []
-
+            selected_macd = st.multiselect('顯示 MACD 階段:', ['🚀 啱啱突破', '🔥 已經突破', '🎯 就快突破 (<5%)'], default=['🚀 啱啱突破']) if enable_macd else []
         start_scan = st.button('🚀 開始全市場精確掃描', use_container_width=True, type='primary')
-
-    # ========= 掃描流程 =========
+    
     if start_scan:
         status_text, progress_bar = st.empty(), st.progress(0)
         status_text.markdown('**階段 1/3**: 搵緊 Finviz 基礎股票名單...')
-
         raw_data = fetch_finviz_data()
         progress_bar.progress(100)
-
         if not raw_data.empty:
-            # 1) 基礎過濾：市值
             df_p = raw_data.copy()
             df_p['Mcap_Numeric'] = df_p['Market Cap'].apply(convert_mcap_to_float)
             final_df = df_p[df_p['Mcap_Numeric'] >= min_mcap].copy()
-
             if enable_rs or enable_macd or enable_sma:
-                # 2) 技術指標計算
                 progress_bar.progress(0)
-                indicators = calculate_all_indicators(
-                    final_df['Ticker'].tolist(),
-                    sma_short, sma_long, close_condition,
-                    _progress_bar=progress_bar,
-                    _status_text=status_text
-                )
-
+                indicators = calculate_all_indicators(final_df['Ticker'].tolist(), sma_short, sma_long, close_condition, _progress_bar=progress_bar, _status_text=status_text)
                 final_df['RS_階段'] = final_df['Ticker'].map(lambda x: indicators.get(x, {}).get('RS', '無'))
                 final_df['MACD_階段'] = final_df['Ticker'].map(lambda x: indicators.get(x, {}).get('MACD', '無'))
                 final_df['SMA多頭'] = final_df['Ticker'].map(lambda x: indicators.get(x, {}).get('SMA_Trend', False))
-
-                # 3) 根據 UI 選項過濾
-                if enable_sma:
-                    final_df = final_df[final_df['SMA多頭'] == True]
-                if enable_rs:
-                    final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
-                if enable_macd:
-                    final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
-
+                if enable_sma: final_df = final_df[final_df['SMA多頭'] == True]
+                if enable_rs: final_df = final_df[final_df['RS_階段'].isin(selected_rs)]
+                if enable_macd: final_df = final_df[final_df['MACD_階段'].isin(selected_macd)]
                 if len(final_df) > 0:
-                    # 4) 抓取基本面 + Sales
                     progress_bar.progress(0)
-                    fund_df = fetch_fundamentals(
-                        final_df['Ticker'].tolist(),
-                        _progress_bar=progress_bar,
-                        _status_text=status_text
-                    )
+                    fund_df = fetch_fundamentals(final_df['Ticker'].tolist(), _progress_bar=progress_bar, _status_text=status_text)
                     final_df = pd.merge(final_df, fund_df, on='Ticker', how='left')
-
-                    # ========= Sales 欄位處理 =========
-                    def _fmt_sales(val):
-                        try:
-                            if pd.isna(val):
-                                return 'N/A'
-                            s = str(val).upper().replace(' ', '')
-                            # 假設從 Finviz 來的是類似 "23.4B"、"850M"
-                            if s.endswith('B') or s.endswith('M'):
-                                return f"${s}"
-                            return s
-                        except:
-                            return str(val)
-
-                    if 'Sales' in final_df.columns:
-                        final_df['Sales'] = final_df['Sales'].apply(_fmt_sales)
-
-                    status_text.markdown('✅ **全市場掃描搞掂！**')
-                    progress_bar.progress(100)
+                    status_text.markdown('✅ **全市場掃描搞掂！**'); progress_bar.progress(100)
                     st.success(f'成功搵到 {len(final_df)} 隻潛力股票。')
-
-                    # 5) 顯示結果表（已加入 Sales 欄位）
-                    cols = ['Ticker'] + [
-                        c for c in [
-                            'RS_階段',
-                            'MACD_階段',
-                            'Company',
-                            'Sector',
-                            'Market Cap',
-                            'Sales',                 # 🆕 新增營收欄位
-                            'EPS (近4季)',
-                            'EPS Growth (QoQ)',
-                            'Sales Growth (QoQ)',
-                        ]
-                        if c in final_df.columns
-                    ]
+                    
+                    # 補回 Sales (近4季) 同 Sales Growth (QoQ)
+                    cols = ['Ticker'] + [c for c in ['RS_階段', 'MACD_階段', 'Company', 'Sector', 'Market Cap', 'EPS (近4季)', 'EPS Growth (QoQ)', 'Sales (近4季)', 'Sales Growth (QoQ)'] if c in final_df.columns]
                     st.dataframe(final_df[cols], use_container_width=True, hide_index=True)
                 else:
-                    status_text.markdown('✅ **全市場掃描搞掂！**')
-                    progress_bar.progress(100)
+                    status_text.markdown('✅ **全市場掃描搞掂！**'); progress_bar.progress(100)
                     st.warning('⚠️ 搵唔到完全滿足條件嘅股票。')
         else:
             st.warning("⚠️ 暫時攞唔到 Finviz 股票清單。")
+
+elif app_mode == '📅 財報與經濟日曆 (Upcoming Events)':
+    st.title('📅 財報與經濟日曆 (Upcoming Events)')
+    
+    st.markdown('### 🌐 重大經濟數據與央行日程 (Macro Events)')
+    macro_df = fetch_macro_events()
+    st.dataframe(macro_df, use_container_width=True, hide_index=True)
+    
+    if st.button('🧠 AI 預測大事影響', type='primary'):
+        with st.spinner("AI 正在深度分析近期宏觀數據對市場嘅影響..."):
+            ai_macro_analysis = analyze_upcoming_events_ai(macro_df)
+            with st.container(border=True):
+                st.markdown(ai_macro_analysis)
+
+    st.markdown('---')
+    
+    st.markdown('### 📊 焦點科技股財報預告')
+    with st.spinner("抓取緊熱門科技股下期財報日子..."):
+        hot_tickers = ['NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AMD', 'PLTR', 'SMCI']
+        earnings_df = fetch_stock_earnings(hot_tickers)
+        st.dataframe(earnings_df, use_container_width=True, hide_index=True)
+        st.caption("提示：AMC 代表盤後公佈，BMO 代表盤前公佈。")
+
+    st.markdown('---')
+    
+    st.markdown('### 🔍 個股財報查詢')
+    col_s1, col_s2 = st.columns([3, 1])
+    with col_s1:
+        search_ticker = st.text_input("輸入美股代號 (例如: AVGO, CRWD):", key="search_er").upper().strip()
+    with col_s2:
+        st.write("")
+        st.write("")
+        search_btn = st.button("查業績日子", use_container_width=True)
+        
+    if search_btn and search_ticker:
+        with st.spinner(f"搵緊 {search_ticker} 嘅財報資料..."):
+            res = fetch_stock_earnings([search_ticker])
+            date_val = res.iloc[0]['下期財報日子 (美東)']
+            if date_val and date_val != "即將公佈 / N/A":
+                st.success(f"**{search_ticker}** 下次公佈財報日子大約係: **{date_val}** (美東時間)")
+            else:
+                st.warning(f"暫時未能確認 **{search_ticker}** 嘅下次財報日子，請稍後再試。")
 
 elif app_mode == '📰 近月 AI 洞察 (廣東話版)':
     st.title('📰 近月 AI 新聞深度分析')
