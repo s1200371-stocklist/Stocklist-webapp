@@ -1,3 +1,4 @@
+
 import os, re, json, time, random, datetime, requests
 import pandas as pd
 import streamlit as st
@@ -855,106 +856,216 @@ def _perf_badge(val):
             f"border-radius:4px;font-size:0.78rem;font-weight:bold'>"
             f"{arrow}{abs(val):.1f}%</span>")
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _robust_json_parse(raw):
-    """強力 JSON 解析，容錯多種格式"""
-    import re, json
-    if not raw or not isinstance(raw, str):
-        return None
-    # 過濾 HTML 錯誤頁
-    if raw.strip().startswith('<!DOCTYPE') or raw.strip().startswith('<html'):
-        return None
-    # 嘗試多種 pattern
-    patterns = [
-        r'```json\s*(.*?)\s*```',
-        r'```\s*([\[{].*?[}\]])\s*```',
-        r'([\[{][\s\S]*[}\]])',
-    ]
-    for p in patterns:
-        m = re.search(p, raw, re.DOTALL)
-        if m:
-            chunk = m.group(1).strip()
-            # 修復常見 JSON 錯誤：末尾多餘逗號
-            chunk = re.sub(r',\s*([}\]])', r'\1', chunk)
-            try:
-                return json.loads(chunk)
-            except:
-                pass
-    # 直接 parse 全文
-    text = raw.strip()
-    text = re.sub(r',\s*([}\]])', r'\1', text)
-    try:
-        return json.loads(text)
-    except:
-        pass
-    return None
+# ============================================================
+# 板塊 ETF 定義 - 用真實 ETF 5日表現判斷熱門板塊
+# ============================================================
+SECTOR_ETF_MAP = {
+    '🤖 人工智能 AI':    {
+        'etf': 'AIQ', 'keywords': ['ai','artificial intelligence','openai','llm','copilot','gemini','claude','generative','palantir','chatgpt'],
+        'stocks': {'PLTR':'Palantir','AI':'C3.ai','MSFT':'Microsoft','GOOGL':'Google','META':'Meta','SOUN':'SoundHound','BBAI':'BigBear.ai'}
+    },
+    '⚡ 晶片/半導體': {
+        'etf': 'SOXX', 'keywords': ['chip','semiconductor','nvidia','gpu','h100','blackwell','wafer','tsmc','qualcomm','arm'],
+        'stocks': {'NVDA':'NVIDIA','AMD':'AMD','AVGO':'Broadcom','AMAT':'Applied Materials','ARM':'ARM','QCOM':'Qualcomm','INTC':'Intel'}
+    },
+    '🗄️ 數據儲存/SSD': {
+        'etf': 'MU', 'keywords': ['storage','ssd','nand','flash','memory','hdd','western digital','micron','seagate'],
+        'stocks': {'MU':'Micron','WDC':'Western Digital','SNDK':'SanDisk','STX':'Seagate','PSTG':'Pure Storage','NTAP':'NetApp'}
+    },
+    '❄️ 冷卻/電力基建': {
+        'etf': 'VRT', 'keywords': ['cooling','data center power','vertiv','supermicro','eaton','ge vernova','liquid cooling','power infrastructure'],
+        'stocks': {'VRT':'Vertiv','SMCI':'SuperMicro','ETN':'Eaton','GEV':'GE Vernova','PWR':'Quanta','HUBB':'Hubbell'}
+    },
+    '☁️ 雲端/數據中心': {
+        'etf': 'SKYY', 'keywords': ['cloud','aws','azure','google cloud','data center','snowflake','datadog','cloudflare','saas'],
+        'stocks': {'AMZN':'Amazon','MSFT':'Microsoft','GOOGL':'Google','SNOW':'Snowflake','DDOG':'Datadog','NET':'Cloudflare','CRM':'Salesforce'}
+    },
+    '🛡️ 網絡安全': {
+        'etf': 'CIBR', 'keywords': ['cybersecurity','security','crowdstrike','hacker','breach','ransomware','firewall','zero trust'],
+        'stocks': {'CRWD':'CrowdStrike','PANW':'Palo Alto','ZS':'Zscaler','S':'SentinelOne','OKTA':'Okta','FTNT':'Fortinet','CYBR':'CyberArk'}
+    },
+    '🤖 人形機器人': {
+        'etf': 'BOTZ', 'keywords': ['robot','humanoid','autonomous','tesla optimus','automation','robotics','servo','mechanical arm'],
+        'stocks': {'TSLA':'Tesla','NVDA':'NVIDIA','ABB':'ABB','HON':'Honeywell','TER':'Teradyne','ISRG':'Intuitive','FANUY':'Fanuc'}
+    },
+    '⚛️ 核能/新能源': {
+        'etf': 'NLR', 'keywords': ['nuclear','uranium','constellation','vistra','cameco','oklo','smr','fission','reactor','clean energy'],
+        'stocks': {'CEG':'Constellation','VST':'Vistra','CCJ':'Cameco','OKLO':'Oklo','NNE':'Nano Nuclear','DNN':'Denison'}
+    },
+    '🚀 太空/國防': {
+        'etf': 'ITA', 'keywords': ['space','rocket','satellite','defense','pentagon','military','spacex','rocketlab','asts','starlink','drone'],
+        'stocks': {'RKLB':'Rocket Lab','ASTS':'AST SpaceMobile','KTOS':'Kratos','LMT':'Lockheed','NOC':'Northrop','PLTR':'Palantir','BA':'Boeing'}
+    },
+    '💊 生物科技': {
+        'etf': 'XBI', 'keywords': ['biotech','pharma','drug','fda','clinical','cancer','crispr','genomics','glp-1','ozempic','mrna'],
+        'stocks': {'RXRX':'Recursion','CRSP':'CRISPR','ILMN':'Illumina','MRNA':'Moderna','GILD':'Gilead','REGN':'Regeneron','NVAX':'Novavax'}
+    },
+}
 
-@st.cache_data(ttl=3600, show_spinner=False)
+# 完整關係庫 - 30條，動態篩選
+FULL_RELATIONS_DB = [
+    {"company_a":"NVDA","company_b":"MSFT","type":"合作","desc":"Azure H100/B200 GPU 供應","strength":"強"},
+    {"company_a":"NVDA","company_b":"GOOGL","type":"合作","desc":"GCP GPU 雲端合作","strength":"強"},
+    {"company_a":"NVDA","company_b":"AMZN","type":"合作","desc":"AWS GPU 實例供應","strength":"強"},
+    {"company_a":"NVDA","company_b":"META","type":"客戶","desc":"META 大量採購 H100/B200","strength":"強"},
+    {"company_a":"NVDA","company_b":"PLTR","type":"合作","desc":"AI 平台聯合部署","strength":"中"},
+    {"company_a":"NVDA","company_b":"TSLA","type":"供應商","desc":"FSD 訓練晶片供應商","strength":"中"},
+    {"company_a":"AMD","company_b":"NVDA","type":"競爭","desc":"GPU 市場直接競爭","strength":"強"},
+    {"company_a":"AMD","company_b":"MSFT","type":"合作","desc":"Azure MI300X 部署","strength":"中"},
+    {"company_a":"AVGO","company_b":"GOOGL","type":"合作","desc":"Google TPU 晶片設計","strength":"強"},
+    {"company_a":"AVGO","company_b":"META","type":"客戶","desc":"Meta 自研 AI 晶片 MTIA","strength":"強"},
+    {"company_a":"VRT","company_b":"NVDA","type":"客戶","desc":"數據中心液冷系統","strength":"強"},
+    {"company_a":"VRT","company_b":"MSFT","type":"客戶","desc":"Azure 數據中心冷卻","strength":"強"},
+    {"company_a":"VRT","company_b":"AMZN","type":"客戶","desc":"AWS 數據中心設備","strength":"強"},
+    {"company_a":"SMCI","company_b":"NVDA","type":"合作","desc":"GPU 伺服器整合商","strength":"強"},
+    {"company_a":"MU","company_b":"NVDA","type":"供應商","desc":"HBM3 記憶體供應","strength":"強"},
+    {"company_a":"MU","company_b":"AMD","type":"供應商","desc":"DDR5/GDDR7 供應","strength":"中"},
+    {"company_a":"AMZN","company_b":"MSFT","type":"競爭","desc":"雲端市場主要競爭","strength":"強"},
+    {"company_a":"GOOGL","company_b":"MSFT","type":"競爭","desc":"AI 及雲端全面競爭","strength":"強"},
+    {"company_a":"SNOW","company_b":"NVDA","type":"合作","desc":"GPU 加速數據分析","strength":"中"},
+    {"company_a":"NET","company_b":"MSFT","type":"合作","desc":"Azure 邊緣安全整合","strength":"中"},
+    {"company_a":"CEG","company_b":"MSFT","type":"合作","desc":"核電數據中心供電協議","strength":"強"},
+    {"company_a":"CEG","company_b":"GOOGL","type":"合作","desc":"核能購電長期合約","strength":"強"},
+    {"company_a":"CCJ","company_b":"CEG","type":"供應商","desc":"鈾燃料供應商","strength":"強"},
+    {"company_a":"VST","company_b":"AMZN","type":"合作","desc":"AWS 電力供應協議","strength":"強"},
+    {"company_a":"CRWD","company_b":"MSFT","type":"合作","desc":"Azure 安全整合","strength":"中"},
+    {"company_a":"PANW","company_b":"GOOGL","type":"合作","desc":"GCP 安全服務合作","strength":"中"},
+    {"company_a":"CRWD","company_b":"PANW","type":"競爭","desc":"SIEM/XDR 市場競爭","strength":"強"},
+    {"company_a":"RKLB","company_b":"ASTS","type":"合作","desc":"衛星發射合作夥伴","strength":"中"},
+    {"company_a":"PLTR","company_b":"MSFT","type":"合作","desc":"Azure AI 政府雲合作","strength":"中"},
+    {"company_a":"WDC","company_b":"SNDK","type":"合作","desc":"NAND 閃存業務分拆","strength":"強"},
+]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_hot_sectors_by_etf_performance(headlines: str = ""):
+    """
+    核心邏輯：
+    1. 用 yfinance 抓每個板塊對應 ETF 嘅5日表現（真實市場數據）
+    2. 用新聞標題關鍵字做額外 boost（新聞熱度加分）
+    3. 兩者合併排序，選出最熱門6個板塊
+    4. 對每個板塊，再從個股裡面挑出5日漲幅最強嘅5隻
+    5. 動態篩選相關關係
+    返回: (sector_stocks_dict, relations_list, scores_dict)
+    """
+    import yfinance as yf
+
+    hl_lower = headlines.lower()
+
+    # Step 1: 抓 ETF 5日表現
+    etf_list = [v['etf'] for v in SECTOR_ETF_MAP.values()]
+    try:
+        etf_data = yf.download(etf_list, period='7d', progress=False, auto_adjust=True, 
+                               group_by='ticker', threads=True)['Close']
+    except Exception:
+        etf_data = None
+
+    # Step 2: 計算每個板塊分數 = ETF漲幅(%) + 新聞關鍵字命中數*2
+    scored = []
+    for sname, sdata in SECTOR_ETF_MAP.items():
+        # ETF performance score
+        etf_score = 0.0
+        if etf_data is not None:
+            try:
+                col = etf_data[sdata['etf']].dropna()
+                if len(col) >= 2:
+                    n = min(5, len(col)-1)
+                    etf_score = float((col.iloc[-1] / col.iloc[-n-1] - 1) * 100)
+            except Exception:
+                pass
+
+        # News keyword score
+        news_score = sum(2 for kw in sdata.get('keywords', []) if kw in hl_lower)
+
+        total_score = etf_score + news_score
+        scored.append((total_score, etf_score, news_score, sname, sdata))
+
+    # Step 3: 排序，選 top 6
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top6 = scored[:6]
+
+    # Step 4: 對每個板塊，抓個股表現，挑最強5隻
+    all_individual = list(set(
+        t for _, _, _, _, sd in top6
+        for t in sd['stocks'].keys()
+    ))
+    try:
+        stock_data = yf.download(all_individual, period='7d', progress=False,
+                                  auto_adjust=True, group_by='ticker', threads=True)['Close']
+    except Exception:
+        stock_data = None
+
+    sector_stocks = {}
+    scores_info = {}
+    for i, (total, etf_perf, news_sc, sname, sdata) in enumerate(top6):
+        # 為每隻股票計算5日表現
+        stock_perfs = {}
+        for ticker in sdata['stocks'].keys():
+            try:
+                col = (stock_data[ticker] if stock_data is not None else None)
+                if col is not None:
+                    col = col.dropna()
+                    if len(col) >= 2:
+                        n = min(5, len(col)-1)
+                        stock_perfs[ticker] = float((col.iloc[-1] / col.iloc[-n-1] - 1) * 100)
+            except Exception:
+                stock_perfs[ticker] = 0.0
+
+        # 按5日表現排序，選最強5隻
+        sorted_stocks = sorted(sdata['stocks'].items(),
+                                key=lambda kv: stock_perfs.get(kv[0], 0.0), reverse=True)
+        top5_stocks = dict(sorted_stocks[:5])
+
+        sector_stocks[sname] = {
+            'color': SECTOR_COLORS[i % len(SECTOR_COLORS)],
+            'desc': f"ETF {sdata['etf']} {etf_perf:+.1f}%",
+            'stocks': top5_stocks,
+            'etf_perf': etf_perf,
+        }
+        scores_info[sname] = {
+            'total': total, 'etf': etf_perf, 'news': news_sc,
+            'etf_ticker': sdata['etf']
+        }
+
+    # Step 5: 動態篩選關係
+    active_tickers = set(
+        t for sd in sector_stocks.values() for t in sd['stocks'].keys()
+    )
+    relations = [
+        r for r in FULL_RELATIONS_DB
+        if r.get('company_a') in active_tickers and r.get('company_b') in active_tickers
+    ]
+    if len(relations) < 8:
+        relations = [
+            r for r in FULL_RELATIONS_DB
+            if r.get('company_a') in active_tickers or r.get('company_b') in active_tickers
+        ]
+    if len(relations) < 5:
+        relations = FULL_RELATIONS_DB[:20]
+
+    return sector_stocks, relations, scores_info
+
+
+# Legacy function wrappers (保持 cache.clear() 兼容)
+@st.cache_data(ttl=1800, show_spinner=False)
 def ai_generate_sectors_only(headlines: str):
-    """呼叫 1: 只生成板塊清單（簡單JSON，成功率高）"""
-    sys_p = """你係美股板塊專家。根據新聞，返回今日最熱門的5-6個板塊。
-只返回 JSON array，格式：
-[{"name":"板塊名","emoji":"emoji","desc":"描述","stocks":{"TICKER":"公司名"}}]
-每個板塊包含5-6隻代表股票。只返回JSON，不要其他文字。"""
-    raw = call_pollinations([
-        {'role': 'system', 'content': sys_p},
-        {'role': 'user',   'content': f"新聞：\n{headlines}"}
-    ], timeout=50)
-    data = _robust_json_parse(raw)
-    if isinstance(data, list) and len(data) >= 3:
-        return data, True
     return None, False
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def ai_generate_relations_only(headlines: str, ticker_list: str):
-    """呼叫 2: 只生成公司關係（獨立，唔依賴板塊結果）"""
-    sys_p = """你係美股分析師。根據新聞及以下股票清單，生成公司間關係。
-只返回 JSON array，格式：
-[{"company_a":"TICKER","company_b":"TICKER","type":"合作","desc":"描述20字內","strength":"強"}]
-type 只可以係：合作、供應商、客戶、競爭、投資
-生成15-20條關係，涵蓋 AI晶片、數據中心、能源、安全等熱門領域。只返回JSON。"""
-    raw = call_pollinations([
-        {'role': 'system', 'content': sys_p},
-        {'role': 'user',   'content': f"新聞：\n{headlines}\n\n相關股票：{ticker_list}"}
-    ], timeout=60)
-    data = _robust_json_parse(raw)
-    if isinstance(data, list) and len(data) >= 5:
-        return data, True
     return None, False
 
 def ai_generate_company_relations(headlines: str):
-    """
-    拆成兩次獨立 AI 呼叫，提高成功率：
-    呼叫1: 板塊清單
-    呼叫2: 公司關係
-    """
-    # 固定常用 ticker 列表給關係生成參考
-    default_tickers = "NVDA,AMD,MSFT,GOOGL,AMZN,META,AAPL,PLTR,VRT,SMCI,MU,AVGO,ARM,CRWD,PANW,CEG,VST,CCJ,RKLB,ASTS,TSLA,SNOW,DDOG,CRM,NET"
+    """主入口：用 ETF 表現 + 新聞關鍵字選板塊，完全唔依賴 AI"""
+    sector_stocks, relations, scores = get_hot_sectors_by_etf_performance(headlines)
+    result = {
+        'sector_stocks': sector_stocks,
+        'relations': relations,
+        'scores': scores,
+        '_source': 'etf_realtime',
+    }
+    return result, True
 
-    sectors, sec_ok   = ai_generate_sectors_only(headlines)
-    # ✅ 如果板塊 AI 成功，用板塊裡所有 tickers 做關係 AI 的輸入
-    if sec_ok and sectors:
-        dyn_tickers = sorted({
-            t.upper().strip()
-            for s in sectors
-            for t in (s.get("stocks") or {}).keys()
-            if t
-        })
-        ticker_list = ",".join(dyn_tickers) if dyn_tickers else default_tickers
-    else:
-        ticker_list = default_tickers
-
-    relations, rel_ok = ai_generate_relations_only(headlines, ticker_list)
-
-    result = {}
-    if sec_ok:
-        result['sectors'] = sectors
-    if rel_ok:
-        result['relations'] = relations
-
-    if sec_ok or rel_ok:
-        return result, True
-    return None, False
 
 # 備用關係數據
 FALLBACK_RELATIONS = [
@@ -1054,8 +1165,7 @@ def render_hot_sectors_module():
     with col_ctrl2:
         st.markdown('<br>', unsafe_allow_html=True)
         if st.button('🔄 強制刷新', use_container_width=True, key='refresh_sectors'):
-            ai_generate_sectors_only.clear()
-            ai_generate_relations_only.clear()
+            get_hot_sectors_by_etf_performance.clear()
             analyze_hot_sectors_ai_dynamic.clear()
             fetch_sector_performance_dynamic.clear()
             st.rerun()
@@ -1072,28 +1182,46 @@ def render_hot_sectors_module():
     with st.spinner('🤖 AI 分析板塊及公司關係...'):
         ai_data, ai_ok = ai_generate_company_relations(headlines)
 
-    raw_sectors   = ai_data.get('sectors',   []) if ai_data else []
-    raw_relations = ai_data.get('relations', []) if ai_data else []
+    # 從新結果格式提取數據
+    sector_stocks = ai_data.get('sector_stocks', {}) if ai_data else {}
+    relations     = ai_data.get('relations', [])     if ai_data else []
+    scores_info   = ai_data.get('scores', {})        if ai_data else {}
 
-    sector_stocks = build_sector_stocks_from_ai(raw_sectors) if raw_sectors else build_sector_stocks_fallback()
-    relations     = raw_relations if raw_relations else FALLBACK_RELATIONS
+    if not sector_stocks:
+        sector_stocks = build_sector_stocks_fallback()
+    if not relations:
+        relations = FALLBACK_RELATIONS[:20]
 
-    sec_src = f"✅ AI識別 {len(raw_sectors)} 個板塊" if raw_sectors else "⚠️ 預設板塊"
-    rel_src = f"✅ AI生成 {len(raw_relations)} 條關係" if raw_relations else "⚠️ 預設關係數據"
-    if raw_sectors and raw_relations:
-        st.success(f"📊 {sec_src}　｜　🔗 {rel_src}")
-    elif raw_sectors or raw_relations:
-        st.warning(f"📊 {sec_src}　｜　🔗 {rel_src}")
-    else:
-        st.error(f"📊 {sec_src}　｜　🔗 {rel_src}")
+    n_sec = len(sector_stocks)
+    n_rel = len(relations)
+    st.success(f"📊 📡 實時 ETF 數據選出 **{n_sec}** 個熱門板塊　｜　🔗 動態篩選 **{n_rel}** 條關係")
 
-    with st.expander("🔧 Debug: 查看 AI 原始輸出（出問題時展開）", expanded=False):
-        sec_raw, _ = ai_generate_sectors_only(headlines)
-        rel_raw, _ = ai_generate_relations_only(headlines, "NVDA,AMD,MSFT,GOOGL,AMZN,PLTR,VRT,CRWD,CEG")
-        st.caption("板塊 AI 原始返回:")
-        st.code(str(sec_raw)[:800] if sec_raw else "None / 解析失敗")
-        st.caption("關係 AI 原始返回:")
-        st.code(str(rel_raw)[:800] if rel_raw else "None / 解析失敗")
+    # 板塊排名展示
+    if scores_info:
+        cols_score = st.columns(min(n_sec, 6))
+        for col, (sname, info) in zip(cols_score, sorted(scores_info.items(), key=lambda x: x[1]['total'], reverse=True)):
+            etf_p = info.get('etf', 0)
+            col.metric(
+                label=sname.split(' ',1)[-1][:12],
+                value=f"{info.get('etf_ticker','')}",
+                delta=f"{etf_p:+.1f}%"
+            )
+
+    with st.expander("🔍 板塊選取詳情（ETF 表現 + 新聞評分）", expanded=False):
+        if scores_info:
+            import pandas as pd
+            df_scores = pd.DataFrame([
+                {
+                    '板塊': sname,
+                    'ETF': info.get('etf_ticker',''),
+                    'ETF 5日%': f"{info.get('etf',0):+.2f}%",
+                    '新聞分': info.get('news', 0),
+                    '總分': f"{info.get('total',0):.2f}",
+                }
+                for sname, info in sorted(scores_info.items(), key=lambda x: x[1]['total'], reverse=True)
+            ])
+            st.dataframe(df_scores, use_container_width=True, hide_index=True)
+        st.caption(f"關係條數：{len(relations)}　活躍 Ticker 數：{len(set(t for sd in sector_stocks.values() for t in sd['stocks'].keys()))}")
 
     # ── Step 3: 抓股票表現 ──
     all_tickers = list(set(
