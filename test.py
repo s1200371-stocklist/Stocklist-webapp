@@ -1,4 +1,4 @@
-
+由 Perplexity 製作
 import os, re, json, time, random, datetime, requests
 import pandas as pd
 import streamlit as st
@@ -856,91 +856,218 @@ def _perf_badge(val):
             f"border-radius:4px;font-size:0.78rem;font-weight:bold'>"
             f"{arrow}{abs(val):.1f}%</span>")
 
-def _extract_json_from_pollinations(raw):
+# ============================================================
+# 全面板塊定義（10個板塊，每個6-7隻股票）
+# ============================================================
+ALL_SECTORS_DB = {
+    '🤖 人工智能 AI': {
+        'keywords': ['ai','artificial intelligence','openai','chatgpt','llm','copilot','gemini','claude','generative','palantir','pltr','machine learning'],
+        'stocks': {'PLTR':'Palantir','AI':'C3.ai','MSFT':'Microsoft','GOOGL':'Google','META':'Meta','SOUN':'SoundHound','BBAI':'BigBear.ai'}
+    },
+    '⚡ 晶片/半導體': {
+        'keywords': ['chip','semiconductor','nvidia','amd','broadcom','gpu','h100','blackwell','wafer','tsmc','intel','qualcomm','arm'],
+        'stocks': {'NVDA':'NVIDIA','AMD':'AMD','AVGO':'Broadcom','AMAT':'Applied Materials','ARM':'ARM','QCOM':'Qualcomm','INTC':'Intel'}
+    },
+    '🗄️ 數據儲存/SSD': {
+        'keywords': ['storage','ssd','nand','flash','memory','hdd','disk','western digital','micron','seagate','solidigm'],
+        'stocks': {'MU':'Micron','WDC':'Western Digital','SNDK':'SanDisk','STX':'Seagate','PSTG':'Pure Storage','NTAP':'NetApp','NANO':'Nano Dimension'}
+    },
+    '❄️ 冷卻/電力基建': {
+        'keywords': ['cooling','data center power','vertiv','supermicro','eaton','ge vernova','power infrastructure','liquid cooling','pdu','ups'],
+        'stocks': {'VRT':'Vertiv','SMCI':'SuperMicro','ETN':'Eaton','GEV':'GE Vernova','HUBB':'Hubbell','AYI':'Acuity','PWR':'Quanta'}
+    },
+    '☁️ 雲端/數據中心': {
+        'keywords': ['cloud','aws','azure','google cloud','data center','snowflake','datadog','salesforce','cloudflare','saas','paas'],
+        'stocks': {'AMZN':'Amazon','MSFT':'Microsoft','GOOGL':'Google','SNOW':'Snowflake','DDOG':'Datadog','NET':'Cloudflare','CRM':'Salesforce'}
+    },
+    '🛡️ 網絡安全': {
+        'keywords': ['cybersecurity','security','crowdstrike','palo alto','hacker','breach','ransomware','firewall','zero trust','soc','siem','threat'],
+        'stocks': {'CRWD':'CrowdStrike','PANW':'Palo Alto','ZS':'Zscaler','S':'SentinelOne','OKTA':'Okta','FTNT':'Fortinet','CYBR':'CyberArk'}
+    },
+    '🤖 人形機器人': {
+        'keywords': ['robot','humanoid','autonomous','tesla optimus','automation','figure','boston dynamics','robotics','mechanical','servo'],
+        'stocks': {'TSLA':'Tesla','NVDA':'NVIDIA','ABB':'ABB','HON':'Honeywell','TER':'Teradyne','ISRG':'Intuitive','FANUY':'Fanuc'}
+    },
+    '⚛️ 核能/新能源': {
+        'keywords': ['nuclear','uranium','constellation','vistra','cameco','oklo','nuscale','smr','fission','reactor','energy transition','clean energy'],
+        'stocks': {'CEG':'Constellation','VST':'Vistra','CCJ':'Cameco','OKLO':'Oklo','NNE':'Nano Nuclear','DNN':'Denison','NLR':'NLR ETF'}
+    },
+    '🚀 太空/國防': {
+        'keywords': ['space','rocket','satellite','defense','pentagon','military','lockheed','spacex','rocketlab','asts','starlink','drone','missile'],
+        'stocks': {'RKLB':'Rocket Lab','ASTS':'AST SpaceMobile','KTOS':'Kratos','PLTR':'Palantir','LMT':'Lockheed','NOC':'Northrop','BA':'Boeing'}
+    },
+    '💊 生物科技/醫療AI': {
+        'keywords': ['biotech','pharma','drug','fda','clinical','cancer','crispr','genomics','weight loss','glp-1','ozempic','mrna','vaccine'],
+        'stocks': {'RXRX':'Recursion','CRSP':'CRISPR','ILMN':'Illumina','MRNA':'Moderna','NVAX':'Novavax','GILD':'Gilead','REGN':'Regeneron'}
+    },
+}
+
+# ============================================================
+# 完整靜態關係庫（30條，涵蓋主要板塊）
+# ============================================================
+FULL_RELATIONS_DB = [
+    {"company_a":"NVDA","company_b":"MSFT","type":"合作","desc":"Azure H100/B200 GPU 供應","strength":"強"},
+    {"company_a":"NVDA","company_b":"GOOGL","type":"合作","desc":"GCP GPU 雲端合作","strength":"強"},
+    {"company_a":"NVDA","company_b":"AMZN","type":"合作","desc":"AWS GPU 實例供應","strength":"強"},
+    {"company_a":"NVDA","company_b":"META","type":"客戶","desc":"META 大量採購 H100/B200","strength":"強"},
+    {"company_a":"NVDA","company_b":"PLTR","type":"合作","desc":"AI 平台聯合部署","strength":"中"},
+    {"company_a":"NVDA","company_b":"TSLA","type":"供應商","desc":"FSD 訓練晶片供應商","strength":"中"},
+    {"company_a":"AMD","company_b":"NVDA","type":"競爭","desc":"GPU 市場直接競爭","strength":"強"},
+    {"company_a":"AMD","company_b":"MSFT","type":"合作","desc":"Azure MI300X 部署","strength":"中"},
+    {"company_a":"AVGO","company_b":"GOOGL","type":"合作","desc":"Google TPU 晶片設計","strength":"強"},
+    {"company_a":"AVGO","company_b":"META","type":"客戶","desc":"Meta 自研 AI 晶片 MTIA","strength":"強"},
+    {"company_a":"VRT","company_b":"NVDA","type":"客戶","desc":"數據中心液冷系統","strength":"強"},
+    {"company_a":"VRT","company_b":"MSFT","type":"客戶","desc":"Azure 數據中心冷卻","strength":"強"},
+    {"company_a":"VRT","company_b":"AMZN","type":"客戶","desc":"AWS 數據中心設備","strength":"強"},
+    {"company_a":"SMCI","company_b":"NVDA","type":"合作","desc":"GPU 伺服器整合商","strength":"強"},
+    {"company_a":"MU","company_b":"NVDA","type":"供應商","desc":"HBM3 記憶體供應","strength":"強"},
+    {"company_a":"MU","company_b":"AMD","type":"供應商","desc":"DDR5/GDDR7 供應","strength":"中"},
+    {"company_a":"AMZN","company_b":"MSFT","type":"競爭","desc":"雲端市場主要競爭","strength":"強"},
+    {"company_a":"GOOGL","company_b":"MSFT","type":"競爭","desc":"AI 及雲端全面競爭","strength":"強"},
+    {"company_a":"SNOW","company_b":"NVDA","type":"合作","desc":"GPU 加速數據分析","strength":"中"},
+    {"company_a":"NET","company_b":"MSFT","type":"合作","desc":"Azure 邊緣安全整合","strength":"中"},
+    {"company_a":"CEG","company_b":"MSFT","type":"合作","desc":"核電數據中心供電協議","strength":"強"},
+    {"company_a":"CEG","company_b":"GOOGL","type":"合作","desc":"核能購電長期合約","strength":"強"},
+    {"company_a":"CCJ","company_b":"CEG","type":"供應商","desc":"鈾燃料供應商","strength":"強"},
+    {"company_a":"VST","company_b":"AMZN","type":"合作","desc":"AWS 電力供應協議","strength":"強"},
+    {"company_a":"CRWD","company_b":"MSFT","type":"合作","desc":"Azure 安全整合","strength":"中"},
+    {"company_a":"PANW","company_b":"GOOGL","type":"合作","desc":"GCP 安全服務合作","strength":"中"},
+    {"company_a":"CRWD","company_b":"PANW","type":"競爭","desc":"SIEM/XDR 市場競爭","strength":"強"},
+    {"company_a":"RKLB","company_b":"ASTS","type":"合作","desc":"衛星發射合作夥伴","strength":"中"},
+    {"company_a":"PLTR","company_b":"MSFT","type":"合作","desc":"Azure AI 政府雲合作","strength":"中"},
+    {"company_a":"WDC","company_b":"SNDK","type":"合作","desc":"NAND 閃存業務分拆","strength":"強"},
+]
+
+def _extract_json_list(raw_response):
     """
-    專門處理 Pollinations 返回格式，直接從原始 response 提取 JSON array。
-    完全繞過 final_text_sanitize，避免清理過程破壞 JSON 結構。
+    直接從 Pollinations 原始 response 提取 JSON array。
     支援三種格式：
     1. {"role":"assistant","reasoning":"...","content":"[JSON]"}
     2. ```json\n[JSON]\n```
-    3. 純 JSON array
+    3. 純 JSON array / 帶前置文字
     """
     import re, json
-    if not raw or not isinstance(raw, str):
+    if not raw_response or not isinstance(raw_response, str):
         return None
-    s = raw.strip()
-    # 過濾錯誤訊息
+    s = raw_response.strip()
     if s.startswith('⚠️') or 'AI 逾時' in s or 'AI 暫時繁忙' in s:
         return None
     if s.startswith('<!DOCTYPE') or s.startswith('<html'):
         return None
 
-    # Strategy 1: 解析外層 JSON wrapper，取出 content 字段
-    text_to_parse = s
+    # Step 1: 嘗試解析外層 JSON wrapper (Pollinations 特有格式)
+    text_inner = s
     try:
         outer = json.loads(s)
         if isinstance(outer, list) and len(outer) > 0:
-            return outer  # 直接係 list
+            return outer
         if isinstance(outer, dict):
-            # 嘗試 choices[0].message.content (OpenAI 格式)
+            # OpenAI choices 格式
             choices = outer.get('choices', [])
             if choices and isinstance(choices, list):
                 msg = choices[0].get('message', {})
                 c = msg.get('content', '') if isinstance(msg, dict) else ''
-                if c and isinstance(c, str):
-                    text_to_parse = c.strip()
             else:
-                # 直接取 content 字段
                 c = outer.get('content', '')
-                if c and isinstance(c, str):
-                    text_to_parse = c.strip()
-                elif isinstance(c, list):
-                    return c
-    except:
+            if isinstance(c, list) and len(c) > 0:
+                return c
+            if isinstance(c, str) and c.strip():
+                text_inner = c.strip()
+    except Exception:
         pass
 
-    # Strategy 2: 從 text_to_parse 裏面用 regex 提取 JSON array
-    patterns = [
+    # Step 2: regex 提取 JSON array
+    for pattern in [
         r'```json\s*([\s\S]*?)\s*```',
         r'```\s*([\[{][\s\S]*?[}\]])\s*```',
-        r'(\[[\s\S]*\])',  # 貪婪匹配最長 array
-    ]
-    for p in patterns:
-        m = re.search(p, text_to_parse, re.DOTALL)
+        r'(\[[\s\S]*\])',
+    ]:
+        m = re.search(pattern, text_inner, re.DOTALL)
         if m:
             chunk = m.group(1).strip()
             chunk = re.sub(r',\s*([}\]])', r'\1', chunk)
             try:
-                result = json.loads(chunk)
-                if isinstance(result, list) and len(result) > 0:
-                    return result
-            except:
+                r = json.loads(chunk)
+                if isinstance(r, list) and len(r) > 0:
+                    return r
+            except Exception:
                 pass
 
-    # Strategy 3: 直接 parse text_to_parse
-    txt = text_to_parse.strip()
+    # Step 3: 直接 parse
+    txt = text_inner.strip()
     txt = re.sub(r',\s*([}\]])', r'\1', txt)
     try:
-        result = json.loads(txt)
-        if isinstance(result, list):
-            return result
-    except:
+        r = json.loads(txt)
+        if isinstance(r, list):
+            return r
+    except Exception:
         pass
-
     return None
+
+
+def _smart_select_sectors(headlines: str) -> dict:
+    """
+    根據新聞標題關鍵字，從 ALL_SECTORS_DB 選出最相關的 5-6 個板塊。
+    完全唔依賴 AI，100% 本地運行。
+    """
+    hl_lower = headlines.lower()
+    scored = []
+    for sname, sdata in ALL_SECTORS_DB.items():
+        score = sum(1 for kw in sdata.get('keywords', []) if kw in hl_lower)
+        scored.append((score, sname, sdata))
+    # 按 score 降序，取前6，最少保底5個
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:6]
+    # 如果全部 score=0，用頭5個（默認最重要板塊）
+    result = {}
+    for i, (score, sname, sdata) in enumerate(top):
+        result[sname] = {
+            'color': SECTOR_COLORS[i % len(SECTOR_COLORS)],
+            'desc': sdata.get('desc', ''),
+            'stocks': dict(list(sdata['stocks'].items())[:6]),
+            'score': score,
+        }
+    return result
+
+
+def _get_dynamic_relations(sector_stocks: dict) -> list:
+    """
+    根據目前選中的板塊 tickers，從 FULL_RELATIONS_DB 篩選相關關係。
+    返回最多25條最相關嘅關係。
+    """
+    active_tickers = set(
+        t.upper()
+        for sd in sector_stocks.values()
+        for t in sd.get('stocks', {}).keys()
+    )
+    # 篩選：company_a 或 company_b 都係 active ticker
+    relevant = [
+        r for r in FULL_RELATIONS_DB
+        if r.get('company_a', '') in active_tickers
+        and r.get('company_b', '') in active_tickers
+    ]
+    # 如果少過10條，放寬條件：只要有一方在 active tickers
+    if len(relevant) < 10:
+        relevant = [
+            r for r in FULL_RELATIONS_DB
+            if r.get('company_a', '') in active_tickers
+            or r.get('company_b', '') in active_tickers
+        ]
+    return relevant[:25]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def ai_generate_sectors_only(headlines: str):
-    """呼叫 1: 只生成板塊清單"""
-    sys_p = """You are a US stock sector expert. Return ONLY a valid JSON array, no explanation, no markdown.
-Format: [{"name":"板塊中文名","emoji":"emoji","desc":"10字描述","stocks":{"TICKER":"公司名",...}}]
-Rules: 5-6 sectors, 5-6 tickers each, only real US stock tickers, only return the JSON array."""
-    raw_response = call_pollinations([
+    """
+    嘗試用 Pollinations AI 生成板塊。
+    如果失敗，fallback 到關鍵字智能匹配。
+    """
+    sys_p = "Return ONLY a JSON array. No explanation. Format: [{name:sector_name_in_chinese, emoji:emoji, desc:10chars, stocks:{TICKER:company_name}}]. Generate 5 hot US stock sectors with 5 tickers each. Return JSON array only, no other text."
+    raw = call_pollinations([
         {'role': 'system', 'content': sys_p},
-        {'role': 'user',   'content': f"Latest news: {headlines[:500]}"}
-    ], timeout=50)
-    data = _extract_json_from_pollinations(raw_response)
+        {'role': 'user',   'content': f"News: {headlines[:400]}"}
+    ], timeout=40)
+    data = _extract_json_list(raw)
     if isinstance(data, list) and len(data) >= 3:
         return data, True
     return None, False
@@ -948,61 +1075,40 @@ Rules: 5-6 sectors, 5-6 tickers each, only real US stock tickers, only return th
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def ai_generate_relations_only(headlines: str, ticker_list: str):
-    """呼叫 2: 只生成公司關係"""
-    sys_p = """You are a US stock analyst. Return ONLY a valid JSON array, no explanation, no markdown.
-Format: [{"company_a":"TICKER","company_b":"TICKER","type":"合作","desc":"brief desc","strength":"強"}]
-type must be one of: 合作,供應商,客戶,競爭,投資
-Generate exactly 8 relations. Only return the JSON array, nothing else."""
-    raw_response = call_pollinations([
-        {'role': 'system', 'content': sys_p},
-        {'role': 'user',   'content': f"News: {headlines[:300]}\nTickers: {ticker_list[:200]}"}
-    ], timeout=45)
-    data = _extract_json_from_pollinations(raw_response)
-    if isinstance(data, list) and len(data) >= 3:
-        return data, True
+    """保留 debug 界面兼容，實際唔再用 Pollinations 生成關係"""
     return None, False
 
 
 def ai_generate_company_relations(headlines: str):
     """
-    拆成兩次獨立 AI 呼叫：
-    呼叫1: 板塊清單
-    呼叫2: 公司關係（帶 retry）
+    主入口：
+    1. 嘗試 AI 生成板塊 (Pollinations)
+    2. AI 失敗 → 用關鍵字智能匹配
+    3. 關係永遠從 FULL_RELATIONS_DB 動態篩選（唔用 AI）
     """
-    import time
-    default_tickers = "NVDA,AMD,MSFT,GOOGL,AMZN,META,AAPL,PLTR,VRT,SMCI,MU,AVGO,ARM,CRWD,PANW,CEG,VST,CCJ,RKLB,ASTS,TSLA,SNOW,DDOG,CRM,NET"
+    # Step 1: 嘗試 AI 板塊
+    ai_sectors, ai_ok = ai_generate_sectors_only(headlines)
 
-    sectors, sec_ok = ai_generate_sectors_only(headlines)
-
-    if sec_ok and sectors:
-        dyn_tickers = sorted({
-            t.upper().strip()
-            for s in sectors
-            for t in (s.get("stocks") or {}).keys()
-            if t
-        })
-        ticker_list = ",".join(dyn_tickers) if dyn_tickers else default_tickers
+    if ai_ok and ai_sectors:
+        sector_stocks = build_sector_stocks_from_ai(ai_sectors)
+        src = 'ai'
     else:
-        ticker_list = default_tickers
+        # Step 2: 關鍵字智能匹配
+        sector_stocks = _smart_select_sectors(headlines)
+        src = 'keyword'
 
-    # 最多 retry 2次
-    relations, rel_ok = None, False
-    for attempt in range(2):
-        relations, rel_ok = ai_generate_relations_only(headlines, ticker_list)
-        if rel_ok:
-            break
-        if attempt == 0:
-            time.sleep(3)
+    # Step 3: 動態篩選關係
+    relations = _get_dynamic_relations(sector_stocks)
+    if not relations:
+        relations = FULL_RELATIONS_DB[:20]
 
-    result = {}
-    if sec_ok:
-        result['sectors'] = sectors
-    if rel_ok:
-        result['relations'] = relations
-
-    if sec_ok or rel_ok:
-        return result, True
-    return None, False
+    result = {
+        'sectors': ai_sectors if ai_ok else list(sector_stocks.items()),
+        'relations': relations,
+        'sector_stocks': sector_stocks,
+        '_source': src,
+    }
+    return result, True
 
 # 備用關係數據
 FALLBACK_RELATIONS = [
@@ -1103,7 +1209,6 @@ def render_hot_sectors_module():
         st.markdown('<br>', unsafe_allow_html=True)
         if st.button('🔄 強制刷新', use_container_width=True, key='refresh_sectors'):
             ai_generate_sectors_only.clear()
-            ai_generate_relations_only.clear()
             analyze_hot_sectors_ai_dynamic.clear()
             fetch_sector_performance_dynamic.clear()
             st.rerun()
@@ -1120,28 +1225,36 @@ def render_hot_sectors_module():
     with st.spinner('🤖 AI 分析板塊及公司關係...'):
         ai_data, ai_ok = ai_generate_company_relations(headlines)
 
-    raw_sectors   = ai_data.get('sectors',   []) if ai_data else []
-    raw_relations = ai_data.get('relations', []) if ai_data else []
+    # 從新結果格式提取數據
+    src_tag      = ai_data.get('_source', 'fallback') if ai_data else 'fallback'
+    raw_sectors  = ai_data.get('sectors', []) if ai_data else []
+    relations    = ai_data.get('relations', []) or FALLBACK_RELATIONS[:20]
 
-    sector_stocks = build_sector_stocks_from_ai(raw_sectors) if raw_sectors else build_sector_stocks_fallback()
-    relations     = raw_relations if raw_relations else FALLBACK_RELATIONS
-
-    sec_src = f"✅ AI識別 {len(raw_sectors)} 個板塊" if raw_sectors else "⚠️ 預設板塊"
-    rel_src = f"✅ AI生成 {len(raw_relations)} 條關係" if raw_relations else "⚠️ 預設關係數據"
-    if raw_sectors and raw_relations:
-        st.success(f"📊 {sec_src}　｜　🔗 {rel_src}")
-    elif raw_sectors or raw_relations:
-        st.warning(f"📊 {sec_src}　｜　🔗 {rel_src}")
+    # sector_stocks: 優先用 ai_generate_company_relations 已處理好的版本
+    if ai_data and 'sector_stocks' in ai_data and ai_data['sector_stocks']:
+        sector_stocks = ai_data['sector_stocks']
+    elif raw_sectors and isinstance(raw_sectors, list) and isinstance(raw_sectors[0], dict):
+        sector_stocks = build_sector_stocks_from_ai(raw_sectors)
     else:
-        st.error(f"📊 {sec_src}　｜　🔗 {rel_src}")
+        sector_stocks = build_sector_stocks_fallback()
 
-    with st.expander("🔧 Debug: 查看 AI 原始輸出（出問題時展開）", expanded=False):
-        sec_raw, _ = ai_generate_sectors_only(headlines)
-        rel_raw, _ = ai_generate_relations_only(headlines, "NVDA,AMD,MSFT,GOOGL,AMZN,PLTR,VRT,CRWD,CEG")
-        st.caption("板塊 AI 原始返回:")
-        st.code(str(sec_raw)[:800] if sec_raw else "None / 解析失敗")
-        st.caption("關係 AI 原始返回:")
-        st.code(str(rel_raw)[:800] if rel_raw else "None / 解析失敗")
+    # 狀態顯示
+    n_sec = len(sector_stocks)
+    n_rel = len(relations)
+    if src_tag == 'ai':
+        st.success(f"📊 ✅ AI識別 {n_sec} 個板塊　｜　🔗 動態篩選 {n_rel} 條關係")
+    elif src_tag == 'keyword':
+        st.info(f"📊 🔍 關鍵字匹配 {n_sec} 個板塊　｜　🔗 動態篩選 {n_rel} 條關係")
+    else:
+        st.info(f"📊 預設 {n_sec} 個板塊　｜　🔗 {n_rel} 條關係")
+
+    with st.expander("🔧 Debug: 板塊及關係來源", expanded=False):
+        st.caption(f"板塊來源: **{src_tag}**（ai=AI生成, keyword=關鍵字匹配, fallback=預設）")
+        st.caption(f"板塊數量: {len(sector_stocks)} | 關係數量: {len(relations)}")
+        st.caption("板塊清單:")
+        st.code("\n".join([f"{k}: {list(v['stocks'].keys())}" for k, v in sector_stocks.items()]))
+        st.caption("關係樣本 (首5條):")
+        st.code("\n".join([f"{r.get('company_a')} --[{r.get('type')}]--> {r.get('company_b')}: {r.get('desc','')}" for r in relations[:5]]))
 
     # ── Step 3: 抓股票表現 ──
     all_tickers = list(set(
