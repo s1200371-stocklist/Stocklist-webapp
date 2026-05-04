@@ -1793,9 +1793,9 @@ def compute_macro_signal(m: dict) -> dict:
         unemp = m.get('UNRATE')
         jl    = m.get('JOBLESS')
         pay   = m.get('PAYEMS')
-        u_val   = unemp['value']       if unemp else None
-        jl_val  = jl['value']          if jl    else None
-        pay_chg = pay.get('change', 0) if pay   else None
+        u_val   = unemp['value']        if unemp else None
+        jl_val  = jl['value']           if jl    else None
+        pay_chg = pay.get('change', 0)  if pay   else None
 
         details = []
         if u_val   is not None: details.append(f"失業率 {u_val:.1f}%")
@@ -3318,100 +3318,125 @@ def fetch_sidebar_market_data():
     except:
         data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
 
+    # ── FRED helper: parse CSV robustly, skip header row and '.' missing values ──
+    def _fred_csv(series_id, timeout=10):
+        """Fetch a FRED CSV and return list of (date_str, float_value) tuples,
+        newest-first order (last row = most recent). Skips header and '.' rows."""
+        try:
+            url = f'https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}'
+            resp = requests.get(url, headers=get_headers(), timeout=timeout)
+            if resp.status_code != 200:
+                return []
+            rows = []
+            for line in resp.text.strip().splitlines():
+                parts = line.split(',')
+                if len(parts) != 2:
+                    continue
+                date_s, val_s = parts[0].strip(), parts[1].strip()
+                # Skip header row and FRED's missing-value sentinel '.'
+                if date_s == 'DATE' or val_s == '.' or val_s == '':
+                    continue
+                try:
+                    rows.append((date_s, float(val_s)))
+                except ValueError:
+                    continue
+            return rows  # chronological order, last element = most recent
+        except Exception:
+            return []
+
     # FRED: Unemployment Rate
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = r.text.strip().split('\n')
-            last = lines[-1].split(',')
-            data['UNRATE'] = {'date': last[0], 'value': float(last[1])}
-    except:
+        rows = _fred_csv('UNRATE')
+        if rows:
+            date_s, val = rows[-1]
+            prior_val = rows[-2][1] if len(rows) >= 2 else val
+            data['UNRATE'] = {
+                'date': date_s, 'value': val,
+                'prior': prior_val, 'change': round(val - prior_val, 2)
+            }
+        else:
+            data['UNRATE'] = None
+    except Exception:
         data['UNRATE'] = None
 
     # FRED: CPI YoY
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = r.text.strip().split('\n')
-            vals = []
-            for l in lines[-14:]:
-                parts = l.split(',')
-                if len(parts) == 2:
-                    try: vals.append((parts[0], float(parts[1])))
-                    except: pass
-            if len(vals) >= 13:
-                yoy = (vals[-1][1] - vals[-13][1]) / vals[-13][1] * 100
-                data['CPI_YOY'] = {'date': vals[-1][0], 'value': round(yoy, 2)}
-    except:
+        rows = _fred_csv('CPIAUCSL')
+        if len(rows) >= 13:
+            yoy = (rows[-1][1] - rows[-13][1]) / rows[-13][1] * 100
+            data['CPI_YOY'] = {'date': rows[-1][0], 'value': round(yoy, 2)}
+        else:
+            data['CPI_YOY'] = None
+    except Exception:
         data['CPI_YOY'] = None
 
     # FRED: Fed Funds Rate
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = r.text.strip().split('\n')
-            last = lines[-1].split(',')
-            data['FEDFUNDS'] = {'date': last[0], 'value': float(last[1])}
-    except:
+        rows = _fred_csv('FEDFUNDS')
+        if rows:
+            data['FEDFUNDS'] = {'date': rows[-1][0], 'value': rows[-1][1]}
+        else:
+            data['FEDFUNDS'] = None
+    except Exception:
         data['FEDFUNDS'] = None
 
-    # FRED: Initial Jobless Claims
+    # FRED: Initial Jobless Claims (ICSA)
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = r.text.strip().split('\n')
-            last = lines[-1].split(',')
-            prev = lines[-2].split(',') if len(lines) >= 3 else last
-            data['JOBLESS'] = {'date': last[0], 'value': int(float(last[1])), 'prev': int(float(prev[1]))}
-    except:
+        rows = _fred_csv('ICSA')
+        if rows:
+            date_s, val = rows[-1]
+            prior_val = rows[-2][1] if len(rows) >= 2 else val
+            data['JOBLESS'] = {
+                'date': date_s,
+                'value': int(val),
+                'prior': int(prior_val),
+                'change': int(val - prior_val),
+            }
+        else:
+            data['JOBLESS'] = None
+    except Exception:
         data['JOBLESS'] = None
 
-    # FRED: Nonfarm Payrolls (PAYEMS) – monthly change
+    # FRED: Nonfarm Payrolls (PAYEMS) – monthly change (values in thousands)
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = [l for l in r.text.strip().split('\n') if ',' in l]
-            if len(lines) >= 3:
-                last_row = lines[-1].split(',')
-                prev_row = lines[-2].split(',')
-                curr_val = float(last_row[1])  # thousands
-                prev_val = float(prev_row[1])
-                chg = int(round((curr_val - prev_val) * 1000))  # actual jobs added
-                data['PAYEMS'] = {'date': last_row[0], 'value': curr_val, 'change': chg}
-    except:
+        rows = _fred_csv('PAYEMS')
+        if len(rows) >= 2:
+            date_s, curr_val = rows[-1]
+            prev_val = rows[-2][1]
+            chg = int(round((curr_val - prev_val) * 1000))  # convert thousands → actual jobs
+            data['PAYEMS'] = {
+                'date': date_s, 'value': curr_val,
+                'prior': prev_val, 'change': chg
+            }
+        else:
+            data['PAYEMS'] = None
+    except Exception:
         data['PAYEMS'] = None
 
     # FRED: Labor Force Participation Rate (CIVPART)
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CIVPART', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = [l for l in r.text.strip().split('\n') if ',' in l]
-            if len(lines) >= 3:
-                last_row = lines[-1].split(',')
-                prev_row = lines[-2].split(',')
-                data['CIVPART'] = {
-                    'date': last_row[0],
-                    'value': float(last_row[1]),
-                    'prev': float(prev_row[1]),
-                }
-    except:
+        rows = _fred_csv('CIVPART')
+        if len(rows) >= 2:
+            date_s, val = rows[-1]
+            prior_val = rows[-2][1]
+            data['CIVPART'] = {
+                'date': date_s, 'value': val,
+                'prior': prior_val, 'change': round(val - prior_val, 2)
+            }
+        else:
+            data['CIVPART'] = None
+    except Exception:
         data['CIVPART'] = None
 
     # FRED: Core CPI (CPILFESL) – ex Food & Energy, YoY
     try:
-        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPILFESL', headers=get_headers(), timeout=8)
-        if r.status_code == 200:
-            lines = [l for l in r.text.strip().split('\n') if ',' in l]
-            vals = []
-            for l in lines[-14:]:
-                parts = l.split(',')
-                if len(parts) == 2:
-                    try: vals.append((parts[0], float(parts[1])))
-                    except: pass
-            if len(vals) >= 13:
-                yoy = (vals[-1][1] - vals[-13][1]) / vals[-13][1] * 100
-                data['CORE_CPI'] = {'date': vals[-1][0], 'value': round(yoy, 2)}
-    except:
+        rows = _fred_csv('CPILFESL')
+        if len(rows) >= 13:
+            yoy = (rows[-1][1] - rows[-13][1]) / rows[-13][1] * 100
+            data['CORE_CPI'] = {'date': rows[-1][0], 'value': round(yoy, 2)}
+        else:
+            data['CORE_CPI'] = None
+    except Exception:
         data['CORE_CPI'] = None
 
     # 2-Year Treasury yield via yfinance (^FVX = 5Y but ^IRX = 13-week; use TNX/TYX already fetched)
@@ -3481,19 +3506,23 @@ def render_sidebar_employment_expander(m):
 
         # Unemployment Rate (UNRATE)
         unemp = m.get('UNRATE')
-        if unemp:
+        if unemp and unemp.get('value') is not None:
             any_data = True
-            uc = '#e74c3c' if unemp['value'] > 5 else ('#e67e22' if unemp['value'] > 4 else '#2ecc71')
-            _fred_row('失業率 UNRATE', '📊', f"{unemp['value']:.1f}%", f"({unemp['date'][:7]})", color=uc)
+            v = unemp['value']
+            uc = '#e74c3c' if v > 5 else ('#e67e22' if v > 4 else '#2ecc71')
+            chg = unemp.get('change')
+            chg_str = f"MoM: {'+' if chg >= 0 else ''}{chg:.1f}pp" if chg is not None else None
+            _fred_row('失業率 UNRATE', '📊', f"{v:.1f}%", f"({unemp['date'][:7]})",
+                      color=uc, change_str=chg_str)
+        else:
+            st.markdown("<div style='font-size:0.72rem;color:#666'>📊 失業率 UNRATE: <span style='color:#888'>N/A</span></div>",
+                        unsafe_allow_html=True)
 
         # Nonfarm Payrolls (PAYEMS)
         payems = m.get('PAYEMS')
-        if payems:
+        if payems and payems.get('value') is not None:
             any_data = True
             chg = payems.get('change', 0)
-            chg_color = '#2ecc71' if chg > 0 else '#e74c3c'
-            chg_arrow = '▲' if chg > 0 else '▼'
-            chg_str = f"<span style='color:{chg_color}'>{chg_arrow}{abs(chg):,}</span>"
             _fred_row(
                 '非農就業 PAYEMS', '🏭',
                 f"{payems['value'] / 1000:.1f}M",
@@ -3501,41 +3530,58 @@ def render_sidebar_employment_expander(m):
                 color='#4FC3F7',
                 change_str=f"MoM: {'+' if chg > 0 else ''}{chg:,}",
             )
+        else:
+            st.markdown("<div style='font-size:0.72rem;color:#666'>🏭 非農就業 PAYEMS: <span style='color:#888'>N/A</span></div>",
+                        unsafe_allow_html=True)
 
         # Initial Jobless Claims (ICSA)
         jl = m.get('JOBLESS')
-        if jl:
+        if jl and jl.get('value') is not None:
             any_data = True
-            jc = '#e74c3c' if jl['value'] > 250000 else ('#e67e22' if jl['value'] > 220000 else '#2ecc71')
-            prev = jl.get('prev', jl['value'])
-            diff = jl['value'] - prev
-            diff_str = f"{'+' if diff >= 0 else ''}{diff:,}"
+            jv = jl['value']
+            jc = '#e74c3c' if jv > 250000 else ('#e67e22' if jv > 220000 else '#2ecc71')
+            # support both 'prior' (new) and 'prev' (legacy) keys
+            prior = jl.get('prior', jl.get('prev', jv))
+            diff = jv - prior
+            diff_str = f"WoW: {'+' if diff >= 0 else ''}{diff:,}"
             _fred_row(
                 '初領失業金 ICSA', '📋',
-                f"{jl['value']:,}",
-                f"({jl['date']})",
+                f"{jv:,}",
+                f"({jl['date'][:10]})",
                 color=jc,
-                change_str=f"WoW: {diff_str}",
+                change_str=diff_str,
             )
+        else:
+            st.markdown("<div style='font-size:0.72rem;color:#666'>📋 初領失業金 ICSA: <span style='color:#888'>N/A</span></div>",
+                        unsafe_allow_html=True)
 
         # Labor Force Participation Rate (CIVPART)
         civpart = m.get('CIVPART')
-        if civpart:
+        if civpart and civpart.get('value') is not None:
             any_data = True
-            diff = civpart['value'] - civpart.get('prev', civpart['value'])
-            diff_str = f"{'+' if diff >= 0 else ''}{diff:.1f}pp"
-            cc = '#2ecc71' if civpart['value'] >= 63 else ('#e67e22' if civpart['value'] >= 61 else '#e74c3c')
+            cv = civpart['value']
+            # support both 'prior' (new) and 'prev' (legacy) keys
+            prior_c = civpart.get('prior', civpart.get('prev', cv))
+            diff = cv - prior_c
+            diff_str = f"MoM: {'+' if diff >= 0 else ''}{diff:.1f}pp"
+            cc = '#2ecc71' if cv >= 63 else ('#e67e22' if cv >= 61 else '#e74c3c')
             _fred_row(
                 '勞動參與率 CIVPART', '👥',
-                f"{civpart['value']:.1f}%",
+                f"{cv:.1f}%",
                 f"({civpart['date'][:7]})",
                 color=cc,
-                change_str=f"MoM: {diff_str}",
+                change_str=diff_str,
             )
+        else:
+            st.markdown("<div style='font-size:0.72rem;color:#666'>👥 勞動參與率 CIVPART: <span style='color:#888'>N/A</span></div>",
+                        unsafe_allow_html=True)
 
         if not any_data:
-            st.caption('⚠️ 就業數據暫時無法載入')
-        st.caption('📌 數據來源: FRED (St. Louis Fed)')
+            st.markdown(
+                "<div style='color:#e67e22;font-size:0.73rem;padding:4px 0'>"
+                "⚠️ 就業數據暫時無法載入 — FRED 連線可能受限，請稍後重試。"
+                "</div>", unsafe_allow_html=True)
+        st.caption('📌 數據來源: FRED (St. Louis Fed) | 每5分鐘自動更新')
 
 
 def render_sidebar_macro_expander(m):
@@ -3629,108 +3675,92 @@ def render_sidebar_macro_expander(m):
 
 
 def render_sidebar_market_panel():
-    st.markdown("### 📡 市場實時雷達")
-    with st.spinner("載入..."):
+    # ── Header row with refresh ──────────────────────────────────────
+    h_col1, h_col2 = st.columns([3, 1])
+    with h_col1:
+        st.markdown("### 📡 市場實時雷達")
+    with h_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄", use_container_width=True, key="refresh_mkt_sb", help="刷新所有市場數據"):
+            fetch_sidebar_market_data.clear()
+            st.rerun()
+
+    with st.spinner("載入市場數據..."):
         m = fetch_sidebar_market_data()
 
-    # ── Fear & Greed ──
-    fg = m.get('FEAR_GREED', {})
-    if fg and fg.get('score') is not None:
-        score = fg['score']
-        rating = fg.get('rating', 'N/A').upper()
-        if score >= 75:   fg_emoji, fg_c = '🤑', '#e74c3c'
-        elif score >= 55: fg_emoji, fg_c = '😊', '#e67e22'
-        elif score >= 45: fg_emoji, fg_c = '😐', '#f1c40f'
-        elif score >= 25: fg_emoji, fg_c = '😨', '#3498db'
-        else:             fg_emoji, fg_c = '😱', '#2980b9'
-        st.markdown(
-            f"<div style='background:{fg_c}22;border-left:3px solid {fg_c};border-radius:5px;padding:5px 8px;margin-bottom:5px'>"
-            f"<span style='font-size:0.72rem;color:{fg_c}'><b>CNN 恐貪指數</b></span><br>"
-            f"<span style='font-size:1.15rem'><b>{fg_emoji} {score:.0f}</b></span> "
-            f"<span style='font-size:0.68rem;color:{fg_c}'>{rating}</span></div>", unsafe_allow_html=True)
-    else:
-        st.caption("😐 CNN 恐貪指數: 暫無數據")
+    # ── 更新時間戳 ──
+    st.markdown(
+        f"<div style='font-size:0.62rem;color:#555;margin-bottom:4px'>⏱ 更新: "
+        f"{datetime.datetime.now().strftime('%H:%M:%S')} &nbsp;｜&nbsp; 快取5分鐘</div>",
+        unsafe_allow_html=True)
 
-    # ── VIX ──
+    # ── Fear & Greed + VIX 並列 ──
+    fg = m.get('FEAR_GREED', {})
     vix = m.get('VIX', {})
-    if vix and vix.get('price') is not None:
-        v, pct = vix['price'], vix['pct']
-        if v >= 30:   vl, vc = '極度恐慌', '#e74c3c'
-        elif v >= 20: vl, vc = '市場緊張', '#e67e22'
-        else:         vl, vc = '市場平靜', '#2ecc71'
-        arrow = '▲' if pct >= 0 else '▼'
-        st.markdown(
-            f"<div style='background:{vc}22;border-left:3px solid {vc};border-radius:5px;padding:5px 8px;margin-bottom:5px'>"
-            f"<span style='font-size:0.72rem;color:{vc}'><b>VIX 恐慌指數</b></span><br>"
-            f"<span style='font-size:1.1rem'><b>{v:.2f}</b></span> "
-            f"<span style='font-size:0.68rem;color:{vc}'>{vl} {arrow}{abs(pct):.1f}%</span></div>", unsafe_allow_html=True)
-    else:
-        st.caption("VIX: N/A")
+
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        if fg and fg.get('score') is not None:
+            score = fg['score']
+            rating = fg.get('rating', '').upper()
+            if score >= 75:   fg_emoji, fg_c = '🤑', '#e74c3c'
+            elif score >= 55: fg_emoji, fg_c = '😊', '#e67e22'
+            elif score >= 45: fg_emoji, fg_c = '😐', '#f1c40f'
+            elif score >= 25: fg_emoji, fg_c = '😨', '#3498db'
+            else:             fg_emoji, fg_c = '😱', '#2980b9'
+            st.markdown(
+                f"<div style='background:{fg_c}22;border:1px solid {fg_c}44;border-radius:6px;"
+                f"padding:5px 7px;text-align:center'>"
+                f"<div style='font-size:0.64rem;color:{fg_c}'>CNN 恐貪</div>"
+                f"<div style='font-size:1.05rem;font-weight:bold'>{fg_emoji} {score:.0f}</div>"
+                f"<div style='font-size:0.60rem;color:{fg_c}'>{rating}</div>"
+                f"</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='font-size:0.70rem;color:#555;text-align:center'>😐 F&G N/A</div>",
+                        unsafe_allow_html=True)
+    with fc2:
+        if vix and vix.get('price') is not None:
+            v, pct = vix['price'], vix['pct']
+            if v >= 30:   vl, vc = '恐慌', '#e74c3c'
+            elif v >= 20: vl, vc = '緊張', '#e67e22'
+            else:         vl, vc = '平靜', '#2ecc71'
+            arrow = '▲' if pct >= 0 else '▼'
+            st.markdown(
+                f"<div style='background:{vc}22;border:1px solid {vc}44;border-radius:6px;"
+                f"padding:5px 7px;text-align:center'>"
+                f"<div style='font-size:0.64rem;color:{vc}'>VIX</div>"
+                f"<div style='font-size:1.05rem;font-weight:bold;color:{vc}'>{v:.1f}</div>"
+                f"<div style='font-size:0.60rem;color:{vc}'>{vl} {arrow}{abs(pct):.1f}%</div>"
+                f"</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='font-size:0.70rem;color:#555;text-align:center'>VIX N/A</div>",
+                        unsafe_allow_html=True)
 
     _divider()
 
     # ── 美股三大指數 ──
-    _section("🇺🇸 美股三大指數")
+    _section("🇺🇸 美股指數")
     _pm("S&P500 (SPY)", "📈", m.get('SPY'))
     _pm("納指 (QQQ)", "💻", m.get('QQQ'))
     _pm("道指 (DIA)", "🏛️", m.get('DIA'))
     _divider()
 
-    # ── 商品 ──
-    _section("🛢️ 商品市場")
-    _pm("WTI 原油 (USD)", "🛢️", m.get('OIL'), fmt='${:.2f}')
-    _pm("黃金 (USD/oz)", "🥇", m.get('GOLD'), fmt='${:.2f}')
-    _pm("白銀 (USD/oz)", "🥈", m.get('SILVER'), fmt='${:.2f}')
-    _pm("天然氣 (USD)", "🔥", m.get('NG'), fmt='${:.3f}')
-    _divider()
-
-    # ── 宏觀/債息 ──
+    # ── 宏觀 & 債市 ──
     _section("🏦 宏觀 & 債市")
     _pm("美元指數 (DXY)", "💵", m.get('DXY'))
     _pm("10年美債息 (%)", "📉", m.get('TNX'), fmt='{:.3f}')
     _pm("30年美債息 (%)", "📉", m.get('TYX'), fmt='{:.3f}')
-
-    # Fed Funds Rate
     ff = m.get('FEDFUNDS')
     if ff:
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>🏛️ <b>聯儲息率</b></span>"
-            f"<span style='font-size:0.78rem;color:#f1c40f'><b>{ff['value']:.2f}%</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({ff['date'][:7]})</span></span></div>", unsafe_allow_html=True)
-
+        _fred_row('聯儲息率 Fed Funds', '🏛️', f"{ff['value']:.2f}%",
+                  f"({ff['date'][:7]})", color='#f1c40f')
     _divider()
 
-    # ── 就業數據 ──
-    _section("👷 就業數據")
-    unemp = m.get('UNRATE')
-    if unemp:
-        uc = '#e74c3c' if unemp['value'] > 5 else ('#e67e22' if unemp['value'] > 4 else '#2ecc71')
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>📊 <b>失業率</b></span>"
-            f"<span style='font-size:0.78rem;color:{uc}'><b>{unemp['value']:.1f}%</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({unemp['date'][:7]})</span></span></div>", unsafe_allow_html=True)
-
-    jl = m.get('JOBLESS')
-    if jl:
-        jc = '#e74c3c' if jl['value'] > 250000 else ('#e67e22' if jl['value'] > 220000 else '#2ecc71')
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>📋 <b>首次申領失業</b></span>"
-            f"<span style='font-size:0.78rem;color:{jc}'><b>{jl['value']:,}</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({jl['date']})</span></span></div>", unsafe_allow_html=True)
-
-    # CPI
-    cpi = m.get('CPI_YOY')
-    if cpi:
-        cc = '#e74c3c' if cpi['value'] > 3.5 else ('#e67e22' if cpi['value'] > 2.5 else '#2ecc71')
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:2px 0'>"
-            f"<span style='font-size:0.78rem'>📦 <b>CPI 通脹 (YoY)</b></span>"
-            f"<span style='font-size:0.78rem;color:{cc}'><b>{cpi['value']:.1f}%</b>"
-            f"<span style='font-size:0.65rem;color:#666'> ({cpi['date'][:7]})</span></span></div>", unsafe_allow_html=True)
-
+    # ── 商品 ──
+    _section("🛢️ 商品")
+    _pm("WTI 原油 (USD)", "🛢️", m.get('OIL'), fmt='${:.2f}')
+    _pm("黃金 (USD/oz)", "🥇", m.get('GOLD'), fmt='${:.2f}')
+    _pm("天然氣 (USD)", "🔥", m.get('NG'), fmt='${:.3f}')
     _divider()
 
     # ── 加密貨幣 ──
@@ -3745,38 +3775,51 @@ def render_sidebar_market_panel():
     _pm("恒生指數", "🇭🇰", m.get('HSI'), fmt='{:,.0f}')
     _pm("上證指數", "🇨🇳", m.get('SHCOMP'), fmt='{:,.0f}')
 
-    _divider()
-    st.caption(f"⏱ {datetime.datetime.now().strftime('%H:%M:%S')} 更新")
-    if st.button("🔄 刷新數據", use_container_width=True, key="refresh_mkt_sb"):
-        fetch_sidebar_market_data.clear()
-        st.rerun()
-
 # ==========================================
 # Sidebar
 # ==========================================
 with st.sidebar:
-    st.title('🧰 投資雙引擎')
+    # ── App title ──
+    st.markdown(
+        "<div style='padding:8px 0 4px'>"
+        "<span style='font-size:1.1rem;font-weight:800;letter-spacing:0.5px'>"
+        "🚀 美股全方位量化平台</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
+    # ── Module navigation ──
+    st.markdown(
+        "<div style='font-size:0.7rem;font-weight:700;color:#888;margin:4px 0 2px'>"
+        "🗂️ 功能模組</div>",
+        unsafe_allow_html=True,
+    )
+    app_mode = st.radio(
+        label='模組',
+        options=[
+            '🔥 熱門板塊關係圖',
+            '🎯 產業故事 Radar / Scorecard',
+            '📡 新聞催化劑 / RS 方法選股',
+            '🎯 RS x MACD 動能狙擊手',
+            '📰 近月 AI 洞察 (廣東話版)',
+            '🕵️ 另類數據雷達 (6大維度)',
+        ],
+        label_visibility='collapsed',
+    )
+
+    _divider()
+
+    # ── Market Radar panel ──
     render_sidebar_market_panel()
 
-    st.markdown('---')
-    st.markdown("### 🗂️ 功能模組")
-    app_mode = st.radio('選擇模組', [
-        '🔥 熱門板塊關係圖',
-        '🎯 產業故事 Radar / Scorecard',
-        '📡 新聞催化劑 / RS 方法選股',
-        '🎯 RS x MACD 動能狙擊手',
-        '📰 近月 AI 洞察 (廣東話版)',
-        '🕵️ 另類數據雷達 (6大維度)',
-    ])
+    _divider()
 
-    st.markdown('---')
-    # 就業數據 expander + 宏觀燈號
+    # ── Employment + Macro expanders (reuse cached data) ──
     try:
         _sb_m = fetch_sidebar_market_data()
         render_sidebar_employment_expander(_sb_m)
         render_sidebar_macro_expander(_sb_m)
-        st.markdown('---')
+        _divider()
         render_macro_signal_sidebar(_sb_m)
     except Exception as _e:
         st.caption(f'⚠️ 宏觀數據載入失敗: {_e}')
