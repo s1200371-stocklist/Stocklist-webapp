@@ -1,4 +1,3 @@
-
 import os, re, json, time, random, datetime, requests
 import pandas as pd
 import streamlit as st
@@ -1316,6 +1315,441 @@ def render_hot_sectors_module():
 
 
 # ==========================================
+# 產業故事 Radar / Scorecard 模組
+# ==========================================
+
+# 評分標準：0 = 最弱，5 = 最強
+MARKET_RADAR_THEMES = [
+    {
+        "rank": 1,
+        "theme": "AI 算力基建",
+        "desc": "超大規模數據中心、GPU 需求、液冷系統",
+        "etfs": ["SOXX", "AIQ", "SMH"],
+        "stocks": ["NVDA", "AVGO", "AMD", "VRT", "SMCI"],
+        "status": "🔥 極度活躍",
+        "confirmation": [
+            "NVDA 股價維持在 200DMA 以上",
+            "SOX 指數相對 SPY 持續跑贏",
+            "CSP/雲端業者資本開支指引上調",
+        ],
+        "invalidation": [
+            "NVDA 業績 / 指引低於市場預期",
+            "美國對華晶片出口限制大幅收緊",
+            "聯儲局激進加息令成長股估值重估",
+        ],
+        "score": 5,
+    },
+    {
+        "rank": 2,
+        "theme": "AI 軟件 / 企業 AI 落地",
+        "desc": "AI Copilot、代碼生成、企業 SaaS AI 化",
+        "etfs": ["AIQ", "IGV", "WCLD"],
+        "stocks": ["MSFT", "PLTR", "CRM", "NOW", "GOOGL"],
+        "status": "📈 強勢上升",
+        "confirmation": [
+            "Microsoft Azure AI 季度收入加速增長",
+            "Palantir AIP 商業合約數量持續突破",
+            "PLTR / CRM RPO 同比 >20%",
+        ],
+        "invalidation": [
+            "企業 IT 預算削減，SaaS 客戶流失率上升",
+            "Open-source 模型大幅壓低 AI 授權費",
+            "MSFT / GOOGL 指引遜預期",
+        ],
+        "score": 4,
+    },
+    {
+        "rank": 3,
+        "theme": "網絡安全",
+        "desc": "AI 驅動威脅偵測、零信任架構、SIEM/XDR",
+        "etfs": ["CIBR", "HACK", "BUG"],
+        "stocks": ["CRWD", "PANW", "ZS", "S", "CYBR"],
+        "status": "📈 強勢上升",
+        "confirmation": [
+            "CRWD ARR 同比增長 >30%",
+            "政府/國防採購訂單持續增加",
+            "CIBR ETF 突破前高",
+        ],
+        "invalidation": [
+            "CRWD / PANW 業績指引下調",
+            "大型安全事件令市場對產品信心下降",
+            "市場資金全面轉向防守性板塊",
+        ],
+        "score": 4,
+    },
+    {
+        "rank": 4,
+        "theme": "核能 / 清潔電力",
+        "desc": "小型模組反應堆 (SMR)、鈾礦、數據中心供電",
+        "etfs": ["NLR", "URA", "URNM"],
+        "stocks": ["CEG", "VST", "CCJ", "OKLO", "NNE"],
+        "status": "⚖️ 整固等待催化劑",
+        "confirmation": [
+            "美國政府通過核電立法或補貼政策",
+            "大型科技公司核電 PPA 簽訂數量增加",
+            "鈾現貨價格突破 $100/lb",
+        ],
+        "invalidation": [
+            "核電監管收緊或許可證申請受阻",
+            "再生能源成本急跌令核電失去競爭力",
+            "鈾價持續回落",
+        ],
+        "score": 3,
+    },
+    {
+        "rank": 5,
+        "theme": "太空 / 國防科技",
+        "desc": "衛星互聯網、低軌衛星、國防 AI 合約",
+        "etfs": ["ITA", "ROKT", "UFO"],
+        "stocks": ["RKLB", "ASTS", "KTOS", "LMT", "PLTR"],
+        "status": "⚖️ 整固等待催化劑",
+        "confirmation": [
+            "ASTS 商業衛星服務正式開通",
+            "美國國防預算持續增加",
+            "RKLB 發射成功率維持 >90%",
+        ],
+        "invalidation": [
+            "國防開支削減或繼續解除",
+            "衛星發射失敗令市場信心受損",
+            "地緣政治風險下降令防禦股回落",
+        ],
+        "score": 3,
+    },
+    {
+        "rank": 6,
+        "theme": "人形機器人 / 自動化",
+        "desc": "工廠自動化、AI 驅動機器人、Tesla Optimus",
+        "etfs": ["BOTZ", "ROBO", "IRBO"],
+        "stocks": ["TSLA", "NVDA", "ABB", "TER", "ISRG"],
+        "status": "🚀 早期爆發",
+        "confirmation": [
+            "Tesla Optimus 量產出貨確認",
+            "工廠訂單數量超預期",
+            "BOTZ ETF 突破52週高位",
+        ],
+        "invalidation": [
+            "Tesla Optimus 量產延遲",
+            "製造商資本開支削減",
+            "TSLA 股價大幅低於 200DMA",
+        ],
+        "score": 3,
+    },
+    {
+        "rank": 7,
+        "theme": "生物科技 / GLP-1",
+        "desc": "減肥藥、AI 藥物研發、基因編輯",
+        "etfs": ["XBI", "IBB", "ARKG"],
+        "stocks": ["LLY", "NVO", "RXRX", "CRSP", "MRNA"],
+        "status": "📉 觀望/回調",
+        "confirmation": [
+            "LLY / NVO GLP-1 季度銷售超預期",
+            "FDA 加速批准新藥",
+            "XBI ETF 突破整固區",
+        ],
+        "invalidation": [
+            "GLP-1 安全問題或副作用報告",
+            "FDA 拒絕重要新藥申請",
+            "醫保談判令藥企定價能力受壓",
+        ],
+        "score": 2,
+    },
+    {
+        "rank": 8,
+        "theme": "加密貨幣 / Web3",
+        "desc": "Bitcoin ETF、DeFi、穩定幣立法",
+        "etfs": ["IBIT", "FBTC", "BITO"],
+        "stocks": ["COIN", "MSTR", "MARA", "RIOT", "CLSK"],
+        "status": "⚖️ 整固等待催化劑",
+        "confirmation": [
+            "Bitcoin 突破前歷史高位",
+            "美國穩定幣/加密監管法案通過",
+            "機構 BTC ETF 持續淨流入",
+        ],
+        "invalidation": [
+            "Bitcoin 跌穿 200DMA",
+            "監管收緊或交易所重大黑客事件",
+            "宏觀風險偏好急速下降",
+        ],
+        "score": 3,
+    },
+]
+
+SCORE_COLOR_MAP = {
+    5: ("#00573A", "#00C851", "⭐⭐⭐⭐⭐"),
+    4: ("#1A3A2A", "#26A69A", "⭐⭐⭐⭐"),
+    3: ("#2A2A00", "#F9A825", "⭐⭐⭐"),
+    2: ("#3A2000", "#FF6D00", "⭐⭐"),
+    1: ("#3A0000", "#FF4444", "⭐"),
+    0: ("#1A1A1A", "#888888", "—"),
+}
+
+STATUS_COLOR_MAP = {
+    "🔥 極度活躍":      "#e74c3c",
+    "🚀 早期爆發":      "#9b59b6",
+    "📈 強勢上升":      "#27ae60",
+    "⚖️ 整固等待催化劑": "#f39c12",
+    "📉 觀望/回調":     "#7f8c8d",
+}
+
+
+def render_market_radar_module():
+    """渲染 產業故事 Radar / Scorecard 主頁面"""
+    st.title("🎯 產業故事 Radar / Scorecard")
+    st.caption(
+        "依市值重要性、產業敘事、代表 ETF/股票、現況、確認指標及失效條件，"
+        "對美股主要主題進行綜合排名評分 (0–5分)。每次刷新時自動依最新 ETF 表現微調分數。"
+    )
+
+    # ── 頂部控制列 ──────────────────────────────────────────────────────
+    ctrl_l, ctrl_r = st.columns([5, 1])
+    with ctrl_r:
+        st.markdown("<br>", unsafe_allow_html=True)
+        refresh_radar = st.button("🔄 刷新評分", use_container_width=True, key="refresh_radar")
+
+    # ── 動態評分調整：拉取各主題代表 ETF 近5日表現，疊加到靜態分數上 ──
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _fetch_radar_etf_scores():
+        """抓所有主題第一隻 ETF 的5日漲跌，返回 {etf: pct} dict"""
+        all_etfs = list({
+            theme["etfs"][0]
+            for theme in MARKET_RADAR_THEMES
+            if theme["etfs"]
+        })
+        try:
+            raw = yf.download(all_etfs, period="7d", progress=False, auto_adjust=True)
+            closes = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw
+            out = {}
+            for etf in all_etfs:
+                try:
+                    col = closes[etf].dropna()
+                    if len(col) >= 2:
+                        n = min(5, len(col) - 1)
+                        out[etf] = round(float((col.iloc[-1] / col.iloc[-n - 1] - 1) * 100), 2)
+                except:
+                    pass
+            return out
+        except:
+            return {}
+
+    if refresh_radar:
+        try:
+            _fetch_radar_etf_scores.clear()
+        except:
+            pass
+
+    with ctrl_l:
+        st.markdown("載入代表 ETF 近5日表現調整評分...")
+
+    with st.spinner("📡 抓取 ETF 實時數據..."):
+        etf_perfs = _fetch_radar_etf_scores()
+
+    # ── 計算動態分數（靜態分 + ETF表現微調，上限5，下限0）──
+    def _dynamic_score(theme, etf_perfs):
+        base = theme["score"]
+        etf = theme["etfs"][0] if theme["etfs"] else None
+        if etf and etf in etf_perfs:
+            pct = etf_perfs[etf]
+            if pct >= 5:
+                adj = 0.5
+            elif pct >= 2:
+                adj = 0.25
+            elif pct <= -5:
+                adj = -0.5
+            elif pct <= -2:
+                adj = -0.25
+            else:
+                adj = 0
+            return min(5, max(0, round(base + adj, 2)))
+        return float(base)
+
+    # ── 按動態分數重排 ──
+    themes_sorted = sorted(
+        MARKET_RADAR_THEMES,
+        key=lambda t: _dynamic_score(t, etf_perfs),
+        reverse=True,
+    )
+    for new_rank, t in enumerate(themes_sorted, 1):
+        t["_rank"] = new_rank
+        t["_dyn_score"] = _dynamic_score(t, etf_perfs)
+
+    # ── 摘要卡片列（最多顯示4個） ──
+    st.markdown("---")
+    st.markdown("#### 🏆 頂級主題快覽")
+    top_cols = st.columns(min(4, len(themes_sorted)))
+    for col, t in zip(top_cols, themes_sorted[:4]):
+        sc = int(round(t["_dyn_score"]))
+        sc = max(0, min(5, sc))
+        bg, fg, _ = SCORE_COLOR_MAP.get(sc, SCORE_COLOR_MAP[0])
+        etf_pct = etf_perfs.get(t["etfs"][0], None) if t["etfs"] else None
+        delta_str = f"{etf_pct:+.1f}% (5d)" if etf_pct is not None else "ETF N/A"
+        col.metric(
+            label=f"#{t['_rank']} {t['theme']}",
+            value=f"{t['_dyn_score']:.1f} / 5",
+            delta=delta_str,
+        )
+
+    # ── 主雷達表格 ──
+    st.markdown("---")
+    st.markdown("### 📊 完整 Radar 評分表")
+
+    # 構建 HTML 表格
+    header_html = """
+<style>
+.radar-tbl { width:100%; border-collapse:collapse; font-family:sans-serif; font-size:0.82rem; }
+.radar-tbl th { background:#1E1E2E; color:#aaa; padding:8px 10px; text-align:left;
+                border-bottom:2px solid #333; white-space:nowrap; }
+.radar-tbl td { padding:7px 10px; vertical-align:top; border-bottom:1px solid #222; }
+.radar-tbl tr:nth-child(even) { background:#0E1117; }
+.radar-tbl tr:nth-child(odd)  { background:#161B22; }
+.radar-tbl tr:hover           { background:#1F2937; }
+.score-badge { padding:2px 9px; border-radius:12px; font-weight:bold; font-size:0.8rem; }
+.status-chip { padding:2px 8px; border-radius:10px; font-size:0.78rem; font-weight:bold;
+               white-space:nowrap; }
+.ticker-chip { background:#1A2A3A; color:#4FC3F7; padding:1px 6px; border-radius:6px;
+               margin:1px; display:inline-block; font-size:0.76rem; }
+.confirm-dot::before { content:"✅ "; }
+.invalid-dot::before { content:"❌ "; }
+</style>
+<table class="radar-tbl">
+<thead><tr>
+  <th>#</th>
+  <th>主題</th>
+  <th>代表 ETF</th>
+  <th>代表股票</th>
+  <th>現況</th>
+  <th>確認訊號</th>
+  <th>失效條件</th>
+  <th>評分</th>
+</tr></thead>
+<tbody>
+"""
+
+    rows = []
+    for t in themes_sorted:
+        sc = int(round(t["_dyn_score"]))
+        sc = max(0, min(5, sc))
+        bg, fg, stars = SCORE_COLOR_MAP.get(sc, SCORE_COLOR_MAP[0])
+
+        status_c = STATUS_COLOR_MAP.get(t["status"], "#888")
+
+        etf_chips = " ".join(
+            f"<span class='ticker-chip'>{e}</span>" for e in t["etfs"]
+        )
+        stock_chips = " ".join(
+            f"<span class='ticker-chip'>{s}</span>" for s in t["stocks"]
+        )
+
+        conf_lines = "".join(
+            f"<div class='confirm-dot' style='color:#aaa;margin:1px 0'>{c}</div>"
+            for c in t["confirmation"]
+        )
+        inv_lines = "".join(
+            f"<div class='invalid-dot' style='color:#e07070;margin:1px 0'>{c}</div>"
+            for c in t["invalidation"]
+        )
+
+        etf_pct = etf_perfs.get(t["etfs"][0], None) if t["etfs"] else None
+        pct_str = (
+            f" <span style='color:{'#00C851' if etf_pct >= 0 else '#FF4444'};font-size:0.72rem'>" 
+            f"({'▲' if etf_pct >= 0 else '▼'}{abs(etf_pct):.1f}%)</span>"
+            if etf_pct is not None else ""
+        )
+
+        rows.append(
+            f"<tr>"
+            f"<td style='color:#888;font-size:0.75rem'>#{t['_rank']}</td>"
+            f"<td><b style='color:white'>{t['theme']}</b><br>"
+            f"<span style='color:#666;font-size:0.73rem'>{t['desc']}</span></td>"
+            f"<td>{etf_chips}{pct_str}</td>"
+            f"<td>{stock_chips}</td>"
+            f"<td><span class='status-chip' style='background:{status_c}33;color:{status_c}'>"
+            f"{t['status']}</span></td>"
+            f"<td>{conf_lines}</td>"
+            f"<td>{inv_lines}</td>"
+            f"<td><span class='score-badge' style='background:{bg};color:{fg}'>"
+            f"{t['_dyn_score']:.1f} {stars}</span></td>"
+            f"</tr>"
+        )
+
+    table_html = header_html + "\n".join(rows) + "\n</tbody></table>"
+    st.markdown(table_html, unsafe_allow_html=True)
+
+    # ── 詳細展開卡片 ──
+    st.markdown("---")
+    st.markdown("### 🔍 主題詳細分析")
+    for t in themes_sorted:
+        sc = int(round(t["_dyn_score"]))
+        sc = max(0, min(5, sc))
+        bg, fg, stars = SCORE_COLOR_MAP.get(sc, SCORE_COLOR_MAP[0])
+        with st.expander(
+            f"#{t['_rank']}  {t['theme']}  ｜  評分 {t['_dyn_score']:.1f}/5  {stars}",
+            expanded=False,
+        ):
+            dc1, dc2, dc3 = st.columns([1, 1, 1])
+            with dc1:
+                st.markdown("**代表 ETF**")
+                for e in t["etfs"]:
+                    pct = etf_perfs.get(e)
+                    pct_label = (
+                        f" ({'+' if pct >= 0 else ''}{pct:.1f}% 5d)"
+                        if pct is not None else ""
+                    )
+                    color = (
+                        "#00C851" if pct is not None and pct >= 0
+                        else ("#FF4444" if pct is not None else "#aaa")
+                    )
+                    st.markdown(
+                        f"<span style='background:#1A2A3A;color:#4FC3F7;padding:2px 8px;"
+                        f"border-radius:6px'>{e}</span>"
+                        f"<span style='color:{color};font-size:0.78rem'>{pct_label}</span>",
+                        unsafe_allow_html=True,
+                    )
+            with dc2:
+                st.markdown("**代表股票**")
+                for s in t["stocks"]:
+                    st.markdown(
+                        f"<span style='background:#1A2A3A;color:#4FC3F7;padding:2px 8px;"
+                        f"border-radius:6px;margin:2px;display:inline-block'>{s}</span>",
+                        unsafe_allow_html=True,
+                    )
+            with dc3:
+                status_c = STATUS_COLOR_MAP.get(t["status"], "#888")
+                st.markdown(
+                    f"**現況：** <span style='background:{status_c}33;color:{status_c};"
+                    f"padding:2px 8px;border-radius:8px'>{t['status']}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<span class='score-badge' style='background:{bg};color:{fg};"
+                    f"padding:3px 10px;border-radius:10px;font-size:0.85rem'>"
+                    f"評分：{t['_dyn_score']:.1f} / 5 &nbsp; {stars}</span>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("**✅ 確認訊號（以下出現 → 主題延續）**")
+            for c in t["confirmation"]:
+                st.markdown(f"- {c}")
+            st.markdown("**❌ 失效條件（以下出現 → 謹慎或離場）**")
+            for c in t["invalidation"]:
+                st.markdown(f"- {c}")
+
+    # ── 評分說明 ──
+    st.markdown("---")
+    with st.expander("📖 評分說明", expanded=False):
+        st.markdown("""
+| 分數 | 含義 |
+|------|------|
+| 5 / 5 | 市值最重要、主題敘事最強、技術突破、資金全面湧入 |
+| 4 / 5 | 強勢上升趨勢，確認訊號充分，短線動能極佳 |
+| 3 / 5 | 中性至偏強，整固等待催化劑，存在一定不確定性 |
+| 2 / 5 | 偏弱，敘事受壓或技術面走弱，需觀望更多確認 |
+| 1–0 / 5 | 整體走弱，失效條件已觸發或即將觸發 |
+
+> **注意**：靜態評分由人工設定，實時動態調整由代表 ETF 近5日漲跌 (±0.25–0.5分) 自動疊加。
+        """)
+
+
+# ==========================================
 # Sidebar 市場雷達函數
 # ==========================================
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1561,6 +1995,7 @@ with st.sidebar:
     st.markdown("### 🗂️ 功能模組")
     app_mode = st.radio('選擇模組', [
         '🔥 熱門板塊關係圖',
+        '🎯 產業故事 Radar / Scorecard',
         '🎯 RS x MACD 動能狙擊手',
         '📰 近月 AI 洞察 (廣東話版)',
         '🕵️ 另類數據雷達 (6大維度)',
@@ -1571,7 +2006,10 @@ with st.sidebar:
 # ==========================================
 # 模組渲染
 # ==========================================
-if app_mode == '🎯 RS x MACD 動能狙擊手':
+if app_mode == '🎯 產業故事 Radar / Scorecard':
+    render_market_radar_module()
+
+elif app_mode == '🎯 RS x MACD 動能狙擊手':
     st.title('🎯 美股 RS x MACD x 趨勢 狙擊手')
 
     # ========= 參數設定 =========
