@@ -2018,7 +2018,7 @@ def render_macro_signal_sidebar(m: dict):
 
 
 # ==========================================
-# 催化劑 RS 選股模組 – 定義與數據
+# 新聞催化劑 / RS 方法選股模組 – 定義與數據
 # ==========================================
 
 CATALYST_THEME_MAP = {
@@ -2178,13 +2178,40 @@ CATALYST_THEME_MAP = {
 }
 
 
+# ── RS 方法：正關鍵字 / 負關鍵字 ──────────────────────────────────
+_POS_KW = ['beat', 'raise', 'growth', 'ai', 'contract', 'upgrade', 'bullish',
+            'record', 'demand', 'approval', 'surpass', 'outperform', 'accelerat',
+            'expand', 'win', 'rally', 'surge', 'breakout', 'strong', 'profit']
+_NEG_KW = ['miss', 'cut', 'downgrade', 'investigation', 'delay', 'weak',
+            'lawsuit', 'warning', 'tariff', 'slump', 'loss', 'decline',
+            'recall', 'fine', 'probe', 'fraud', 'shortfall',
+            'disappoint', 'bearish', 'plunge', 'crash', 'layoff', 'reduce']
+
+
+def classify_news_sentiment(headlines):
+    pos, neg = 0, 0
+    matched_pos, matched_neg = set(), set()
+    for h in headlines:
+        hl = h.lower()
+        for kw in _POS_KW:
+            if kw in hl:
+                pos += 1
+                matched_pos.add(kw)
+        for kw in _NEG_KW:
+            if kw in hl:
+                neg += 1
+                matched_neg.add(kw)
+    if pos > neg and pos > 0:
+        label = '🟢 正面'
+    elif neg > pos and neg > 0:
+        label = '🔴 負面'
+    else:
+        label = '⚪ 中性'
+    return label, pos, neg, sorted(matched_pos)[:3], sorted(matched_neg)[:3]
+
+
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_catalyst_rs_data(tickers_tuple: tuple, benchmark: str = 'SPY') -> dict:
-    """
-    Fetch multi-horizon returns for candidate tickers + benchmark.
-    Returns {ticker: {'price': float, '1d': float, '5d': float, '1m': float,
-                      '3m': float, 'ytd': float, 'vol_ratio': float}}
-    """
+def fetch_catalyst_rs_data(tickers_tuple, benchmark='SPY'):
     tickers = list(tickers_tuple)
     all_t   = list(set(tickers + [benchmark]))
     result  = {}
@@ -2194,11 +2221,9 @@ def fetch_catalyst_rs_data(tickers_tuple: tuple, benchmark: str = 'SPY') -> dict
         if raw.empty:
             return result
         if isinstance(raw.columns, pd.MultiIndex):
-            closes  = raw['Close']
-            volumes = raw.get('Volume', pd.DataFrame())
+            closes = raw['Close']
         else:
-            closes  = raw[['Close']] if 'Close' in raw.columns else raw
-            volumes = raw[['Volume']] if 'Volume' in raw.columns else pd.DataFrame()
+            closes = raw[['Close']] if 'Close' in raw.columns else raw
         today = closes.index[-1]
 
         def _offset_price(col, days):
@@ -2225,31 +2250,19 @@ def fetch_catalyst_rs_data(tickers_tuple: tuple, benchmark: str = 'SPY') -> dict
                 pass
             return None
 
-        def _vol_ratio(vcol):
-            try:
-                v = vcol.dropna()
-                if len(v) < 20:
-                    return None
-                return round(float(v.iloc[-5:].mean()) / float(v.iloc[-20:].mean()), 2)
-            except Exception:
-                return None
-
         for t in all_t:
             try:
-                col  = closes[t].dropna()  if t in closes.columns  else pd.Series(dtype=float)
-                vcol = (volumes[t].dropna() if not volumes.empty and t in volumes.columns
-                        else pd.Series(dtype=float))
+                col = closes[t].dropna() if t in closes.columns else pd.Series(dtype=float)
                 if col.empty:
                     result[t] = {}
                     continue
                 result[t] = {
-                    'price':     round(float(col.iloc[-1]), 2),
-                    '1d':        _ret(col, 1),
-                    '5d':        _ret(col, 5),
-                    '1m':        _ret(col, 21),
-                    '3m':        _ret(col, 63),
-                    'ytd':       _ret(col, ytd=True),
-                    'vol_ratio': _vol_ratio(vcol),
+                    'price': round(float(col.iloc[-1]), 2),
+                    '1d':   _ret(col, 1),
+                    '5d':   _ret(col, 5),
+                    '1m':   _ret(col, 21),
+                    '3m':   _ret(col, 63),
+                    'ytd':  _ret(col, ytd=True),
                 }
             except Exception:
                 result[t] = {}
@@ -2258,45 +2271,65 @@ def fetch_catalyst_rs_data(tickers_tuple: tuple, benchmark: str = 'SPY') -> dict
     return result
 
 
-def compute_rs_score(ticker: str, perf_data: dict, benchmark: str = 'SPY') -> int:
-    """
-    Compare ticker multi-horizon returns vs benchmark.
-    Weights: 1d=10%, 5d=20%, 1m=30%, 3m=25%, ytd=15%
-    Outperformance mapped to 0-100 (50 = neutral; ±20% → ±50pts).
-    Always returns int in [0, 100].
-    """
-    WEIGHTS = {'1d': 0.10, '5d': 0.20, '1m': 0.30, '3m': 0.25, 'ytd': 0.15}
-    t_data = perf_data.get(ticker, {})
-    b_data = perf_data.get(benchmark, {})
-    weighted_out = 0.0
-    total_w = 0.0
-    for horizon, w in WEIGHTS.items():
-        t_r = t_data.get(horizon)
-        b_r = b_data.get(horizon)
-        if t_r is not None and b_r is not None:
-            weighted_out += w * (t_r - b_r)
-            total_w += w
-    if total_w < 0.1:
-        return 50
-    score_raw = weighted_out / total_w
-    clamped   = max(-20.0, min(20.0, score_raw))
-    rs_score  = int(round(50 + clamped * 2.5))
-    return max(0, min(100, rs_score))
+def compute_rs_category(ticker, perf_data, benchmark='SPY'):
+    t = perf_data.get(ticker, {})
+    b = perf_data.get(benchmark, {})
+
+    def _rel(h):
+        tv = t.get(h)
+        bv = b.get(h)
+        if tv is None or bv is None:
+            return None
+        return tv - bv
+
+    r5d = _rel('5d')
+    r1m = _rel('1m')
+    r3m = _rel('3m')
+
+    # 跑贏指數: both 1M and 3M outperform
+    if r1m is not None and r3m is not None:
+        if r1m > 0 and r3m > 0:
+            return '🟢 跑贏指數'
+
+    # 就黎跑贏: short-term improving or accelerating
+    improving = False
+    if r5d is not None and r5d > 0:
+        if r1m is not None and r1m > -3:
+            improving = True
+        if r3m is not None and r3m > -3:
+            improving = True
+    if r5d is not None and r1m is not None:
+        if r5d > r1m:
+            improving = True
+    if improving:
+        return '🟡 就黎跑贏指數'
+
+    return '🔴 跑輸指數'
 
 
-def _catalyst_score_bar_html(score: int) -> str:
-    color = '#00C851' if score >= 75 else ('#26A69A' if score >= 55 else ('#F9A825' if score >= 40 else '#FF4444'))
-    return (
-        f"<div style='display:inline-flex;align-items:center;gap:4px'>"
-        f"<div style='background:#333;border-radius:3px;width:50px;height:7px'>"
-        f"<div style='background:{color};width:{score}%;height:7px;border-radius:3px'></div>"
-        f"</div>"
-        f"<span style='font-size:0.75rem;color:{color};font-weight:bold'>{score}</span>"
-        f"</div>"
-    )
+def _rs_status_badge(status):
+    colors = {
+        '🟢 跑贏指數':    ('#003820', '#00C851'),
+        '🟡 就黎跑贏指數': ('#3A3000', '#F9A825'),
+        '🔴 跑輸指數':    ('#3A0000', '#FF4444'),
+    }
+    bg, fg = colors.get(status, ('#1A1A2E', '#aaa'))
+    return (f"<span style='background:{bg};color:{fg};padding:2px 8px;"
+            f"border-radius:10px;font-size:0.72rem;font-weight:bold'>{status}</span>")
 
 
-def _catalyst_ret_cell(val) -> str:
+def _sentiment_badge(label):
+    colors = {
+        '🟢 正面': ('#003820', '#00C851'),
+        '🔴 負面': ('#3A0000', '#FF4444'),
+        '⚪ 中性':     ('#1A1A2E', '#aaa'),
+    }
+    bg, fg = colors.get(label, ('#1A1A2E', '#aaa'))
+    return (f"<span style='background:{bg};color:{fg};padding:2px 7px;"
+            f"border-radius:8px;font-size:0.70rem;font-weight:bold'>{label}</span>")
+
+
+def _ret_cell(val):
     if val is None:
         return "<span style='color:#555'>N/A</span>"
     color = '#00C851' if val >= 0 else '#FF4444'
@@ -2305,133 +2338,157 @@ def _catalyst_ret_cell(val) -> str:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_catalyst_news_tags(tickers_tuple: tuple) -> dict:
-    """
-    For each ticker try yfinance news, map headlines to catalyst keywords.
-    Returns {ticker: [theme_name, ...]}
-    """
-    tickers = list(tickers_tuple)
-    kw_to_theme = {}
-    for theme, tdata in CATALYST_THEME_MAP.items():
-        for kw in tdata.get('keywords', []):
-            kw_to_theme[kw.lower()] = theme.split(' ', 1)[-1].split('/')[0].strip()[:15]
+def fetch_ticker_news_sentiment(tickers_tuple):
     result = {}
-    for ticker in tickers[:30]:
-        tags = set()
+    for ticker in list(tickers_tuple):
+        headlines = []
         try:
             tkr = yf.Ticker(ticker)
             news_list = tkr.news if hasattr(tkr, 'news') and isinstance(tkr.news, list) else []
-            for item in news_list[:5]:
+            for item in news_list[:8]:
                 content = item.get('content', {}) if isinstance(item, dict) else {}
-                title = str(content.get('title', item.get('title', ''))).lower()
-                for kw, tname in kw_to_theme.items():
-                    if kw in title:
-                        tags.add(tname)
+                title = str(content.get('title', item.get('title', ''))).strip()
+                if title:
+                    headlines.append(title)
         except Exception:
             pass
-        result[ticker] = sorted(tags)[:3]
+        if not headlines:
+            try:
+                news_df = finvizfinance(ticker).ticker_news()
+                if not news_df.empty:
+                    for _, row in news_df.head(8).iterrows():
+                        t = str(row.get('Title', '')).strip()
+                        if t:
+                            headlines.append(t)
+            except Exception:
+                pass
+        label, pos, neg, pos_kw, neg_kw = classify_news_sentiment(headlines)
+        result[ticker] = {
+            'label': label, 'pos': pos, 'neg': neg,
+            'pos_kw': pos_kw, 'neg_kw': neg_kw,
+            'count': len(headlines),
+        }
     return result
 
 
-def build_catalyst_candidate_table(
-    selected_themes: list,
-    perf_data: dict,
-    news_tags: dict,
-    benchmark: str = 'SPY',
-) -> list:
-    """Build sorted list of candidate rows for display."""
+def build_rs_candidate_table(selected_themes, perf_data, sentiment_data, benchmark='SPY'):
     seen = set()
     rows = []
     for theme in selected_themes:
         tdata = CATALYST_THEME_MAP.get(theme, {})
+        curated_tags = tdata.get('catalyst_tags', [])
         for ticker, name in tdata.get('tickers', {}).items():
             if ticker in seen:
                 continue
             seen.add(ticker)
-            p   = perf_data.get(ticker, {})
-            rs  = compute_rs_score(ticker, perf_data, benchmark)
-            curated   = tdata.get('catalyst_tags', [])[:2]
-            live      = news_tags.get(ticker, [])[:2]
-            all_tags  = list(dict.fromkeys(curated + live))[:3]
-            vol_r     = p.get('vol_ratio')
-            highlight = rs >= 65 and bool(live)
+            p = perf_data.get(ticker, {})
+            b = perf_data.get(benchmark, {})
+            rs_cat = compute_rs_category(ticker, perf_data, benchmark)
+            sent = sentiment_data.get(ticker, {})
+            sent_label = sent.get('label', '⚪ 中性')
+            pos_kw = sent.get('pos_kw', [])
+            all_tags = list(dict.fromkeys(curated_tags[:2] + pos_kw[:1]))[:3]
+            tag_str = ' | '.join(all_tags) if all_tags else '—'
+            comment = ''
+            if rs_cat == '🟢 跑贏指數' and sent_label == '🟢 正面':
+                comment = '⭐ 技術+情緒雙強'
+            elif rs_cat == '🟡 就黎跑贏指數' and sent_label == '🟢 正面':
+                comment = '📈 動能改善+正面消息'
+
+            def _rel_safe(h):
+                tv = p.get(h)
+                bv = b.get(h)
+                if tv is None or bv is None:
+                    return None
+                return round(tv - bv, 2)
+
             rows.append({
-                'ticker':    ticker,
-                'name':      name,
-                'theme':     theme.split(' ', 1)[-1][:18] if ' ' in theme else theme[:18],
-                'tags':      ' | '.join(all_tags) if all_tags else '\u2014',
-                'price':     p.get('price'),
-                '1d':        p.get('1d'),
-                '5d':        p.get('5d'),
-                '1m':        p.get('1m'),
-                '3m':        p.get('3m'),
-                'ytd':       p.get('ytd'),
-                'rs':        rs,
-                'vol':       f"{vol_r:.2f}x" if vol_r is not None else 'N/A',
-                'highlight': highlight,
+                'theme':      theme.split(' ', 1)[-1][:18] if ' ' in theme else theme[:18],
+                'ticker':     ticker,
+                'name':       name,
+                'sent_label': sent_label,
+                'tags':       tag_str,
+                'price':      p.get('price'),
+                'rel_5d':     _rel_safe('5d'),
+                'rel_1m':     _rel_safe('1m'),
+                'rel_3m':     _rel_safe('3m'),
+                'rel_ytd':    _rel_safe('ytd'),
+                'rs_cat':     rs_cat,
+                'comment':    comment,
             })
-    rows.sort(key=lambda r: (not r['highlight'], -r['rs']))
+    order = {'🟢 跑贏指數': 0, '🟡 就黎跑贏指數': 1, '🔴 跑輸指數': 2}
+    rows.sort(key=lambda r: (order.get(r['rs_cat'], 9), -(r['rel_1m'] or -999)))
     return rows
 
 
-def render_candidate_table_html_cat(rows: list) -> str:
-    """Render candidate ticker table as styled HTML."""
-    header = """
-<style>
-.cat-tbl{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.8rem}
-.cat-tbl th{background:#1E1E2E;color:#aaa;padding:7px 8px;text-align:left;
-            border-bottom:2px solid #333;white-space:nowrap}
-.cat-tbl td{padding:6px 8px;vertical-align:middle;border-bottom:1px solid #1E1E2E}
-.cat-tbl tr.hl-row{background:#0D2B1A!important;border-left:3px solid #00C851}
-.cat-tbl tr:nth-child(even):not(.hl-row){background:#0E1117}
-.cat-tbl tr:nth-child(odd):not(.hl-row){background:#161B22}
-.cat-tbl tr:hover{background:#1F2937}
-.ctk{font-weight:bold;color:#4FC3F7}
-.ctag{background:#1A2A3A;color:#7EC8E3;padding:1px 5px;border-radius:4px;
-      font-size:0.7rem;margin:1px;display:inline-block}
-.chl{background:#004020;color:#00C851;padding:1px 6px;border-radius:8px;
-     font-size:0.68rem;font-weight:bold}
-</style>
-<table class="cat-tbl">
-<thead><tr>
-  <th>Ticker</th><th>名稱 / 主題</th><th>催化劑標籤</th>
-  <th>現價</th><th>1D</th><th>5D</th><th>1M</th><th>3M/YTD</th>
-  <th>RS評分</th><th>成交量</th>
-</tr></thead><tbody>
-"""
+def render_rs_candidate_table_html(rows, benchmark):
+    header = (
+        "<style>"
+        ".rs-tbl{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.79rem}"
+        ".rs-tbl th{background:#1E1E2E;color:#aaa;padding:7px 8px;text-align:left;"
+        "border-bottom:2px solid #333;white-space:nowrap}"
+        ".rs-tbl td{padding:6px 8px;vertical-align:middle;border-bottom:1px solid #1E1E2E}"
+        ".rs-tbl tr.win{background:#061810!important}"
+        ".rs-tbl tr.near{background:#1A1500!important}"
+        ".rs-tbl tr.lose{background:#0E1117}"
+        ".rs-tbl tr:hover{background:#1F2937}"
+        ".rtk{font-weight:bold;color:#4FC3F7}"
+        ".rtag{background:#1A2A3A;color:#7EC8E3;padding:1px 5px;border-radius:4px;"
+        "font-size:0.68rem;margin:1px;display:inline-block}"
+        ".rcomment{background:#004020;color:#00C851;padding:1px 6px;border-radius:8px;"
+        "font-size:0.67rem;font-weight:bold}"
+        "</style>"
+        '<table class="rs-tbl">'
+        "<thead><tr>"
+        "<th>板塊/Theme</th><th>Ticker</th><th>公司</th>"
+        "<th>新聞情緒</th><th>催化劑標籤</th>"
+        "<th>現價</th>"
+        f"<th>5D相對({benchmark})</th><th>1M相對({benchmark})</th>"
+        f"<th>3M相對({benchmark})</th><th>YTD相對({benchmark})</th>"
+        "<th>RS狀態</th><th>備注</th>"
+        "</tr></thead><tbody>"
+    )
     body_rows = []
     for r in rows:
-        hl_cls   = ' class="hl-row"' if r['highlight'] else ''
-        hl_badge = "<span class='chl'>⭐ 高分+催化</span>" if r['highlight'] else ''
+        rs = r['rs_cat']
+        if rs == '🟢 跑贏指數':
+            row_cls = 'win'
+        elif rs == '🟡 就黎跑贏指數':
+            row_cls = 'near'
+        else:
+            row_cls = 'lose'
+
         price_str = f"${r['price']:.2f}" if r['price'] else 'N/A'
-        tag_html  = (''.join(
-            f"<span class='ctag'>{t}</span>"
-            for t in r['tags'].split(' | ') if t and t != '\u2014'
-        ) or '\u2014')
-        ytd_or_3m = _catalyst_ret_cell(r.get('ytd') or r.get('3m'))
+        tag_html = (''.join(
+            f"<span class='rtag'>{t}</span>"
+            for t in r['tags'].split(' | ') if t and t != '—'
+        ) or '—')
+        comment_html = f"<span class='rcomment'>{r['comment']}</span>" if r['comment'] else ''
+
         body_rows.append(
-            f"<tr{hl_cls}>"
-            f"<td><span class='ctk'>{r['ticker']}</span> {hl_badge}</td>"
-            f"<td style='color:#ddd;font-size:0.75rem'>{r['name']}<br>"
-            f"<span style='color:#666;font-size:0.68rem'>{r['theme']}</span></td>"
+            f"<tr class='{row_cls}'>"
+            f"<td style='color:#888;font-size:0.73rem'>{r['theme']}</td>"
+            f"<td><span class='rtk'>{r['ticker']}</span></td>"
+            f"<td style='color:#ccc;font-size:0.74rem'>{r['name']}</td>"
+            f"<td>{_sentiment_badge(r['sent_label'])}</td>"
             f"<td>{tag_html}</td>"
             f"<td style='color:#ccc'>{price_str}</td>"
-            f"<td>{_catalyst_ret_cell(r['1d'])}</td>"
-            f"<td>{_catalyst_ret_cell(r['5d'])}</td>"
-            f"<td>{_catalyst_ret_cell(r['1m'])}</td>"
-            f"<td>{ytd_or_3m}</td>"
-            f"<td>{_catalyst_score_bar_html(r['rs'])}</td>"
-            f"<td style='color:#888;font-size:0.73rem'>{r['vol']}</td>"
+            f"<td>{_ret_cell(r['rel_5d'])}</td>"
+            f"<td>{_ret_cell(r['rel_1m'])}</td>"
+            f"<td>{_ret_cell(r['rel_3m'])}</td>"
+            f"<td>{_ret_cell(r['rel_ytd'])}</td>"
+            f"<td>{_rs_status_badge(rs)}</td>"
+            f"<td>{comment_html}</td>"
             f"</tr>"
         )
     return header + '\n'.join(body_rows) + '\n</tbody></table>'
 
 
 def render_catalyst_screener_module():
-    """Main page module: 新聞催化劑 / 熱門板塊 / RS 選股"""
-    st.title('📡 新聞催化劑 / 熱門板塊 / RS 選股')
+    st.title('📡 新聞催化劑 / RS 方法選股')
     st.caption(
-        '根據最新新聞催化劑，鎖定熱門板塊，結合相對強度 (RS) 評分篩選高潛力個股。'
+        '流程：📰 新聞催化劑 → 🔥 熱門板塊 → 📋 潛在股票 → 📊 RS方法分類 '
+        '（跑贏指數 / 就黎跑贏指數 / 跑輸指數）'
         '  ⚠️ 免責聲明：本工具僅供篩選/觀察清單用途，並非投資建議。'
     )
 
@@ -2439,29 +2496,39 @@ def render_catalyst_screener_module():
     with ctrl_l:
         all_themes = list(CATALYST_THEME_MAP.keys())
         selected_themes = st.multiselect(
-            '選擇催化劑主題 / 板塊:',
+            '選擇催化劑主題 / 板塊 (可多選):',
             all_themes,
             default=all_themes[:4],
             key='cat_theme_select',
-            help='選擇你感興趣的催化劑主題，下方將顯示相關候選股票。'
+            help='選擇你感興趣的催化劑主題，下方將顯示該主題所有候選股票。'
         )
     with ctrl_m:
         benchmark = st.selectbox(
-            'RS 基準:',
+            'RS 比較基準:',
             ['SPY', 'QQQ', 'IWM'],
             key='cat_bench',
-            help='RS 評分相對於此指數計算。'
+            help='RS 方法相對於此指數計算相對回報。預設 SPY。'
         )
-        rs_min = st.slider('最低 RS 評分:', 0, 100, 50, 5, key='cat_rs_min')
+        rs_filter = st.multiselect(
+            '篩選 RS 狀態:',
+            ['🟢 跑贏指數', '🟡 就黎跑贏指數', '🔴 跑輸指數'],
+            default=['🟢 跑贏指數', '🟡 就黎跑贏指數', '🔴 跑輸指數'],
+            key='rs_status_filter',
+        )
+        sent_filter = st.multiselect(
+            '篩選新聞情緒:',
+            ['🟢 正面', '⚪ 中性', '🔴 負面'],
+            default=['🟢 正面', '⚪ 中性', '🔴 負面'],
+            key='rs_sent_filter',
+        )
     with ctrl_r:
         st.markdown('<br>', unsafe_allow_html=True)
         refresh_cat = st.button('🔄 刷新數據', use_container_width=True, key='refresh_catalyst')
-        show_all = st.checkbox('顯示所有 (含低 RS)', value=False, key='cat_show_all')
 
     if refresh_cat:
         try:
             fetch_catalyst_rs_data.clear()
-            fetch_catalyst_news_tags.clear()
+            fetch_ticker_news_sentiment.clear()
         except Exception:
             pass
         st.rerun()
@@ -2470,15 +2537,14 @@ def render_catalyst_screener_module():
         st.info('請至少選擇一個催化劑主題。')
         return
 
-    # Collect candidate tickers
+    # Collect ALL candidate tickers (no RS truncation)
     candidate_tickers = []
     for theme in selected_themes:
         for t in CATALYST_THEME_MAP[theme].get('tickers', {}):
             if t not in candidate_tickers:
                 candidate_tickers.append(t)
-    candidate_tickers = candidate_tickers[:50]
 
-    # ── 步驟1: 新聞催化劑 ──────────────────────────────────────────
+    # Step 1: News headlines
     st.markdown('---')
     st.markdown('### 📰 步驟1：新聞催化劑 Headlines')
     col_news1, col_news2 = st.columns([3, 2])
@@ -2504,6 +2570,13 @@ def render_catalyst_screener_module():
                 st.markdown(chips, unsafe_allow_html=True)
             else:
                 st.caption('（暫無明確板塊命中，使用預設催化劑手冊）')
+            all_headlines = [n.get('新聞標題', '') for n in news_list[:20] if n.get('新聞標題')]
+            theme_label, theme_pos, theme_neg, _, _ = classify_news_sentiment(all_headlines)
+            st.markdown(
+                f"**市場整體新聞情緒：** {_sentiment_badge(theme_label)} "
+                f"<span style='font-size:0.72rem;color:#888'>（正面訊號 {theme_pos} | 負面訊號 {theme_neg}）</span>",
+                unsafe_allow_html=True
+            )
             with st.expander('🔎 最新財經頭條', expanded=False):
                 for item in news_list[:12]:
                     src = item.get('來源', '')
@@ -2531,10 +2604,9 @@ def render_catalyst_screener_module():
                     unsafe_allow_html=True
                 )
 
-    # ── 步驟2: 候選股票 + RS ────────────────────────────────────────
+    # Step 2: Fetch data
     st.markdown('---')
-    st.markdown('### 📊 步驟2：候選股票 + RS 評分')
-
+    st.markdown('### 📊 步驟2：抓取多時段回報數據')
     with st.spinner(f'正在抓取 {len(candidate_tickers)} 隻候選股票的多時段回報數據...'):
         try:
             perf_data = fetch_catalyst_rs_data(
@@ -2544,74 +2616,85 @@ def render_catalyst_screener_module():
         except Exception:
             perf_data = {}
 
-    with st.spinner('抓取個股相關新聞催化劑標籤...'):
+    with st.spinner('分析個股新聞情緒...'):
         try:
-            news_tags = fetch_catalyst_news_tags(tuple(candidate_tickers[:30]))
+            sentiment_data = fetch_ticker_news_sentiment(tuple(candidate_tickers))
         except Exception:
-            news_tags = {}
+            sentiment_data = {}
 
-    rows = build_catalyst_candidate_table(selected_themes, perf_data, news_tags, benchmark)
-    rows_display = rows if show_all else [r for r in rows if r['rs'] >= rs_min]
+    # Step 3: RS method categorisation
+    st.markdown('---')
+    st.markdown('### 📋 步驟3：RS 方法分類 — 潛在股票全名單')
 
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric('候選股票數', len(rows))
-    mc2.metric(f'RS ≥ {rs_min}', len([r for r in rows if r['rs'] >= rs_min]))
-    mc3.metric('⭐ 高分+催化 (RS≥65)', sum(1 for r in rows if r['highlight']))
+    rows = build_rs_candidate_table(selected_themes, perf_data, sentiment_data, benchmark)
+
+    rows_display = [
+        r for r in rows
+        if r['rs_cat'] in rs_filter and r['sent_label'] in sent_filter
+    ]
+
+    n_win  = sum(1 for r in rows if r['rs_cat'] == '🟢 跑贏指數')
+    n_near = sum(1 for r in rows if r['rs_cat'] == '🟡 就黎跑贏指數')
+    n_lose = sum(1 for r in rows if r['rs_cat'] == '🔴 跑輸指數')
     bench_1d = perf_data.get(benchmark, {}).get('1d')
-    mc4.metric(f'{benchmark} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric('全部候選股', len(rows))
+    mc2.metric('🟢 跑贏指數', n_win)
+    mc3.metric('🟡 就黎跑贏', n_near)
+    mc4.metric('🔴 跑輸指數', n_lose)
+    mc5.metric(f'{benchmark} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
 
     if rows_display:
         st.markdown(
             f"<div style='color:#888;font-size:0.78rem;margin:4px 0'>"
-            f"顯示 {len(rows_display)} / {len(rows)} 隻候選股票（RS≥{rs_min}）。"
-            f"⭐ 高亮 = 同時有新聞催化劑命中 + RS≥65。"
+            f"顯示 {len(rows_display)} / {len(rows)} 隻候選股票（已套用篩選）。"
             f"</div>",
             unsafe_allow_html=True
         )
-        st.markdown(render_candidate_table_html_cat(rows_display), unsafe_allow_html=True)
+        st.markdown(render_rs_candidate_table_html(rows_display, benchmark), unsafe_allow_html=True)
     else:
-        st.warning(f'⚠️ 暫無 RS ≥ {rs_min} 的股票，請調低門檻或選擇更多主題。')
+        st.warning('⚠️ 當前篩選條件下無候選股票，請調整 RS狀態 或 情緒 篩選。')
 
-    # ── RS Top 10 ──────────────────────────────────────────────────
-    top_rs = sorted(rows, key=lambda r: -r['rs'])[:10]
-    if top_rs:
-        st.markdown('---')
-        st.markdown('### 🏆 RS 評分 Top 10')
-        n_cols = min(5, len(top_rs))
-        cols_top = st.columns(n_cols)
-        for i, r in enumerate(top_rs[:10]):
-            col = cols_top[i % n_cols]
-            rs = r['rs']
-            color = '#00C851' if rs >= 70 else ('#F9A825' if rs >= 50 else '#FF4444')
-            col.markdown(
-                f"<div style='text-align:center;background:#161B22;padding:6px;border-radius:6px;"
-                f"border:1px solid {color}44;margin-bottom:4px'>"
-                f"<div style='font-weight:bold;color:#4FC3F7'>{r['ticker']}</div>"
-                f"<div style='font-size:0.68rem;color:#888'>{r['name'][:14]}</div>"
-                f"<div style='font-size:1.0rem;color:{color};font-weight:bold'>{rs}</div>"
-                f"<div style='font-size:0.68rem;color:#666'>RS 分</div>"
+    # Theme-level sentiment summary
+    st.markdown('---')
+    st.markdown('### 🗂️ 板塊新聞情緒摘要')
+    theme_cols = st.columns(min(4, len(selected_themes)))
+    for col, theme in zip(theme_cols, selected_themes):
+        tdata = CATALYST_THEME_MAP.get(theme, {})
+        tickers_in_theme = list(tdata.get('tickers', {}).keys())
+        t_pos = sum(sentiment_data.get(tk, {}).get('pos', 0) for tk in tickers_in_theme)
+        t_neg = sum(sentiment_data.get(tk, {}).get('neg', 0) for tk in tickers_in_theme)
+        if t_pos > t_neg and t_pos > 0:
+            t_lbl = '🟢 正面'
+        elif t_neg > t_pos and t_neg > 0:
+            t_lbl = '🔴 負面'
+        else:
+            t_lbl = '⚪ 中性'
+        icon = theme.split()[0]
+        name = theme.split(' ', 1)[-1][:16]
+        with col:
+            st.markdown(
+                f"<div style='background:#161B22;border-radius:6px;padding:8px 10px;margin-bottom:4px'>"
+                f"<div style='font-size:0.78rem;font-weight:bold;color:#4FC3F7'>{icon} {name}</div>"
+                f"<div style='margin:4px 0'>{_sentiment_badge(t_lbl)}</div>"
+                f"<div style='font-size:0.67rem;color:#888'>正面 {t_pos} | 負面 {t_neg}</div>"
                 f"</div>",
                 unsafe_allow_html=True
             )
 
-    with st.expander('📖 RS 評分方法 & 免責聲明', expanded=False):
-        st.markdown("""
-**RS 評分設計（0-100）：**
-
-| 時間段 | 權重 |
-|--------|------|
-| 1 日   | 10%  |
-| 5 日   | 20%  |
-| 1 個月 | 30%  |
-| 3 個月 | 25%  |
-| 年初至今 | 15% |
-
-每個時間段計算個股回報 vs 基準指數（SPY/QQQ/IWM）的超額回報，加權求和後映射至
-0–100（50分 = 與基準持平；±20% 超額表現 → ±50分）。
-
-**⚠️ 免責聲明：** 本模組純為技術篩選/觀察清單工具，所有數據僅供參考，
-不構成任何形式的投資建議或推介。投資有風險，所有買賣決定均需自行判斷。
-        """)
+    with st.expander('📖 RS 方法分類邏輯 & 免責聲明', expanded=False):
+        st.markdown(
+            f"**RS 方法分類（相對強度法，對比 {benchmark}）：**\n\n"
+            "| RS 狀態 | 條件 |\n"
+            "|---------|------|\n"
+            "| 🟢 跑贏指數 | 個股 1M 相對回報 > 0 **且** 3M 相對回報 > 0（中長線均跑贏）|\n"
+            "| 🟡 就黎跑贏指數 | 5D 相對回報 > 0（短線開始改善），且 1M/3M 差距 > -3%；或 5D 相對 > 1M 相對（動能加速）|\n"
+            "| 🔴 跑輸指數 | 其他情況（各時間段均落後基準）|\n\n"
+            f"**相對回報：** 個股各時間段回報 − 基準（{benchmark}）同期回報\n\n"
+            "**新聞情緒：** 正面關鍵字（beat/raise/growth/AI/contract/upgrade…）vs 負面（miss/cut/downgrade/tariff/lawsuit…）關鍵字匹配計分。\n\n"
+            "⚠️ 本模組純為技術篩選/觀察清單工具，所有數據僅供參考，不構成任何形式的投資建議。"
+        )
 
 
 # ==========================================
@@ -3102,12 +3185,10 @@ with st.sidebar:
     app_mode = st.radio('選擇模組', [
         '🔥 熱門板塊關係圖',
         '🎯 產業故事 Radar / Scorecard',
-        '📡 新聞催化劑 / RS 選股',
+        '📡 新聞催化劑 / RS 方法選股',
         '🎯 RS x MACD 動能狙擊手',
         '📰 近月 AI 洞察 (廣東話版)',
         '🕵️ 另類數據雷達 (6大維度)',
-        '🔍 個股驗證模式 (Bottom-Up)',
-        '⚔️ 終極雙劍合璧 (Full Integration)'
     ])
 
     st.markdown('---')
@@ -3127,7 +3208,7 @@ with st.sidebar:
 if app_mode == '🎯 產業故事 Radar / Scorecard':
     render_market_radar_module()
 
-elif app_mode == '📡 新聞催化劑 / RS 選股':
+elif app_mode == '📡 新聞催化劑 / RS 方法選股':
     render_catalyst_screener_module()
 
 elif app_mode == '🎯 RS x MACD 動能狙擊手':
@@ -3322,64 +3403,6 @@ elif app_mode == '🕵️ 另類數據雷達 (6大維度)':
             with st.container(border=True):
                 st.markdown(res)
 
-elif app_mode == '🔍 個股驗證模式 (Bottom-Up)':
-    st.title('🔍 個股驗證模式 (Bottom-Up)')
-    target_ticker = st.text_input("輸入美股代號 (例如 TSLA, NVDA):").upper().strip()
-    if st.button('🧠 立即驗證', type='primary') and target_ticker:
-        with st.spinner(f'抓取緊 {target_ticker} 嘅最新新聞並交由 AI 分析...'):
-            news = fetch_single_stock_news(target_ticker)
-        if news:
-            res = final_text_sanitize(analyze_single_stock_sentiment(target_ticker, news))
-            st.subheader(f"📊 {target_ticker} 驗證結果")
-            lines = [x.strip() for x in res.split('\n') if x.strip()]
-            if lines:
-                st.markdown(f"### {lines[0]}")
-                with st.container(border=True):
-                    st.markdown(final_text_sanitize('\n\n'.join(lines[1:]) if len(lines) > 1 else '暫無補充。'))
-            else:
-                with st.container(border=True): st.markdown(res)
-            with st.expander("📄 查看 AI 參考嘅原始新聞"):
-                for n in news: st.caption(n)
-        else:
-            st.warning(f"⚠️ 搵唔到 {target_ticker} 嘅近期新聞。")
-
 elif app_mode == '🔥 熱門板塊關係圖':
     render_hot_sectors_module()
 
-elif app_mode == '⚔️ 終極雙劍合璧 (Full Integration)':
-    st.title('⚔️ 終極雙劍合璧 (Full Integration)')
-    st.info("💡 呢個功能會自動掃描全市場再入 AI 驗證，需時約 2-3 分鐘。")
-    if st.button('🚀 啟動終極掃描', type='primary', use_container_width=True):
-        status_text, progress_bar = st.empty(), st.progress(0)
-        status_text.markdown('**階段 1/2**: 執行全市場 RS x MACD 掃描 (強制市值 > 20億)...')
-        try:
-            f_sc = Overview()
-            f_sc.set_filter(filters_dict={'Market Cap.': '+Mid (over $2bln)'})
-            raw_data = f_sc.screener_view()
-        except: raw_data = pd.DataFrame()
-        if not raw_data.empty:
-            df_p = raw_data.copy()
-            indicators = calculate_all_indicators(df_p['Ticker'].tolist(), 25, 125, 'Close > 短期及長期 SMA', _progress_bar=progress_bar, _status_text=status_text)
-            df_p['RS_階段'] = df_p['Ticker'].map(lambda x: indicators.get(x, {}).get('RS', '無'))
-            df_p['MACD_階段'] = df_p['Ticker'].map(lambda x: indicators.get(x, {}).get('MACD', '無'))
-            df_p['SMA多頭'] = df_p['Ticker'].map(lambda x: indicators.get(x, {}).get('SMA_Trend', False))
-            tech_df = df_p[(df_p['SMA多頭'] == True) & (df_p['RS_階段'].isin(['🚀 啱啱突破', '🔥 已經突破'])) & (df_p['MACD_階段'].isin(['🚀 啱啱突破', '🔥 已經突破']))].copy()
-            if not tech_df.empty:
-                st.success(f"✅ 搵到 {len(tech_df)} 隻技術突破股。準備交由 AI 驗證基本面...")
-                golden_df = run_full_integration(tech_df, progress_bar, status_text)
-                status_text.markdown('✅ **終極掃描完成！**'); progress_bar.progress(100)
-                if not golden_df.empty:
-                    st.balloons()
-                    st.subheader(f"🏆 終極黃金共振名單 (共 {len(golden_df)} 隻)")
-                    ec = [c for c in ['Ticker', 'Company', 'Sector', 'RS_階段', 'MACD_階段', 'AI 消息情緒'] if c in golden_df.columns]
-                    st.dataframe(golden_df[ec], use_container_width=True, hide_index=True)
-                    st.markdown("### 🧠 AI 深度分析逐隻睇")
-                    for _, row in golden_df.iterrows():
-                        with st.expander(f"{row.get('Ticker', 'N/A')} | {row.get('AI 消息情緒', 'N/A')}"):
-                            st.markdown(final_text_sanitize(row.get('AI 深度分析', '無分析內容。')))
-                else:
-                    st.warning('⚠️ AI 驗證後未見有足夠強烈好消息支持，本次無黃金名單輸出。')
-            else:
-                status_text.markdown('✅ 掃描完成。'); st.warning("無股票同時符合嚴格雙突破條件。")
-        else:
-            status_text.markdown('⚠️ 暫時攞唔到 Finviz 股票清單。')
