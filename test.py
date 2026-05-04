@@ -2272,6 +2272,12 @@ def fetch_catalyst_rs_data(tickers_tuple, benchmark='SPY'):
 
 
 def compute_rs_category(ticker, perf_data, benchmark='SPY'):
+    """Return one of four RS categories:
+    🟢 跑贏指數 – confirmed outperformer (1M & 3M both > 0)
+    🟠 接近突破 – close to outperforming: 1M near/above 0, 3M slightly negative
+    🟡 剛轉強  – just starting to turn: 5D relative > 0 but 1M still negative
+    🔴 跑輸指數 – lagging on all timeframes
+    """
     t = perf_data.get(ticker, {})
     b = perf_data.get(benchmark, {})
 
@@ -2286,32 +2292,44 @@ def compute_rs_category(ticker, perf_data, benchmark='SPY'):
     r1m = _rel('1m')
     r3m = _rel('3m')
 
-    # 跑贏指數: both 1M and 3M outperform
+    # ── 🟢 跑贏指數: confirmed on BOTH 1M and 3M ─────────────────────────
     if r1m is not None and r3m is not None:
         if r1m > 0 and r3m > 0:
             return '🟢 跑贏指數'
 
-    # 就黎跑贏: short-term improving or accelerating
-    improving = False
+    # ── 🟠 接近突破: 1M near/above 0, 3M slightly negative or improving ──
+    # Stronger than 剛轉強 but not yet confirmed on both timeframes
+    near_breakout = False
+    if r1m is not None and r1m >= -1.5:      # 1M relative very close to or above 0
+        if r3m is not None and r3m >= -5:   # 3M not deeply negative
+            near_breakout = True
+    if r1m is not None and r1m > 0:          # 1M already outperforming
+        if r3m is not None and r3m <= 0:     # but 3M still slightly behind
+            near_breakout = True
+    if near_breakout:
+        return '🟠 接近突破'
+
+    # ── 🟡 剛轉強: 5D relative turns positive, early-stage momentum turn ─
+    # 5D > 0 but 1M still negative; or 5D meaningfully better than 1M
+    just_turned = False
     if r5d is not None and r5d > 0:
-        if r1m is not None and r1m > -3:
-            improving = True
-        if r3m is not None and r3m > -3:
-            improving = True
+        if r1m is None or r1m <= 0:          # 5D positive but 1M not yet
+            just_turned = True
     if r5d is not None and r1m is not None:
-        if r5d > r1m:
-            improving = True
-    if improving:
-        return '🟡 就黎跑贏指數'
+        if r5d - r1m >= 2:                   # 5D meaningfully outpacing 1M (momentum turning)
+            just_turned = True
+    if just_turned:
+        return '🟡 剛轉強'
 
     return '🔴 跑輸指數'
 
 
 def _rs_status_badge(status):
     colors = {
-        '🟢 跑贏指數':    ('#003820', '#00C851'),
-        '🟡 就黎跑贏指數': ('#3A3000', '#F9A825'),
-        '🔴 跑輸指數':    ('#3A0000', '#FF4444'),
+        '🟢 跑贏指數':  ('#003820', '#00C851'),
+        '🟠 接近突破': ('#2D1800', '#FF8C00'),
+        '🟡 剛轉強':   ('#3A3000', '#F9A825'),
+        '🔴 跑輸指數':  ('#3A0000', '#FF4444'),
     }
     bg, fg = colors.get(status, ('#1A1A2E', '#aaa'))
     return (f"<span style='background:{bg};color:{fg};padding:2px 8px;"
@@ -2392,8 +2410,10 @@ def build_rs_candidate_table(selected_themes, perf_data, sentiment_data, benchma
             comment = ''
             if rs_cat == '🟢 跑贏指數' and sent_label == '🟢 正面':
                 comment = '⭐ 技術+情緒雙強'
-            elif rs_cat == '🟡 就黎跑贏指數' and sent_label == '🟢 正面':
-                comment = '📈 動能改善+正面消息'
+            elif rs_cat == '🟠 接近突破' and sent_label == '🟢 正面':
+                comment = '🔥 接近突破+正面消息'
+            elif rs_cat == '🟡 剛轉強' and sent_label == '🟢 正面':
+                comment = '📈 剛轉強+正面消息'
 
             def _rel_safe(h):
                 tv = p.get(h)
@@ -2416,7 +2436,7 @@ def build_rs_candidate_table(selected_themes, perf_data, sentiment_data, benchma
                 'rs_cat':     rs_cat,
                 'comment':    comment,
             })
-    order = {'🟢 跑贏指數': 0, '🟡 就黎跑贏指數': 1, '🔴 跑輸指數': 2}
+    order = {'🟢 跑贏指數': 0, '🟠 接近突破': 1, '🟡 剛轉強': 2, '🔴 跑輸指數': 3}
     rows.sort(key=lambda r: (order.get(r['rs_cat'], 9), -(r['rel_1m'] or -999)))
     return rows
 
@@ -2429,7 +2449,8 @@ def render_rs_candidate_table_html(rows, benchmark):
         "border-bottom:2px solid #333;white-space:nowrap}"
         ".rs-tbl td{padding:6px 8px;vertical-align:middle;border-bottom:1px solid #1E1E2E}"
         ".rs-tbl tr.win{background:#061810!important}"
-        ".rs-tbl tr.near{background:#1A1500!important}"
+        ".rs-tbl tr.near-orange{background:#1A0E00!important}"
+        ".rs-tbl tr.near-yellow{background:#1A1500!important}"
         ".rs-tbl tr.lose{background:#0E1117}"
         ".rs-tbl tr:hover{background:#1F2937}"
         ".rtk{font-weight:bold;color:#4FC3F7}"
@@ -2453,8 +2474,10 @@ def render_rs_candidate_table_html(rows, benchmark):
         rs = r['rs_cat']
         if rs == '🟢 跑贏指數':
             row_cls = 'win'
-        elif rs == '🟡 就黎跑贏指數':
-            row_cls = 'near'
+        elif rs == '🟠 接近突破':
+            row_cls = 'near-orange'
+        elif rs == '🟡 剛轉強':
+            row_cls = 'near-yellow'
         else:
             row_cls = 'lose'
 
@@ -2488,7 +2511,7 @@ def render_catalyst_screener_module():
     st.title('📡 新聞催化劑 / RS 方法選股')
     st.caption(
         '流程：📰 新聞催化劑 → 🔥 熱門板塊 → 📋 潛在股票 → 📊 RS方法分類 '
-        '（跑贏指數 / 就黎跑贏指數 / 跑輸指數）'
+        '（跑贏指數 / 接近突破 / 剛轉強 / 跑輸指數）'
         '  ⚠️ 免責聲明：本工具僅供篩選/觀察清單用途，並非投資建議。'
     )
 
@@ -2511,8 +2534,8 @@ def render_catalyst_screener_module():
         )
         rs_filter = st.multiselect(
             '篩選 RS 狀態:',
-            ['🟢 跑贏指數', '🟡 就黎跑贏指數', '🔴 跑輸指數'],
-            default=['🟢 跑贏指數', '🟡 就黎跑贏指數', '🔴 跑輸指數'],
+            ['🟢 跑贏指數', '🟠 接近突破', '🟡 剛轉強', '🔴 跑輸指數'],
+            default=['🟢 跑贏指數', '🟠 接近突破', '🟡 剛轉強', '🔴 跑輸指數'],
             key='rs_status_filter',
         )
         sent_filter = st.multiselect(
@@ -2604,13 +2627,15 @@ def render_catalyst_screener_module():
                     unsafe_allow_html=True
                 )
 
-    # Step 2: Fetch data
+    # Step 2: Fetch data (include theme ETFs for heatmap)
+    theme_etfs = list(THEME_ETF_MAP.values())
+    all_fetch_tickers = list(set(candidate_tickers + theme_etfs))
     st.markdown('---')
     st.markdown('### 📊 步驟2：抓取多時段回報數據')
-    with st.spinner(f'正在抓取 {len(candidate_tickers)} 隻候選股票的多時段回報數據...'):
+    with st.spinner(f'正在抓取 {len(all_fetch_tickers)} 隻候選股票+ETF 的多時段回報數據...'):
         try:
             perf_data = fetch_catalyst_rs_data(
-                tuple(sorted(set(candidate_tickers + [benchmark]))),
+                tuple(sorted(set(all_fetch_tickers + [benchmark]))),
                 benchmark=benchmark
             )
         except Exception:
@@ -2633,17 +2658,19 @@ def render_catalyst_screener_module():
         if r['rs_cat'] in rs_filter and r['sent_label'] in sent_filter
     ]
 
-    n_win  = sum(1 for r in rows if r['rs_cat'] == '🟢 跑贏指數')
-    n_near = sum(1 for r in rows if r['rs_cat'] == '🟡 就黎跑贏指數')
-    n_lose = sum(1 for r in rows if r['rs_cat'] == '🔴 跑輸指數')
+    n_win   = sum(1 for r in rows if r['rs_cat'] == '🟢 跑贏指數')
+    n_near  = sum(1 for r in rows if r['rs_cat'] == '🟠 接近突破')
+    n_just  = sum(1 for r in rows if r['rs_cat'] == '🟡 剛轉強')
+    n_lose  = sum(1 for r in rows if r['rs_cat'] == '🔴 跑輸指數')
     bench_1d = perf_data.get(benchmark, {}).get('1d')
 
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
     mc1.metric('全部候選股', len(rows))
     mc2.metric('🟢 跑贏指數', n_win)
-    mc3.metric('🟡 就黎跑贏', n_near)
-    mc4.metric('🔴 跑輸指數', n_lose)
-    mc5.metric(f'{benchmark} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
+    mc3.metric('🟠 接近突破', n_near)
+    mc4.metric('🟡 剛轉強', n_just)
+    mc5.metric('🔴 跑輸指數', n_lose)
+    mc6.metric(f'{benchmark} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
 
     if rows_display:
         st.markdown(
@@ -2683,18 +2710,570 @@ def render_catalyst_screener_module():
                 unsafe_allow_html=True
             )
 
+    # ── B. 公司關係發現 ───────────────────────────────────────
+    render_relationship_section(perf_data, sentiment_data, benchmark)
+
+    # ── C. 主題熱力圖 & 下一輪潛在爆發 ────────────────────────────
+    render_theme_heatmap_section(selected_themes, perf_data, sentiment_data, benchmark)
+
     with st.expander('📖 RS 方法分類邏輯 & 免責聲明', expanded=False):
         st.markdown(
             f"**RS 方法分類（相對強度法，對比 {benchmark}）：**\n\n"
             "| RS 狀態 | 條件 |\n"
             "|---------|------|\n"
             "| 🟢 跑贏指數 | 個股 1M 相對回報 > 0 **且** 3M 相對回報 > 0（中長線均跑贏）|\n"
-            "| 🟡 就黎跑贏指數 | 5D 相對回報 > 0（短線開始改善），且 1M/3M 差距 > -3%；或 5D 相對 > 1M 相對（動能加速）|\n"
+            "| 🟠 接近突破 | 1M 相對差距 ≥ -1.5% 且 3M > -5%；或 1M已正但 3M 仍負（更強但尚未全面確認）|\n"
+            "| 🟡 剛轉強  | 5D 相對已正但 1M 仍負；或 5D 相對比1M 高出 ≥2%（短線剛開始轉好）|\n"
             "| 🔴 跑輸指數 | 其他情況（各時間段均落後基準）|\n\n"
             f"**相對回報：** 個股各時間段回報 − 基準（{benchmark}）同期回報\n\n"
             "**新聞情緒：** 正面關鍵字（beat/raise/growth/AI/contract/upgrade…）vs 負面（miss/cut/downgrade/tariff/lawsuit…）關鍵字匹配計分。\n\n"
             "⚠️ 本模組純為技術篩選/觀察清單工具，所有數據僅供參考，不構成任何形式的投資建議。"
         )
+
+
+# ==========================================
+# B. 公司關係圖 Company Relationship Engine
+# ==========================================
+# Curated relationship graph: seed_ticker -> list of (related_ticker, relation_type, why)
+COMPANY_RELATIONSHIP_GRAPH = {
+    # ── AI Compute / GPU ────────────────────────────────────────────
+    'NVDA': [
+        ('TSM',  'supplier',     'TSMC 代工 NVIDIA GPU/AI 晶片（最先進製程）'),
+        ('ASML', 'supplier',     'ASML 唯一 EUV 光刻機供應商，TSM 擴產必需'),
+        ('AMAT', 'supplier',     'Applied Materials 提供晶圓製造設備'),
+        ('LRCX', 'supplier',     'Lam Research 蝕刻/沉積設備'),
+        ('KLAC', 'supplier',     'KLA 量測/檢測設備'),
+        ('AVGO', 'competitor',   'Broadcom ASIC 客製化 AI 晶片（Google TPU/Meta MTIA）'),
+        ('AMD',  'competitor',   'AMD MI300 系列直接競爭 H100/H200'),
+        ('MU',   'beneficiary',  'Micron HBM 記憶體為 NVIDIA GPU 必需元件'),
+        ('ANET', 'beneficiary',  'Arista Networks 數據中心 AI Fabric 網絡'),
+        ('SMCI', 'beneficiary',  'SuperMicro 組裝 NVIDIA GPU 伺服器'),
+        ('DELL', 'beneficiary',  'Dell 銷售 NVIDIA GPU 伺服器/工作站'),
+        ('VRT',  'infrastructure','Vertiv 液冷/電力管理（AI 數據中心散熱）'),
+        ('ETN',  'infrastructure','Eaton 電力分配，AI 數據中心用電管理'),
+        ('VST',  'infrastructure','Vistra Energy 為數據中心供電'),
+        ('CEG',  'infrastructure','Constellation Energy 核電供應 AI 數據中心'),
+        ('GEV',  'infrastructure','GE Vernova 電網/渦輪機，數據中心供電基建'),
+    ],
+    'AMD': [
+        ('NVDA', 'competitor',   'NVIDIA 最直接的 GPU 競爭對手'),
+        ('TSM',  'supplier',     'TSMC 代工 AMD CPU/GPU'),
+        ('AVGO', 'competitor',   'Broadcom AI ASIC 搶雲端客戶'),
+        ('MU',   'beneficiary',  'Micron 記憶體為 AMD GPU 配套'),
+        ('INTC', 'competitor',   'Intel CPU 市場直接競爭'),
+        ('AMAT', 'supplier',     'Applied Materials 晶圓設備供應商'),
+        ('SMCI', 'beneficiary',  'SuperMicro AMD GPU 伺服器'),
+    ],
+    'TSM': [
+        ('NVDA', 'customer',     'NVIDIA 最大晶圓代工客戶'),
+        ('AAPL', 'customer',     'Apple A 系列/M 系列晶片'),
+        ('AMD',  'customer',     'AMD CPU/GPU 製造'),
+        ('QCOM', 'customer',     'Qualcomm 手機晶片'),
+        ('AVGO', 'customer',     'Broadcom ASIC 客製晶片'),
+        ('ASML', 'supplier',     'ASML EUV 設備，TSM 先進製程必需'),
+        ('AMAT', 'supplier',     'Applied Materials 設備'),
+        ('LRCX', 'supplier',     'Lam Research 設備'),
+    ],
+    'AVGO': [
+        ('NVDA', 'competitor',   'NVDA GPU vs AVGO ASIC，AI 晶片路線之爭'),
+        ('GOOGL','customer',     'Google 採購 AVGO TPU/網絡晶片'),
+        ('META', 'customer',     'Meta 採購 AVGO MTIA ASIC'),
+        ('TSM',  'supplier',     'TSMC 代工 Broadcom ASIC'),
+        ('ANET', 'ecosystem',    'Arista 網絡設備使用 AVGO 晶片'),
+        ('AMD',  'competitor',   'AI ASIC 市場競爭'),
+    ],
+    # ── Cloud / AI Platforms ─────────────────────────────────────────
+    'MSFT': [
+        ('NVDA', 'supplier',     'Azure 大規模採購 NVIDIA GPU'),
+        ('AMZN', 'competitor',   'AWS vs Azure 雲端市場競爭'),
+        ('GOOGL','competitor',   'Google Cloud / Workspace 競爭'),
+        ('ORCL', 'competitor',   'Oracle Cloud 企業雲端競爭'),
+        ('AVGO', 'supplier',     'Broadcom 網絡晶片用於 Azure 數據中心'),
+        ('ANET', 'supplier',     'Arista 網絡設備用於 Azure'),
+        ('CRM',  'ecosystem',    'Salesforce Einstein AI 與 Azure 整合'),
+        ('NOW',  'ecosystem',    'ServiceNow 與 Azure AI 深度整合'),
+    ],
+    'GOOGL': [
+        ('NVDA', 'competitor',   'Google TPU 自研 AI 晶片，減少 NVDA 依賴'),
+        ('AVGO', 'supplier',     'Broadcom ASIC 為 Google 客製 TPU'),
+        ('AMZN', 'competitor',   'AWS vs GCP 雲端競爭'),
+        ('MSFT', 'competitor',   'Azure vs GCP，Bing AI vs Gemini'),
+        ('META', 'competitor',   '廣告市場直接競爭'),
+        ('ANET', 'supplier',     'Arista 數據中心網絡'),
+        ('TSM',  'supplier',     'TSMC 代工 Google TPU'),
+    ],
+    'META': [
+        ('NVDA', 'supplier',     'Meta 最大 GPU 買家之一（訓練 LLaMA）'),
+        ('AVGO', 'supplier',     'Broadcom MTIA ASIC 客製晶片'),
+        ('GOOGL','competitor',   '廣告/社交媒體競爭'),
+        ('SNAP', 'competitor',   'Snapchat 社交媒體競爭'),
+        ('PINS', 'competitor',   'Pinterest 廣告競爭'),
+        ('ANET', 'supplier',     'Arista 數據中心網絡設備'),
+    ],
+    'AMZN': [
+        ('NVDA', 'supplier',     'AWS 採購 NVIDIA GPU + 自研 Trainium'),
+        ('MSFT', 'competitor',   'Azure vs AWS 雲端競爭'),
+        ('GOOGL','competitor',   'GCP vs AWS 競爭'),
+        ('WMT',  'competitor',   '電商市場直接競爭'),
+        ('COST', 'competitor',   '零售/會員制競爭'),
+        ('ANET', 'supplier',     'AWS 數據中心網絡'),
+        ('AVGO', 'supplier',     'Broadcom 晶片用於 AWS 數據中心'),
+    ],
+    # ── Data Center Power / Grid ─────────────────────────────────────
+    'VRT': [
+        ('ETN',  'competitor',   'Eaton 電力管理直接競爭'),
+        ('NVDA', 'customer',     'NVIDIA GPU 伺服器熱量管理需要 Vertiv'),
+        ('SMCI', 'customer',     'SuperMicro 伺服器配套散熱'),
+        ('VST',  'ecosystem',    'Vistra 供電，Vertiv 管理電力分配'),
+        ('CEG',  'ecosystem',    'Constellation 核電，配套電力基建'),
+        ('PWR',  'ecosystem',    'Quanta Services 電網建設'),
+        ('GEV',  'ecosystem',    'GE Vernova 電力設備同一生態'),
+    ],
+    'ETN': [
+        ('VRT',  'competitor',   'Vertiv 電力管理直接競爭'),
+        ('GEV',  'ecosystem',    'GE Vernova 電網/渦輪機生態'),
+        ('PWR',  'ecosystem',    'Quanta Services 電網建設'),
+        ('FCX',  'commodity',    'Eaton 耗用大量銅（電氣化）'),
+        ('HUBB', 'competitor',   'Hubbell 電網設備競爭'),
+    ],
+    'CEG': [
+        ('VST',  'competitor',   'Vistra 電力市場競爭（核能 vs 天然氣）'),
+        ('OKLO', 'ecosystem',    'Oklo 小型核反應堆同一核能賽道'),
+        ('NNE',  'ecosystem',    'Nano Nuclear 同一核能題材'),
+        ('ETN',  'beneficiary',  'Eaton 電力設備受惠核電擴建'),
+        ('VRT',  'beneficiary',  'Vertiv 受惠核電數據中心供電'),
+        ('NVDA', 'customer',     'NVIDIA/AI 數據中心需求驅動核電採購'),
+    ],
+    # ── Copper / Electrification ─────────────────────────────────────
+    'FCX': [
+        ('SCCO', 'competitor',   'Southern Copper 銅礦直接競爭'),
+        ('TECK', 'competitor',   'Teck Resources 銅礦競爭'),
+        ('ETN',  'beneficiary',  'Eaton 電氣化需求驅動銅需求'),
+        ('PWR',  'beneficiary',  'Quanta 電網建設消耗大量銅'),
+        ('TSLA', 'beneficiary',  'Tesla EV 用銅量為傳統車 3-4 倍'),
+        ('ALB',  'commodity',    'Albemarle 鋰礦，同屬 EV 電池材料'),
+    ],
+    # ── Energy / Natural Gas / LNG ───────────────────────────────────
+    'LNG': [
+        ('EQT',  'supplier',     'EQT 天然氣生產商，Cheniere LNG 出口'),
+        ('WMB',  'supplier',     'Williams 管道輸送天然氣給 LNG 設施'),
+        ('KMI',  'supplier',     'Kinder Morgan 管道基建'),
+        ('XOM',  'competitor',   'ExxonMobil LNG 出口競爭'),
+        ('CVX',  'competitor',   'Chevron LNG 出口競爭'),
+    ],
+    'XOM': [
+        ('CVX',  'competitor',   'Chevron 最直接的綜合油氣競爭對手'),
+        ('COP',  'competitor',   'ConocoPhillips 上游競爭'),
+        ('SLB',  'supplier',     'Schlumberger 油田服務'),
+        ('HAL',  'supplier',     'Halliburton 油田服務'),
+        ('LNG',  'competitor',   'Cheniere LNG 出口競爭'),
+    ],
+    # ── Financial / Fintech ──────────────────────────────────────────
+    'JPM': [
+        ('GS',   'competitor',   'Goldman Sachs 投行/交易業務競爭'),
+        ('MS',   'competitor',   'Morgan Stanley 財富管理競爭'),
+        ('BAC',  'competitor',   'Bank of America 零售/商業銀行競爭'),
+        ('BX',   'ecosystem',    'Blackstone PE 生態，IPO/M&A 合作'),
+        ('V',    'ecosystem',    'Visa 支付網絡（JPM 發卡行）'),
+        ('COIN', 'ecosystem',    'Coinbase 加密資產整合'),
+    ],
+    'GS': [
+        ('JPM',  'competitor',   'JPMorgan 投行業務競爭'),
+        ('MS',   'competitor',   'Morgan Stanley 競爭'),
+        ('BX',   'ecosystem',    'Blackstone PE，共同服務機構客戶'),
+        ('KKR',  'ecosystem',    'KKR PE，M&A 生態'),
+        ('BLK',  'ecosystem',    'BlackRock 資產管理生態'),
+    ],
+    'COIN': [
+        ('HOOD', 'competitor',   'Robinhood 加密交易競爭'),
+        ('MSTR', 'beneficiary',  'MicroStrategy 持 BTC，幣價升 COIN 受惠'),
+        ('MARA', 'ecosystem',    'Marathon Digital 加密採礦生態'),
+        ('BX',   'ecosystem',    'Blackstone 機構加密資產配置'),
+    ],
+    # ── Healthcare / Obesity ─────────────────────────────────────────
+    'LLY': [
+        ('NVO',  'competitor',   'Novo Nordisk GLP-1 Ozempic/Wegovy 直接競爭'),
+        ('ISRG', 'beneficiary',  'Intuitive Surgical 肥胖症手術需求'),
+        ('TMO',  'beneficiary',  'Thermo Fisher GLP-1 藥物研發服務'),
+        ('DHR',  'beneficiary',  'Danaher 生命科學工具'),
+        ('RXRX', 'ecosystem',    'Recursion AI 藥研，新適應症發現'),
+        ('MRNA', 'competitor',   'Moderna mRNA 平台（潛在 GLP-1 競爭）'),
+    ],
+    'NVO': [
+        ('LLY',  'competitor',   'Eli Lilly Mounjaro/Zepbound 直接競爭'),
+        ('TMO',  'beneficiary',  'Thermo Fisher 藥物研發/製造服務'),
+        ('ISRG', 'beneficiary',  'Intuitive Surgical 肥胖症手術'),
+    ],
+}
+
+
+def get_related_tickers(seed_ticker: str):
+    """Return list of (related_ticker, relation_type, why) for a seed ticker.
+    Also checks reverse lookups (if seed appears as a related ticker)."""
+    direct = COMPANY_RELATIONSHIP_GRAPH.get(seed_ticker.upper(), [])
+    # reverse: find entries where seed_ticker is the related ticker
+    reverse = []
+    seed_up = seed_ticker.upper()
+    for parent, relations in COMPANY_RELATIONSHIP_GRAPH.items():
+        if parent == seed_up:
+            continue
+        for (rel_t, rel_type, why) in relations:
+            if rel_t == seed_up:
+                # Add inverse relationship to the seed
+                inv_type = {
+                    'supplier': 'customer',
+                    'customer': 'supplier',
+                    'competitor': 'competitor',
+                    'beneficiary': 'ecosystem',
+                    'ecosystem': 'ecosystem',
+                    'infrastructure': 'ecosystem',
+                    'commodity': 'ecosystem',
+                }.get(rel_type, 'ecosystem')
+                reverse.append((parent, inv_type, f'[反向] {why}'))
+    # Merge, deduplicate by ticker
+    seen = set()
+    result = []
+    for item in direct + reverse:
+        if item[0] not in seen:
+            seen.add(item[0])
+            result.append(item)
+    return result
+
+
+def render_relationship_section(perf_data, sentiment_data, benchmark):
+    """Render the Company Relationship Discovery section inside the RS module."""
+    st.markdown('---')
+    st.markdown('### 🕸️ 公司關係發現 Company Relationship Engine')
+    st.caption(
+        '選擇種子股票，查看供應鏈、客戶、競爭對手、生態受益者等相關公司及其 RS 狀態，'
+        '幫助捕捉產業鏈輪動機會。⚠️ 僅供篩選參考，不構成投資建議。'
+    )
+
+    all_seed_tickers = sorted(COMPANY_RELATIONSHIP_GRAPH.keys())
+    seed = st.selectbox(
+        '選擇種子股票 Seed Ticker:',
+        all_seed_tickers,
+        index=all_seed_tickers.index('NVDA') if 'NVDA' in all_seed_tickers else 0,
+        key='rel_seed_ticker',
+    )
+
+    related = get_related_tickers(seed)
+    if not related:
+        st.info(f'暫無 {seed} 的關係數據。')
+        return
+
+    # Fetch RS data for related tickers not already in perf_data
+    rel_tickers = [r[0] for r in related if r[0] not in perf_data]
+    if rel_tickers:
+        with st.spinner(f'抓取相關股票數據 ({len(rel_tickers)} 隻)...'):
+            try:
+                extra_perf = fetch_catalyst_rs_data(
+                    tuple(sorted(set(rel_tickers + [benchmark]))),
+                    benchmark=benchmark
+                )
+                perf_data = {**perf_data, **extra_perf}
+            except Exception:
+                pass
+
+    # Fetch sentiment for related tickers not already in sentiment_data
+    rel_sent_needed = [r[0] for r in related if r[0] not in sentiment_data]
+    if rel_sent_needed:
+        with st.spinner('分析相關股票新聞情緒...'):
+            try:
+                extra_sent = fetch_ticker_news_sentiment(tuple(rel_sent_needed))
+                sentiment_data = {**sentiment_data, **extra_sent}
+            except Exception:
+                pass
+
+    # Build table rows
+    rel_type_labels = {
+        'supplier':      '🔧 供應商',
+        'customer':      '🛒 客戶',
+        'competitor':    '⚔️ 競爭對手',
+        'beneficiary':   '📈 受益者',
+        'ecosystem':     '🌐 生態圈',
+        'infrastructure':'⚡ 基建',
+        'commodity':     '🪨 原材料',
+    }
+
+    header = (
+        "<style>"
+        ".rel-tbl{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.79rem}"
+        ".rel-tbl th{background:#1E1E2E;color:#aaa;padding:7px 8px;text-align:left;"
+        "border-bottom:2px solid #333;white-space:nowrap}"
+        ".rel-tbl td{padding:6px 8px;vertical-align:middle;border-bottom:1px solid #1E1E2E}"
+        ".rel-tbl tr:hover{background:#1F2937}"
+        ".rtk2{font-weight:bold;color:#FFD700}"
+        "</style>"
+        '<table class="rel-tbl">'
+        "<thead><tr>"
+        f"<th>種子<br>Seed</th><th>關係類型</th><th>相關Ticker</th>"
+        "<th>為何相關</th><th>新聞情緒</th>"
+        f"<th>5D相對</th><th>1M相對</th><th>3M相對</th><th>RS狀態</th>"
+        "</tr></thead><tbody>"
+    )
+
+    body_rows = []
+    bench = perf_data.get(benchmark, {})
+
+    def _rel_v(ticker, period):
+        p = perf_data.get(ticker, {})
+        tv = p.get(period)
+        bv = bench.get(period)
+        if tv is None or bv is None:
+            return None
+        return round(tv - bv, 2)
+
+    for (rel_t, rel_type, why) in related:
+        rs_cat = compute_rs_category(rel_t, perf_data, benchmark)
+        sent = sentiment_data.get(rel_t, {})
+        sent_label = sent.get('label', '⚪ 中性')
+        rel_label = rel_type_labels.get(rel_type, rel_type)
+        rs_badge = _rs_status_badge(rs_cat)
+        sent_badge = _sentiment_badge(sent_label)
+        r5d = _rel_v(rel_t, '5d')
+        r1m = _rel_v(rel_t, '1m')
+        r3m = _rel_v(rel_t, '3m')
+        body_rows.append(
+            f"<tr>"
+            f"<td><span style='font-weight:bold;color:#4FC3F7'>{seed}</span></td>"
+            f"<td>{rel_label}</td>"
+            f"<td><span class='rtk2'>{rel_t}</span></td>"
+            f"<td style='color:#bbb;font-size:0.73rem'>{why}</td>"
+            f"<td>{sent_badge}</td>"
+            f"<td>{_ret_cell(r5d)}</td>"
+            f"<td>{_ret_cell(r1m)}</td>"
+            f"<td>{_ret_cell(r3m)}</td>"
+            f"<td>{rs_badge}</td>"
+            f"</tr>"
+        )
+
+    st.markdown(header + '\n'.join(body_rows) + '\n</tbody></table>', unsafe_allow_html=True)
+
+    # Legend
+    st.markdown(
+        "<div style='font-size:0.68rem;color:#666;margin-top:6px'>"
+        "關係類型說明：🔧 供應商 = 向種子提供原料/設備/服務 │ "
+        "🛒 客戶 = 購買種子產品/服務 │ "
+        "⚔️ 競爭對手 = 同賽道直接競爭 │ "
+        "📈 受益者 = 因種子增長而間接受惠 │ "
+        "🌐 生態圈 = 同一主題生態 │ "
+        "⚡ 基建 = 提供基礎設施 │ "
+        "🪨 原材料 = 關鍵商品/原材料"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+
+# ==========================================
+# C. 主題熱力圖 & 下一輪潛在爆發 Theme Heat Map
+# ==========================================
+# Theme ETF map for heat scoring
+THEME_ETF_MAP = {
+    '🤖 AI 半導體 / 算力': 'SOXX',
+    '🧠 大型 AI 平台 (Mega-cap)': 'QQQ',
+    '⚡ 數據中心電力 / 電網': 'VRT',
+    '⚛️ 能源 / 天然氣': 'XLE',
+    '🏭 工業 / 再工業化': 'XLI',
+    '🔧 材料 / 銅 / 電氣化': 'XLB',
+    '📊 小型股 / 週期輪動': 'IWM',
+    '🏦 金融 / 銀行': 'XLF',
+    '💊 醫療 / 生物科技': 'XBI',
+    '🛡️ AI 軟件 / 網絡安全': 'CIBR',
+    '🛒 消費 / 零售': 'XLY',
+}
+
+
+def compute_theme_heat(theme_name, perf_data, sentiment_data, benchmark='SPY'):
+    """Compute a simple heat score for a theme given preloaded perf/sentiment data.
+    Returns dict with etf_rel_5d/1m/3m, breadth counts, sentiment, heat_label."""
+    tdata = CATALYST_THEME_MAP.get(theme_name, {})
+    etf = THEME_ETF_MAP.get(theme_name, tdata.get('etf', ''))
+    tickers = list(tdata.get('tickers', {}).keys())
+
+    # ETF relative performance
+    bench = perf_data.get(benchmark, {})
+    etf_data = perf_data.get(etf, {})
+
+    def _rel(d, period):
+        tv = d.get(period)
+        bv = bench.get(period)
+        return round(tv - bv, 2) if tv is not None and bv is not None else None
+
+    etf_rel_5d = _rel(etf_data, '5d')
+    etf_rel_1m = _rel(etf_data, '1m')
+    etf_rel_3m = _rel(etf_data, '3m')
+
+    # Breadth: count RS categories across theme tickers
+    n_win = n_near = n_just = n_lose = 0
+    for t in tickers:
+        cat = compute_rs_category(t, perf_data, benchmark)
+        if cat == '🟢 跑贏指數':  n_win  += 1
+        elif cat == '🟠 接近突破': n_near += 1
+        elif cat == '🟡 剛轉強':   n_just += 1
+        else:                      n_lose += 1
+
+    total = max(len(tickers), 1)
+    pct_strong = round((n_win + n_near) / total * 100)
+    pct_turning = round((n_just) / total * 100)
+
+    # Average news sentiment
+    pos_sum = sum(sentiment_data.get(t, {}).get('pos', 0) for t in tickers)
+    neg_sum = sum(sentiment_data.get(t, {}).get('neg', 0) for t in tickers)
+    if pos_sum > neg_sum and pos_sum > 0:
+        theme_sent = '🟢 正面'
+    elif neg_sum > pos_sum and neg_sum > 0:
+        theme_sent = '🔴 負面'
+    else:
+        theme_sent = '⚪ 中性'
+
+    catalyst_count = len(tdata.get('catalyst_tags', []))
+
+    # ── Heat label logic ──
+    # 當炒主線: ETF relative strong (1M > 0), breadth majority 跑贏/接近突破, sentiment positive
+    etf_1m_ok = etf_rel_1m is not None and etf_rel_1m > 0
+    etf_5d_ok = etf_rel_5d is not None and etf_rel_5d > 0
+
+    if etf_1m_ok and pct_strong >= 40 and theme_sent == '🟢 正面':
+        heat_label = '🔥 當炒主線'
+    elif (etf_5d_ok or (etf_rel_1m is not None and etf_rel_1m > -2)) and \
+         (pct_turning + pct_strong) >= 35 and theme_sent in ('🟢 正面', '⚪ 中性'):
+        heat_label = '🚀 下一輪潛在'
+    else:
+        heat_label = '👀 觀察/未確認'
+
+    return {
+        'etf': etf,
+        'etf_rel_5d': etf_rel_5d,
+        'etf_rel_1m': etf_rel_1m,
+        'etf_rel_3m': etf_rel_3m,
+        'n_win': n_win, 'n_near': n_near, 'n_just': n_just, 'n_lose': n_lose,
+        'total': total,
+        'pct_strong': pct_strong,
+        'pct_turning': pct_turning,
+        'theme_sent': theme_sent,
+        'catalyst_count': catalyst_count,
+        'heat_label': heat_label,
+    }
+
+
+def render_theme_heatmap_section(selected_themes, perf_data, sentiment_data, benchmark):
+    """Render the Theme Heat Map & Next-Round Sector Discovery section."""
+    st.markdown('---')
+    st.markdown('### 🌡️ 主題熱力圖 & 下一輪潛在爆發板塊')
+    st.caption(
+        '根據主題 ETF 相對表現、板塊廣度（RS 分佈）和新聞情緒，識別 🔥 當炒主線、'
+        '🚀 下一輪潛在 和 👀 觀察/未確認 板塊。僅供篩選參考，不構成投資建議。'
+    )
+
+    themes_to_analyze = selected_themes if selected_themes else list(CATALYST_THEME_MAP.keys())
+
+    heat_results = []
+    for theme in themes_to_analyze:
+        h = compute_theme_heat(theme, perf_data, sentiment_data, benchmark)
+        heat_results.append((theme, h))
+
+    # Sort: 當炒主線 first, then 下一輪潛在, then 觀察/未確認
+    heat_order = {'🔥 當炒主線': 0, '🚀 下一輪潛在': 1, '👀 觀察/未確認': 2}
+    heat_results.sort(key=lambda x: (heat_order.get(x[1]['heat_label'], 9),
+                                      -(x[1]['etf_rel_1m'] or -99)))
+
+    # Summary buckets
+    bucket_hot    = [t for t, h in heat_results if h['heat_label'] == '🔥 當炒主線']
+    bucket_next   = [t for t, h in heat_results if h['heat_label'] == '🚀 下一輪潛在']
+    bucket_watch  = [t for t, h in heat_results if h['heat_label'] == '👀 觀察/未確認']
+
+    bcol1, bcol2, bcol3 = st.columns(3)
+    with bcol1:
+        st.markdown(
+            "<div style='background:#0D2010;border:1px solid #00C851;border-radius:8px;padding:10px'>"
+            "<div style='font-size:0.85rem;font-weight:bold;color:#00C851'>🔥 當炒主線</div>"
+            "<div style='font-size:0.75rem;color:#888;margin-top:4px'>ETF+廣度+情緒全面強勢</div>"
+            f"<div style='margin-top:6px'>" +
+            ''.join(f"<div style='font-size:0.8rem;color:#ccc;padding:2px 0'>• {t.split(' ',1)[-1][:22]}</div>" for t in bucket_hot) +
+            ("<div style='color:#555;font-size:0.75rem'>（暫無符合條件板塊）</div>" if not bucket_hot else '') +
+            "</div></div>",
+            unsafe_allow_html=True
+        )
+    with bcol2:
+        st.markdown(
+            "<div style='background:#0D1020;border:1px solid #FF8C00;border-radius:8px;padding:10px'>"
+            "<div style='font-size:0.85rem;font-weight:bold;color:#FF8C00'>🚀 下一輪潛在</div>"
+            "<div style='font-size:0.75rem;color:#888;margin-top:4px'>剛轉強/接近突破為主，ETF動能改善</div>"
+            f"<div style='margin-top:6px'>" +
+            ''.join(f"<div style='font-size:0.8rem;color:#ccc;padding:2px 0'>• {t.split(' ',1)[-1][:22]}</div>" for t in bucket_next) +
+            ("<div style='color:#555;font-size:0.75rem'>（暫無符合條件板塊）</div>" if not bucket_next else '') +
+            "</div></div>",
+            unsafe_allow_html=True
+        )
+    with bcol3:
+        st.markdown(
+            "<div style='background:#101010;border:1px solid #555;border-radius:8px;padding:10px'>"
+            "<div style='font-size:0.85rem;font-weight:bold;color:#888'>👀 觀察/未確認</div>"
+            "<div style='font-size:0.75rem;color:#666;margin-top:4px'>混合 RS 或情緒未明朗</div>"
+            f"<div style='margin-top:6px'>" +
+            ''.join(f"<div style='font-size:0.8rem;color:#888;padding:2px 0'>• {t.split(' ',1)[-1][:22]}</div>" for t in bucket_watch) +
+            ("<div style='color:#555;font-size:0.75rem'>（暫無符合條件板塊）</div>" if not bucket_watch else '') +
+            "</div></div>",
+            unsafe_allow_html=True
+        )
+
+    st.markdown('<br>', unsafe_allow_html=True)
+
+    # Detailed heat table
+    tbl_header = (
+        "<style>"
+        ".heat-tbl{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.78rem}"
+        ".heat-tbl th{background:#1E1E2E;color:#aaa;padding:6px 8px;text-align:left;"
+        "border-bottom:2px solid #333;white-space:nowrap}"
+        ".heat-tbl td{padding:5px 8px;vertical-align:middle;border-bottom:1px solid #1A1A2E}"
+        ".heat-tbl tr:hover{background:#1F2937}"
+        "</style>"
+        '<table class="heat-tbl">'
+        "<thead><tr>"
+        "<th>板塊/Theme</th><th>ETF</th>"
+        f"<th>ETF 5D相對({benchmark})</th>"
+        f"<th>ETF 1M相對({benchmark})</th>"
+        f"<th>ETF 3M相對({benchmark})</th>"
+        "<th>廣度 🟢跑贏</th><th>廣度 🟠接近</th><th>廣度 🟡剛轉</th>"
+        "<th>板塊情緒</th><th>催化劑</th><th>🌡️ 熱力判斷</th>"
+        "</tr></thead><tbody>"
+    )
+    tbl_rows = []
+    heat_colors = {
+        '🔥 當炒主線':   ('#0D2010', '#00C851'),
+        '🚀 下一輪潛在': ('#1A0E00', '#FF8C00'),
+        '👀 觀察/未確認': ('#0E1117', '#888'),
+    }
+    for theme, h in heat_results:
+        icon = theme.split()[0]
+        name = theme.split(' ', 1)[-1][:20]
+        bg, fg = heat_colors.get(h['heat_label'], ('#0E1117', '#888'))
+        heat_badge = (
+            f"<span style='background:{bg};color:{fg};padding:2px 7px;"
+            f"border-radius:8px;font-size:0.71rem;font-weight:bold'>{h['heat_label']}</span>"
+        )
+        tbl_rows.append(
+            f"<tr style='background:{bg}'>"
+            f"<td style='color:#ddd'>{icon} {name}</td>"
+            f"<td style='color:#4FC3F7;font-weight:bold'>{h['etf']}</td>"
+            f"<td>{_ret_cell(h['etf_rel_5d'])}</td>"
+            f"<td>{_ret_cell(h['etf_rel_1m'])}</td>"
+            f"<td>{_ret_cell(h['etf_rel_3m'])}</td>"
+            f"<td style='color:#00C851'>{h['n_win']}/{h['total']}</td>"
+            f"<td style='color:#FF8C00'>{h['n_near']}/{h['total']}</td>"
+            f"<td style='color:#F9A825'>{h['n_just']}/{h['total']}</td>"
+            f"<td>{_sentiment_badge(h['theme_sent'])}</td>"
+            f"<td style='color:#7EC8E3'>{h['catalyst_count']}</td>"
+            f"<td>{heat_badge}</td>"
+            f"</tr>"
+        )
+    st.markdown(tbl_header + '\n'.join(tbl_rows) + '\n</tbody></table>', unsafe_allow_html=True)
+    st.caption(
+        '判斷邏輯：🔥 當炒主線 = ETF 1M相對>0 + 跑贏/接近突破股票 ≥40% + 正面情緒；'
+        '🚀 下一輪潛在 = ETF 5D改善 + 剛轉強/接近突破股票 ≥35%；'
+        '👀 觀察/未確認 = 其他情況。所有數據僅供篩選，不構成投資建議。'
+    )
 
 
 # ==========================================
