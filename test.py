@@ -1,3 +1,4 @@
+
 import os, re, json, time, random, datetime, requests
 import pandas as pd
 import streamlit as st
@@ -1750,6 +1751,870 @@ def render_market_radar_module():
 
 
 # ==========================================
+# 宏觀燈號 Macro Signal – 評分邏輯
+# ==========================================
+# Logic overview (transparent assumptions):
+#   就業 Employment:
+#     GREEN  = UNRATE ≤ 4.5% AND JOBLESS ≤ 230k AND payrolls change ≥ 0
+#     YELLOW = mixed signals
+#     RED    = UNRATE > 5.5% OR JOBLESS > 260k OR payrolls change < -50k
+#   通脹 Inflation:
+#     GREEN  = CPI_YOY ≤ 2.5% AND CORE_CPI ≤ 2.5%
+#     YELLOW = CPI ≤ 3.5% OR CoreCPI ≤ 3.5%
+#     RED    = CPI > 3.5% OR CoreCPI > 3.5%
+#   利率 Rates:
+#     GREEN  = Fed Funds ≤ 3.0% OR yield curve not inverted (spread > 0)
+#     YELLOW = Fed Funds 3-4.5% AND curve near flat
+#     RED    = Fed Funds > 4.5% AND curve inverted (spread < -0.5)
+#   風險偏好 Risk Appetite:
+#     GREEN  = SPY 1d ≥ 0% AND QQQ 1d ≥ 0% AND VIX < 20
+#     YELLOW = mixed signals
+#     RED    = VIX ≥ 30 OR (SPY < -1% AND QQQ < -1%)
+#
+# Each category: green=2pts, yellow=1pt, red=0pts → total 0-8, map to 0-100
+
+def compute_macro_signal(m: dict) -> dict:
+    """
+    Given the macro data dict from fetch_sidebar_market_data(),
+    compute per-category traffic-light status and an overall score (0-100).
+    Returns: {
+      'employment': {'status': 'green'|'yellow'|'red', 'score': 0|1|2, 'detail': str},
+      'inflation':  {'status': ..., 'score': ..., 'detail': ...},
+      'rates':      {'status': ..., 'score': ..., 'detail': ...},
+      'risk':       {'status': ..., 'score': ..., 'detail': ...},
+      'total_score': int,   # 0-100
+      'total_label': str,
+    }
+    """
+    result = {}
+
+    # ── 就業 Employment ──────────────────────────────────────────────
+    try:
+        unemp = m.get('UNRATE')
+        jl    = m.get('JOBLESS')
+        pay   = m.get('PAYEMS')
+        u_val   = unemp['value']       if unemp else None
+        jl_val  = jl['value']          if jl    else None
+        pay_chg = pay.get('change', 0) if pay   else None
+
+        details = []
+        if u_val   is not None: details.append(f"失業率 {u_val:.1f}%")
+        if jl_val  is not None: details.append(f"申領 {jl_val:,}")
+        if pay_chg is not None: details.append(f"新增就業 {'+' if pay_chg >= 0 else ''}{pay_chg:,}")
+
+        bad_u   = (u_val   is not None and u_val   > 5.5)
+        bad_jl  = (jl_val  is not None and jl_val  > 260000)
+        bad_pay = (pay_chg is not None and pay_chg < -50000)
+        ok_u    = (u_val   is None or u_val   <= 4.5)
+        ok_jl   = (jl_val  is None or jl_val  <= 230000)
+        ok_pay  = (pay_chg is None or pay_chg >= 0)
+
+        if bad_u or bad_jl or bad_pay:
+            status, score = 'red', 0
+        elif ok_u and ok_jl and ok_pay:
+            status, score = 'green', 2
+        else:
+            status, score = 'yellow', 1
+
+        result['employment'] = {
+            'status': status, 'score': score,
+            'detail': ' | '.join(details) if details else 'N/A'
+        }
+    except Exception:
+        result['employment'] = {'status': 'yellow', 'score': 1, 'detail': '數據不可用'}
+
+    # ── 通脹 Inflation ────────────────────────────────────────────────
+    try:
+        cpi      = m.get('CPI_YOY')
+        core_cpi = m.get('CORE_CPI')
+        cpi_val  = cpi['value']      if cpi      else None
+        core_val = core_cpi['value'] if core_cpi else None
+
+        details = []
+        if cpi_val  is not None: details.append(f"CPI {cpi_val:.1f}%")
+        if core_val is not None: details.append(f"Core {core_val:.1f}%")
+
+        bad_cpi  = (cpi_val  is not None and cpi_val  > 3.5)
+        bad_core = (core_val is not None and core_val > 3.5)
+        ok_cpi   = (cpi_val  is None or cpi_val  <= 2.5)
+        ok_core  = (core_val is None or core_val <= 2.5)
+
+        if bad_cpi or bad_core:
+            status, score = 'red', 0
+        elif ok_cpi and ok_core:
+            status, score = 'green', 2
+        else:
+            status, score = 'yellow', 1
+
+        result['inflation'] = {
+            'status': status, 'score': score,
+            'detail': ' | '.join(details) if details else 'N/A'
+        }
+    except Exception:
+        result['inflation'] = {'status': 'yellow', 'score': 1, 'detail': '數據不可用'}
+
+    # ── 利率 Rates ───────────────────────────────────────────────────
+    try:
+        ff  = m.get('FEDFUNDS')
+        yr  = m.get('YIELD_SPREAD_RAW')
+        ff_val = ff['value'] if ff else None
+        spread = None
+        if yr:
+            spread = yr.get('tnx', 0) - yr.get('irx', 0)
+
+        details = []
+        if ff_val is not None: details.append(f"Fed Funds {ff_val:.2f}%")
+        if spread  is not None: details.append(f"10Y-短端 {spread:+.2f}%")
+
+        bad_ff = (ff_val is not None and ff_val > 4.5)
+        bad_sp = (spread is not None and spread < -0.5)
+        ok_ff  = (ff_val is None or ff_val <= 3.0)
+        ok_sp  = (spread is None or spread > 0)
+
+        if bad_ff and bad_sp:
+            status, score = 'red', 0
+        elif ok_ff or ok_sp:
+            status, score = 'green', 2
+        else:
+            status, score = 'yellow', 1
+
+        result['rates'] = {
+            'status': status, 'score': score,
+            'detail': ' | '.join(details) if details else 'N/A'
+        }
+    except Exception:
+        result['rates'] = {'status': 'yellow', 'score': 1, 'detail': '數據不可用'}
+
+    # ── 風險偏好 Risk Appetite ────────────────────────────────────────
+    try:
+        vix = m.get('VIX', {})
+        spy = m.get('SPY', {})
+        qqq = m.get('QQQ', {})
+        fg  = m.get('FEAR_GREED', {})
+
+        vix_v = vix.get('price') if vix else None
+        spy_p = spy.get('pct')   if spy else None
+        qqq_p = qqq.get('pct')   if qqq else None
+        fg_sc = fg.get('score')  if fg  else None
+
+        details = []
+        if vix_v is not None: details.append(f"VIX {vix_v:.1f}")
+        if spy_p is not None: details.append(f"SPY {spy_p:+.1f}%")
+        if qqq_p is not None: details.append(f"QQQ {qqq_p:+.1f}%")
+        if fg_sc is not None: details.append(f"F&G {fg_sc:.0f}")
+
+        bad_vix = (vix_v is not None and vix_v >= 30)
+        bad_eq  = (spy_p is not None and qqq_p is not None and spy_p < -1.0 and qqq_p < -1.0)
+        ok_vix  = (vix_v is None or vix_v < 20)
+        ok_eq   = (spy_p is None or spy_p >= 0) and (qqq_p is None or qqq_p >= 0)
+
+        if bad_vix or bad_eq:
+            status, score = 'red', 0
+        elif ok_vix and ok_eq:
+            status, score = 'green', 2
+        else:
+            status, score = 'yellow', 1
+
+        result['risk'] = {
+            'status': status, 'score': score,
+            'detail': ' | '.join(details) if details else 'N/A'
+        }
+    except Exception:
+        result['risk'] = {'status': 'yellow', 'score': 1, 'detail': '數據不可用'}
+
+    # ── 總分 0-8 → 0-100 ────────────────────────────────────────────
+    total = sum(result[k]['score'] for k in ('employment', 'inflation', 'rates', 'risk'))
+    total_score = int(round(total / 8 * 100))
+
+    if total_score >= 75:
+        total_label = '🟢 宏觀環境理想'
+    elif total_score >= 50:
+        total_label = '🟡 宏觀環境混合'
+    elif total_score >= 25:
+        total_label = '🟠 宏觀環境偏弱'
+    else:
+        total_label = '🔴 宏觀環境惡劣'
+
+    result['total_score'] = total_score
+    result['total_label'] = total_label
+    return result
+
+
+_SIGNAL_COLORS = {
+    'green':  ('#00573A', '#00C851', '🟢'),
+    'yellow': ('#3A3000', '#F9A825', '🟡'),
+    'red':    ('#3A0000', '#FF4444', '🔴'),
+}
+
+_SIGNAL_LABELS_ZH = {
+    'employment': '就業 Employment',
+    'inflation':  '通脹 Inflation',
+    'rates':      '利率 Rates',
+    'risk':       '風險偏好 Risk Appetite',
+}
+
+
+def render_macro_signal_sidebar(m: dict):
+    """Compact sidebar section: 宏觀燈號 Macro Signal."""
+    st.markdown(
+        "<div style='font-size:0.8rem;font-weight:700;color:#aaa;margin:8px 0 4px'>"
+        "🚦 宏觀燈號 Macro Signal</div>",
+        unsafe_allow_html=True
+    )
+
+    try:
+        sig = compute_macro_signal(m)
+    except Exception:
+        st.caption('⚠️ 燈號計算失敗')
+        return
+
+    ts   = sig['total_score']
+    tlbl = sig['total_label']
+    bar_color = '#00C851' if ts >= 75 else ('#F9A825' if ts >= 50 else ('#FF6D00' if ts >= 25 else '#FF4444'))
+    st.markdown(
+        f"<div style='background:#1A1A2E;border-radius:6px;padding:5px 8px;margin-bottom:5px'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+        f"<span style='font-size:0.74rem;color:#ccc'>{tlbl}</span>"
+        f"<span style='font-size:0.8rem;font-weight:bold;color:{bar_color}'>{ts}/100</span>"
+        f"</div>"
+        f"<div style='background:#333;border-radius:3px;height:5px;margin-top:3px'>"
+        f"<div style='background:{bar_color};width:{ts}%;height:5px;border-radius:3px'></div>"
+        f"</div></div>",
+        unsafe_allow_html=True
+    )
+
+    for key, label in _SIGNAL_LABELS_ZH.items():
+        cat = sig.get(key, {})
+        status = cat.get('status', 'yellow')
+        bg, fg, dot = _SIGNAL_COLORS.get(status, _SIGNAL_COLORS['yellow'])
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+            f"padding:2px 4px;border-left:3px solid {fg};margin:2px 0;border-radius:3px;"
+            f"background:{bg}44'>"
+            f"<span style='font-size:0.71rem;color:#ccc'>{label}</span>"
+            f"<span style='font-size:0.76rem'>{dot}</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+    with st.expander('📖 燈號詳情 & 邏輯', expanded=False):
+        for key, label in _SIGNAL_LABELS_ZH.items():
+            cat = sig.get(key, {})
+            status = cat.get('status', 'yellow')
+            detail = cat.get('detail', 'N/A')
+            _, fg, dot = _SIGNAL_COLORS.get(status, _SIGNAL_COLORS['yellow'])
+            st.markdown(
+                f"<span style='color:{fg}'><b>{dot} {label}</b></span>  "
+                f"<span style='font-size:0.72rem;color:#aaa'>{detail}</span>",
+                unsafe_allow_html=True
+            )
+        st.markdown(
+            "<hr style='opacity:0.2;margin:4px 0'>"
+            "<span style='font-size:0.65rem;color:#666'>"
+            "判斷邏輯：🟢就業-失業率≤4.5%/申領≤23萬；通脹-CPI≤2.5%；利率-FF≤3%或曲線非倒掛；"
+            "風險-VIX&lt;20且SPY/QQQ正；🔴為相反惡化條件；🟡為混合。</span>",
+            unsafe_allow_html=True
+        )
+
+
+# ==========================================
+# 催化劑 RS 選股模組 – 定義與數據
+# ==========================================
+
+CATALYST_THEME_MAP = {
+    '🤖 AI 半導體 / 算力': {
+        'keywords': ['ai', 'artificial intelligence', 'gpu', 'chip', 'semiconductor',
+                     'h100', 'blackwell', 'nvidia', 'openai', 'llm'],
+        'etf': 'SOXX',
+        'tickers': {
+            'NVDA': 'NVIDIA – GPU 主導',
+            'AMD':  'AMD – GPU/CPU',
+            'AVGO': 'Broadcom – AI ASIC',
+            'AMAT': 'Applied Materials',
+            'ARM':  'ARM Holdings',
+            'QCOM': 'Qualcomm',
+            'MU':   'Micron – HBM 記憶體',
+        },
+        'catalyst_tags': ['AI 資本開支上調', 'H100/B200 需求強勁', 'GPU 出口限制緩和'],
+    },
+    '🧠 大型 AI 平台 (Mega-cap)': {
+        'keywords': ['microsoft', 'google', 'meta', 'amazon', 'azure',
+                     'copilot', 'gemini', 'llama', 'cloud'],
+        'etf': 'QQQ',
+        'tickers': {
+            'MSFT':  'Microsoft – Azure AI',
+            'GOOGL': 'Google – Gemini AI',
+            'META':  'Meta – LLaMA / AI Ads',
+            'AMZN':  'Amazon – AWS + Bedrock',
+            'AAPL':  'Apple – 端側 AI',
+        },
+        'catalyst_tags': ['雲端收入加速', 'AI Copilot 訂閱增長', '業績指引上調'],
+    },
+    '⚡ 數據中心電力 / 電網': {
+        'keywords': ['data center', 'power', 'grid', 'nuclear', 'electricity',
+                     'cooling', 'vertiv', 'eaton', 'ge vernova'],
+        'etf': 'VRT',
+        'tickers': {
+            'VRT':  'Vertiv – 液冷系統',
+            'ETN':  'Eaton – 電力管理',
+            'GEV':  'GE Vernova – 渦輪機',
+            'PWR':  'Quanta Services',
+            'SMCI': 'SuperMicro – AI 伺服器',
+            'HUBB': 'Hubbell – 電網設備',
+        },
+        'catalyst_tags': ['核電 PPA 簽訂', '數據中心供電需求', '電網升級政策'],
+    },
+    '⚛️ 能源 / 天然氣': {
+        'keywords': ['natural gas', 'energy', 'lng', 'oil', 'uranium',
+                     'nuclear', 'constellation', 'vistra'],
+        'etf': 'XLE',
+        'tickers': {
+            'CEG':  'Constellation Energy',
+            'VST':  'Vistra Energy',
+            'CCJ':  'Cameco – 鈾礦',
+            'OKLO': 'Oklo – 小型核反應堆',
+            'LNG':  'Cheniere Energy – LNG',
+            'NNE':  'Nano Nuclear',
+        },
+        'catalyst_tags': ['核電立法推進', '天然氣價格上升', '電力需求強勁'],
+    },
+    '🏭 工業 / 再工業化': {
+        'keywords': ['industrial', 'manufacturing', 'reshoring', 'infrastructure',
+                     'defense', 'construction'],
+        'etf': 'XLI',
+        'tickers': {
+            'CAT': 'Caterpillar',
+            'HON': 'Honeywell',
+            'DE':  'Deere – 農機',
+            'GE':  'GE Aerospace',
+            'RTX': 'RTX – 國防/航空',
+            'LMT': 'Lockheed Martin',
+        },
+        'catalyst_tags': ['基建支出法案', '國防預算增加', '回流製造訂單'],
+    },
+    '🔧 材料 / 銅 / 電氣化': {
+        'keywords': ['copper', 'materials', 'mining', 'electrification',
+                     'battery', 'lithium', 'fcx'],
+        'etf': 'XLB',
+        'tickers': {
+            'FCX':  'Freeport – 銅礦龍頭',
+            'SCCO': 'Southern Copper',
+            'ALB':  'Albemarle – 鋰',
+            'MP':   'MP Materials – 稀土',
+            'NEM':  'Newmont – 黃金',
+            'AA':   'Alcoa – 鋁',
+        },
+        'catalyst_tags': ['電動車需求', '銅礦供應緊張', 'AI 數據中心用銅'],
+    },
+    '📊 小型股 / 週期輪動': {
+        'keywords': ['small cap', 'rate cut', 'fed pivot', 'ipo', 'russell'],
+        'etf': 'IWM',
+        'tickers': {
+            'PLTR': 'Palantir – AI 軟件',
+            'SOUN': 'SoundHound AI',
+            'BBAI': 'BigBear.ai',
+            'RKLB': 'Rocket Lab – 太空',
+            'ASTS': 'AST SpaceMobile',
+            'IONQ': 'IonQ – 量子計算',
+        },
+        'catalyst_tags': ['Fed 降息預期', '小型股估值修復', '高 beta 追落後'],
+    },
+    '🏦 金融 / 銀行': {
+        'keywords': ['financials', 'bank', 'earnings', 'interest rate', 'credit',
+                     'jpmorgan', 'goldman'],
+        'etf': 'XLF',
+        'tickers': {
+            'JPM': 'JPMorgan Chase',
+            'GS':  'Goldman Sachs',
+            'MS':  'Morgan Stanley',
+            'BAC': 'Bank of America',
+            'V':   'Visa',
+            'MA':  'Mastercard',
+        },
+        'catalyst_tags': ['業績超預期', '淨息差改善', '資本回購計劃'],
+    },
+    '💊 醫療 / 生物科技': {
+        'keywords': ['biotech', 'pharma', 'glp-1', 'fda', 'drug', 'cancer',
+                     'genomics', 'healthcare'],
+        'etf': 'XBI',
+        'tickers': {
+            'LLY':  'Eli Lilly – GLP-1',
+            'NVO':  'Novo Nordisk',
+            'RXRX': 'Recursion – AI 藥研',
+            'CRSP': 'CRISPR Therapeutics',
+            'MRNA': 'Moderna',
+            'REGN': 'Regeneron',
+        },
+        'catalyst_tags': ['GLP-1 銷售超預期', 'FDA 新藥批准', 'AI 藥物研發突破'],
+    },
+    '🛡️ AI 軟件 / 網絡安全': {
+        'keywords': ['cybersecurity', 'saas', 'software', 'crwd', 'crowdstrike',
+                     'palantir', 'palo alto', 'sentinel'],
+        'etf': 'CIBR',
+        'tickers': {
+            'CRWD': 'CrowdStrike',
+            'PANW': 'Palo Alto Networks',
+            'ZS':   'Zscaler',
+            'S':    'SentinelOne',
+            'NOW':  'ServiceNow',
+            'CRM':  'Salesforce',
+        },
+        'catalyst_tags': ['ARR 增長加速', '政府合約增加', '零信任安全普及'],
+    },
+    '🛒 消費 / 零售': {
+        'keywords': ['consumer', 'retail', 'spending', 'amazon', 'walmart',
+                     'holiday', 'ecommerce'],
+        'etf': 'XLY',
+        'tickers': {
+            'AMZN': 'Amazon – 電商 + AWS',
+            'COST': 'Costco',
+            'WMT':  'Walmart',
+            'TSLA': 'Tesla – EV 消費',
+            'NKE':  'Nike',
+            'LULU': 'Lululemon',
+        },
+        'catalyst_tags': ['消費者信心改善', '節日銷售超預期', 'EV 需求反彈'],
+    },
+}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_catalyst_rs_data(tickers_tuple: tuple, benchmark: str = 'SPY') -> dict:
+    """
+    Fetch multi-horizon returns for candidate tickers + benchmark.
+    Returns {ticker: {'price': float, '1d': float, '5d': float, '1m': float,
+                      '3m': float, 'ytd': float, 'vol_ratio': float}}
+    """
+    tickers = list(tickers_tuple)
+    all_t   = list(set(tickers + [benchmark]))
+    result  = {}
+    try:
+        raw = yf.download(all_t, period='1y', interval='1d', progress=False,
+                          auto_adjust=True, group_by='column', threads=True)
+        if raw.empty:
+            return result
+        if isinstance(raw.columns, pd.MultiIndex):
+            closes  = raw['Close']
+            volumes = raw.get('Volume', pd.DataFrame())
+        else:
+            closes  = raw[['Close']] if 'Close' in raw.columns else raw
+            volumes = raw[['Volume']] if 'Volume' in raw.columns else pd.DataFrame()
+        today = closes.index[-1]
+
+        def _offset_price(col, days):
+            try:
+                idx = max(0, len(col) - days - 1)
+                return float(col.iloc[idx])
+            except Exception:
+                return None
+
+        def _ytd_start_price(col):
+            try:
+                yr_idx = col.index[col.index.year == today.year]
+                return float(col[yr_idx[0]]) if len(yr_idx) > 0 else None
+            except Exception:
+                return None
+
+        def _ret(col, days=None, ytd=False):
+            try:
+                curr = float(col.dropna().iloc[-1])
+                base = _ytd_start_price(col.dropna()) if ytd else _offset_price(col.dropna(), days)
+                if base and base != 0:
+                    return round((curr - base) / base * 100, 2)
+            except Exception:
+                pass
+            return None
+
+        def _vol_ratio(vcol):
+            try:
+                v = vcol.dropna()
+                if len(v) < 20:
+                    return None
+                return round(float(v.iloc[-5:].mean()) / float(v.iloc[-20:].mean()), 2)
+            except Exception:
+                return None
+
+        for t in all_t:
+            try:
+                col  = closes[t].dropna()  if t in closes.columns  else pd.Series(dtype=float)
+                vcol = (volumes[t].dropna() if not volumes.empty and t in volumes.columns
+                        else pd.Series(dtype=float))
+                if col.empty:
+                    result[t] = {}
+                    continue
+                result[t] = {
+                    'price':     round(float(col.iloc[-1]), 2),
+                    '1d':        _ret(col, 1),
+                    '5d':        _ret(col, 5),
+                    '1m':        _ret(col, 21),
+                    '3m':        _ret(col, 63),
+                    'ytd':       _ret(col, ytd=True),
+                    'vol_ratio': _vol_ratio(vcol),
+                }
+            except Exception:
+                result[t] = {}
+    except Exception:
+        pass
+    return result
+
+
+def compute_rs_score(ticker: str, perf_data: dict, benchmark: str = 'SPY') -> int:
+    """
+    Compare ticker multi-horizon returns vs benchmark.
+    Weights: 1d=10%, 5d=20%, 1m=30%, 3m=25%, ytd=15%
+    Outperformance mapped to 0-100 (50 = neutral; ±20% → ±50pts).
+    Always returns int in [0, 100].
+    """
+    WEIGHTS = {'1d': 0.10, '5d': 0.20, '1m': 0.30, '3m': 0.25, 'ytd': 0.15}
+    t_data = perf_data.get(ticker, {})
+    b_data = perf_data.get(benchmark, {})
+    weighted_out = 0.0
+    total_w = 0.0
+    for horizon, w in WEIGHTS.items():
+        t_r = t_data.get(horizon)
+        b_r = b_data.get(horizon)
+        if t_r is not None and b_r is not None:
+            weighted_out += w * (t_r - b_r)
+            total_w += w
+    if total_w < 0.1:
+        return 50
+    score_raw = weighted_out / total_w
+    clamped   = max(-20.0, min(20.0, score_raw))
+    rs_score  = int(round(50 + clamped * 2.5))
+    return max(0, min(100, rs_score))
+
+
+def _catalyst_score_bar_html(score: int) -> str:
+    color = '#00C851' if score >= 75 else ('#26A69A' if score >= 55 else ('#F9A825' if score >= 40 else '#FF4444'))
+    return (
+        f"<div style='display:inline-flex;align-items:center;gap:4px'>"
+        f"<div style='background:#333;border-radius:3px;width:50px;height:7px'>"
+        f"<div style='background:{color};width:{score}%;height:7px;border-radius:3px'></div>"
+        f"</div>"
+        f"<span style='font-size:0.75rem;color:{color};font-weight:bold'>{score}</span>"
+        f"</div>"
+    )
+
+
+def _catalyst_ret_cell(val) -> str:
+    if val is None:
+        return "<span style='color:#555'>N/A</span>"
+    color = '#00C851' if val >= 0 else '#FF4444'
+    arrow = '▲' if val >= 0 else '▼'
+    return f"<span style='color:{color}'>{arrow}{abs(val):.1f}%</span>"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_catalyst_news_tags(tickers_tuple: tuple) -> dict:
+    """
+    For each ticker try yfinance news, map headlines to catalyst keywords.
+    Returns {ticker: [theme_name, ...]}
+    """
+    tickers = list(tickers_tuple)
+    kw_to_theme = {}
+    for theme, tdata in CATALYST_THEME_MAP.items():
+        for kw in tdata.get('keywords', []):
+            kw_to_theme[kw.lower()] = theme.split(' ', 1)[-1].split('/')[0].strip()[:15]
+    result = {}
+    for ticker in tickers[:30]:
+        tags = set()
+        try:
+            tkr = yf.Ticker(ticker)
+            news_list = tkr.news if hasattr(tkr, 'news') and isinstance(tkr.news, list) else []
+            for item in news_list[:5]:
+                content = item.get('content', {}) if isinstance(item, dict) else {}
+                title = str(content.get('title', item.get('title', ''))).lower()
+                for kw, tname in kw_to_theme.items():
+                    if kw in title:
+                        tags.add(tname)
+        except Exception:
+            pass
+        result[ticker] = sorted(tags)[:3]
+    return result
+
+
+def build_catalyst_candidate_table(
+    selected_themes: list,
+    perf_data: dict,
+    news_tags: dict,
+    benchmark: str = 'SPY',
+) -> list:
+    """Build sorted list of candidate rows for display."""
+    seen = set()
+    rows = []
+    for theme in selected_themes:
+        tdata = CATALYST_THEME_MAP.get(theme, {})
+        for ticker, name in tdata.get('tickers', {}).items():
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            p   = perf_data.get(ticker, {})
+            rs  = compute_rs_score(ticker, perf_data, benchmark)
+            curated   = tdata.get('catalyst_tags', [])[:2]
+            live      = news_tags.get(ticker, [])[:2]
+            all_tags  = list(dict.fromkeys(curated + live))[:3]
+            vol_r     = p.get('vol_ratio')
+            highlight = rs >= 65 and bool(live)
+            rows.append({
+                'ticker':    ticker,
+                'name':      name,
+                'theme':     theme.split(' ', 1)[-1][:18] if ' ' in theme else theme[:18],
+                'tags':      ' | '.join(all_tags) if all_tags else '\u2014',
+                'price':     p.get('price'),
+                '1d':        p.get('1d'),
+                '5d':        p.get('5d'),
+                '1m':        p.get('1m'),
+                '3m':        p.get('3m'),
+                'ytd':       p.get('ytd'),
+                'rs':        rs,
+                'vol':       f"{vol_r:.2f}x" if vol_r is not None else 'N/A',
+                'highlight': highlight,
+            })
+    rows.sort(key=lambda r: (not r['highlight'], -r['rs']))
+    return rows
+
+
+def render_candidate_table_html_cat(rows: list) -> str:
+    """Render candidate ticker table as styled HTML."""
+    header = """
+<style>
+.cat-tbl{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.8rem}
+.cat-tbl th{background:#1E1E2E;color:#aaa;padding:7px 8px;text-align:left;
+            border-bottom:2px solid #333;white-space:nowrap}
+.cat-tbl td{padding:6px 8px;vertical-align:middle;border-bottom:1px solid #1E1E2E}
+.cat-tbl tr.hl-row{background:#0D2B1A!important;border-left:3px solid #00C851}
+.cat-tbl tr:nth-child(even):not(.hl-row){background:#0E1117}
+.cat-tbl tr:nth-child(odd):not(.hl-row){background:#161B22}
+.cat-tbl tr:hover{background:#1F2937}
+.ctk{font-weight:bold;color:#4FC3F7}
+.ctag{background:#1A2A3A;color:#7EC8E3;padding:1px 5px;border-radius:4px;
+      font-size:0.7rem;margin:1px;display:inline-block}
+.chl{background:#004020;color:#00C851;padding:1px 6px;border-radius:8px;
+     font-size:0.68rem;font-weight:bold}
+</style>
+<table class="cat-tbl">
+<thead><tr>
+  <th>Ticker</th><th>名稱 / 主題</th><th>催化劑標籤</th>
+  <th>現價</th><th>1D</th><th>5D</th><th>1M</th><th>3M/YTD</th>
+  <th>RS評分</th><th>成交量</th>
+</tr></thead><tbody>
+"""
+    body_rows = []
+    for r in rows:
+        hl_cls   = ' class="hl-row"' if r['highlight'] else ''
+        hl_badge = "<span class='chl'>⭐ 高分+催化</span>" if r['highlight'] else ''
+        price_str = f"${r['price']:.2f}" if r['price'] else 'N/A'
+        tag_html  = (''.join(
+            f"<span class='ctag'>{t}</span>"
+            for t in r['tags'].split(' | ') if t and t != '\u2014'
+        ) or '\u2014')
+        ytd_or_3m = _catalyst_ret_cell(r.get('ytd') or r.get('3m'))
+        body_rows.append(
+            f"<tr{hl_cls}>"
+            f"<td><span class='ctk'>{r['ticker']}</span> {hl_badge}</td>"
+            f"<td style='color:#ddd;font-size:0.75rem'>{r['name']}<br>"
+            f"<span style='color:#666;font-size:0.68rem'>{r['theme']}</span></td>"
+            f"<td>{tag_html}</td>"
+            f"<td style='color:#ccc'>{price_str}</td>"
+            f"<td>{_catalyst_ret_cell(r['1d'])}</td>"
+            f"<td>{_catalyst_ret_cell(r['5d'])}</td>"
+            f"<td>{_catalyst_ret_cell(r['1m'])}</td>"
+            f"<td>{ytd_or_3m}</td>"
+            f"<td>{_catalyst_score_bar_html(r['rs'])}</td>"
+            f"<td style='color:#888;font-size:0.73rem'>{r['vol']}</td>"
+            f"</tr>"
+        )
+    return header + '\n'.join(body_rows) + '\n</tbody></table>'
+
+
+def render_catalyst_screener_module():
+    """Main page module: 新聞催化劑 / 熱門板塊 / RS 選股"""
+    st.title('📡 新聞催化劑 / 熱門板塊 / RS 選股')
+    st.caption(
+        '根據最新新聞催化劑，鎖定熱門板塊，結合相對強度 (RS) 評分篩選高潛力個股。'
+        '  ⚠️ 免責聲明：本工具僅供篩選/觀察清單用途，並非投資建議。'
+    )
+
+    ctrl_l, ctrl_m, ctrl_r = st.columns([3, 2, 1])
+    with ctrl_l:
+        all_themes = list(CATALYST_THEME_MAP.keys())
+        selected_themes = st.multiselect(
+            '選擇催化劑主題 / 板塊:',
+            all_themes,
+            default=all_themes[:4],
+            key='cat_theme_select',
+            help='選擇你感興趣的催化劑主題，下方將顯示相關候選股票。'
+        )
+    with ctrl_m:
+        benchmark = st.selectbox(
+            'RS 基準:',
+            ['SPY', 'QQQ', 'IWM'],
+            key='cat_bench',
+            help='RS 評分相對於此指數計算。'
+        )
+        rs_min = st.slider('最低 RS 評分:', 0, 100, 50, 5, key='cat_rs_min')
+    with ctrl_r:
+        st.markdown('<br>', unsafe_allow_html=True)
+        refresh_cat = st.button('🔄 刷新數據', use_container_width=True, key='refresh_catalyst')
+        show_all = st.checkbox('顯示所有 (含低 RS)', value=False, key='cat_show_all')
+
+    if refresh_cat:
+        try:
+            fetch_catalyst_rs_data.clear()
+            fetch_catalyst_news_tags.clear()
+        except Exception:
+            pass
+        st.rerun()
+
+    if not selected_themes:
+        st.info('請至少選擇一個催化劑主題。')
+        return
+
+    # Collect candidate tickers
+    candidate_tickers = []
+    for theme in selected_themes:
+        for t in CATALYST_THEME_MAP[theme].get('tickers', {}):
+            if t not in candidate_tickers:
+                candidate_tickers.append(t)
+    candidate_tickers = candidate_tickers[:50]
+
+    # ── 步驟1: 新聞催化劑 ──────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### 📰 步驟1：新聞催化劑 Headlines')
+    col_news1, col_news2 = st.columns([3, 2])
+    with col_news1:
+        with st.spinner('抓取市場新聞...'):
+            try:
+                news_list = fetch_top_news()
+            except Exception:
+                news_list = []
+        if news_list:
+            headlines_lower = ' '.join(n.get('新聞標題', '') for n in news_list[:20]).lower()
+            matched_themes = [
+                theme for theme, tdata in CATALYST_THEME_MAP.items()
+                if any(kw in headlines_lower for kw in tdata.get('keywords', []))
+            ]
+            st.markdown('**📍 新聞命中板塊:**')
+            if matched_themes:
+                chips = ' '.join(
+                    f"<span style='background:#1A3A2A;color:#00C851;padding:2px 7px;"
+                    f"border-radius:8px;font-size:0.73rem;margin:2px;display:inline-block'>{t}</span>"
+                    for t in matched_themes[:8]
+                )
+                st.markdown(chips, unsafe_allow_html=True)
+            else:
+                st.caption('（暫無明確板塊命中，使用預設催化劑手冊）')
+            with st.expander('🔎 最新財經頭條', expanded=False):
+                for item in news_list[:12]:
+                    src = item.get('來源', '')
+                    ttl = item.get('新聞標題', '')
+                    if ttl:
+                        st.markdown(
+                            f"<div style='border-left:2px solid #333;padding:3px 8px;margin:2px 0;"
+                            f"font-size:0.78rem'><span style='color:#888;font-size:0.68rem'>[{src}]</span> {ttl}</div>",
+                            unsafe_allow_html=True
+                        )
+        else:
+            st.caption('⚠️ 暫時無法取得即時新聞，使用精選催化劑手冊。')
+    with col_news2:
+        st.markdown('**📋 精選催化劑手冊:**')
+        for theme in selected_themes[:5]:
+            tdata = CATALYST_THEME_MAP.get(theme, {})
+            tags  = tdata.get('catalyst_tags', [])
+            if tags:
+                icon = theme.split()[0]
+                name = theme.split(' ', 1)[-1].split('/')[0].strip()[:14]
+                st.markdown(
+                    f"<div style='font-size:0.75rem;color:#aaa;margin:3px 0'>"
+                    f"<b style='color:#4FC3F7'>{icon} {name}</b>: "
+                    f"{' · '.join(tags[:2])}</div>",
+                    unsafe_allow_html=True
+                )
+
+    # ── 步驟2: 候選股票 + RS ────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### 📊 步驟2：候選股票 + RS 評分')
+
+    with st.spinner(f'正在抓取 {len(candidate_tickers)} 隻候選股票的多時段回報數據...'):
+        try:
+            perf_data = fetch_catalyst_rs_data(
+                tuple(sorted(set(candidate_tickers + [benchmark]))),
+                benchmark=benchmark
+            )
+        except Exception:
+            perf_data = {}
+
+    with st.spinner('抓取個股相關新聞催化劑標籤...'):
+        try:
+            news_tags = fetch_catalyst_news_tags(tuple(candidate_tickers[:30]))
+        except Exception:
+            news_tags = {}
+
+    rows = build_catalyst_candidate_table(selected_themes, perf_data, news_tags, benchmark)
+    rows_display = rows if show_all else [r for r in rows if r['rs'] >= rs_min]
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric('候選股票數', len(rows))
+    mc2.metric(f'RS ≥ {rs_min}', len([r for r in rows if r['rs'] >= rs_min]))
+    mc3.metric('⭐ 高分+催化 (RS≥65)', sum(1 for r in rows if r['highlight']))
+    bench_1d = perf_data.get(benchmark, {}).get('1d')
+    mc4.metric(f'{benchmark} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
+
+    if rows_display:
+        st.markdown(
+            f"<div style='color:#888;font-size:0.78rem;margin:4px 0'>"
+            f"顯示 {len(rows_display)} / {len(rows)} 隻候選股票（RS≥{rs_min}）。"
+            f"⭐ 高亮 = 同時有新聞催化劑命中 + RS≥65。"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown(render_candidate_table_html_cat(rows_display), unsafe_allow_html=True)
+    else:
+        st.warning(f'⚠️ 暫無 RS ≥ {rs_min} 的股票，請調低門檻或選擇更多主題。')
+
+    # ── RS Top 10 ──────────────────────────────────────────────────
+    top_rs = sorted(rows, key=lambda r: -r['rs'])[:10]
+    if top_rs:
+        st.markdown('---')
+        st.markdown('### 🏆 RS 評分 Top 10')
+        n_cols = min(5, len(top_rs))
+        cols_top = st.columns(n_cols)
+        for i, r in enumerate(top_rs[:10]):
+            col = cols_top[i % n_cols]
+            rs = r['rs']
+            color = '#00C851' if rs >= 70 else ('#F9A825' if rs >= 50 else '#FF4444')
+            col.markdown(
+                f"<div style='text-align:center;background:#161B22;padding:6px;border-radius:6px;"
+                f"border:1px solid {color}44;margin-bottom:4px'>"
+                f"<div style='font-weight:bold;color:#4FC3F7'>{r['ticker']}</div>"
+                f"<div style='font-size:0.68rem;color:#888'>{r['name'][:14]}</div>"
+                f"<div style='font-size:1.0rem;color:{color};font-weight:bold'>{rs}</div>"
+                f"<div style='font-size:0.68rem;color:#666'>RS 分</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+    with st.expander('📖 RS 評分方法 & 免責聲明', expanded=False):
+        st.markdown("""
+**RS 評分設計（0-100）：**
+
+| 時間段 | 權重 |
+|--------|------|
+| 1 日   | 10%  |
+| 5 日   | 20%  |
+| 1 個月 | 30%  |
+| 3 個月 | 25%  |
+| 年初至今 | 15% |
+
+每個時間段計算個股回報 vs 基準指數（SPY/QQQ/IWM）的超額回報，加權求和後映射至
+0–100（50分 = 與基準持平；±20% 超額表現 → ±50分）。
+
+**⚠️ 免責聲明：** 本模組純為技術篩選/觀察清單工具，所有數據僅供參考，
+不構成任何形式的投資建議或推介。投資有風險，所有買賣決定均需自行判斷。
+        """)
+
+
+# ==========================================
 # Sidebar 市場雷達函數
 # ==========================================
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1834,9 +2699,83 @@ def fetch_sidebar_market_data():
         if r.status_code == 200:
             lines = r.text.strip().split('\n')
             last = lines[-1].split(',')
-            data['JOBLESS'] = {'date': last[0], 'value': int(float(last[1]))}
+            prev = lines[-2].split(',') if len(lines) >= 3 else last
+            data['JOBLESS'] = {'date': last[0], 'value': int(float(last[1])), 'prev': int(float(prev[1]))}
     except:
         data['JOBLESS'] = None
+
+    # FRED: Nonfarm Payrolls (PAYEMS) – monthly change
+    try:
+        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            lines = [l for l in r.text.strip().split('\n') if ',' in l]
+            if len(lines) >= 3:
+                last_row = lines[-1].split(',')
+                prev_row = lines[-2].split(',')
+                curr_val = float(last_row[1])  # thousands
+                prev_val = float(prev_row[1])
+                chg = int(round((curr_val - prev_val) * 1000))  # actual jobs added
+                data['PAYEMS'] = {'date': last_row[0], 'value': curr_val, 'change': chg}
+    except:
+        data['PAYEMS'] = None
+
+    # FRED: Labor Force Participation Rate (CIVPART)
+    try:
+        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CIVPART', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            lines = [l for l in r.text.strip().split('\n') if ',' in l]
+            if len(lines) >= 3:
+                last_row = lines[-1].split(',')
+                prev_row = lines[-2].split(',')
+                data['CIVPART'] = {
+                    'date': last_row[0],
+                    'value': float(last_row[1]),
+                    'prev': float(prev_row[1]),
+                }
+    except:
+        data['CIVPART'] = None
+
+    # FRED: Core CPI (CPILFESL) – ex Food & Energy, YoY
+    try:
+        r = requests.get('https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPILFESL', headers=get_headers(), timeout=8)
+        if r.status_code == 200:
+            lines = [l for l in r.text.strip().split('\n') if ',' in l]
+            vals = []
+            for l in lines[-14:]:
+                parts = l.split(',')
+                if len(parts) == 2:
+                    try: vals.append((parts[0], float(parts[1])))
+                    except: pass
+            if len(vals) >= 13:
+                yoy = (vals[-1][1] - vals[-13][1]) / vals[-13][1] * 100
+                data['CORE_CPI'] = {'date': vals[-1][0], 'value': round(yoy, 2)}
+    except:
+        data['CORE_CPI'] = None
+
+    # 2-Year Treasury yield via yfinance (^FVX = 5Y but ^IRX = 13-week; use TNX/TYX already fetched)
+    # We'll derive 2Y from yfinance ^IRX (13-week) as proxy for short end, or fetch ^FVX
+    try:
+        twoy = yf.download('^IRX', period='2d', progress=False, auto_adjust=True)
+        if not twoy.empty and 'Close' in twoy.columns:
+            col = twoy['Close'].dropna()
+            if len(col) >= 2:
+                data['TWO_Y'] = {'price': float(col.iloc[-1]), 'pct': float((col.iloc[-1] - col.iloc[-2]) / col.iloc[-2] * 100)}
+            elif len(col) == 1:
+                data['TWO_Y'] = {'price': float(col.iloc[-1]), 'pct': 0.0}
+    except:
+        data['TWO_Y'] = None
+
+    # Yield curve spread: 10Y - 2Y (derived if both available)
+    try:
+        tnx = data.get('TNX', {})
+        twy = data.get('TWO_Y', {})
+        if tnx and tnx.get('price') and twy and twy.get('price'):
+            spread = tnx['price'] / 10 - twy['price'] / 100  # TNX is *10, IRX is /100
+            # Actually TNX raw value from yfinance is already the yield * 10 for display
+            # Let's compute more carefully below in the render function
+            data['YIELD_SPREAD_RAW'] = {'tnx': tnx['price'], 'irx': twy['price']}
+    except:
+        data['YIELD_SPREAD_RAW'] = None
 
     return data
 
@@ -1859,6 +2798,173 @@ def _section(title):
 
 def _divider():
     st.markdown("<hr style='margin:5px 0;opacity:0.2'>", unsafe_allow_html=True)
+
+def _fred_row(label, emoji, value_str, date_str, color='#f1c40f', change_str=None):
+    """Compact sidebar row for a FRED macro indicator."""
+    change_html = ''
+    if change_str:
+        change_html = f" <span style='font-size:0.65rem;color:#aaa'>{change_str}</span>"
+    st.markdown(
+        f"<div style='display:flex;justify-content:space-between;align-items:center;padding:2px 0'>"
+        f"<span style='font-size:0.77rem'>{emoji} <b>{label}</b></span>"
+        f"<span style='font-size:0.77rem;color:{color}'><b>{value_str}</b>"
+        f"<span style='font-size:0.63rem;color:#666'> {date_str}</span>{change_html}</span>"
+        f"</div>", unsafe_allow_html=True)
+
+
+def render_sidebar_employment_expander(m):
+    """就業數據 expander – UNRATE, PAYEMS, ICSA, CIVPART"""
+    with st.expander("👷 就業數據 Employment", expanded=False):
+        any_data = False
+
+        # Unemployment Rate (UNRATE)
+        unemp = m.get('UNRATE')
+        if unemp:
+            any_data = True
+            uc = '#e74c3c' if unemp['value'] > 5 else ('#e67e22' if unemp['value'] > 4 else '#2ecc71')
+            _fred_row('失業率 UNRATE', '📊', f"{unemp['value']:.1f}%", f"({unemp['date'][:7]})", color=uc)
+
+        # Nonfarm Payrolls (PAYEMS)
+        payems = m.get('PAYEMS')
+        if payems:
+            any_data = True
+            chg = payems.get('change', 0)
+            chg_color = '#2ecc71' if chg > 0 else '#e74c3c'
+            chg_arrow = '▲' if chg > 0 else '▼'
+            chg_str = f"<span style='color:{chg_color}'>{chg_arrow}{abs(chg):,}</span>"
+            _fred_row(
+                '非農就業 PAYEMS', '🏭',
+                f"{payems['value'] / 1000:.1f}M",
+                f"({payems['date'][:7]})",
+                color='#4FC3F7',
+                change_str=f"MoM: {'+' if chg > 0 else ''}{chg:,}",
+            )
+
+        # Initial Jobless Claims (ICSA)
+        jl = m.get('JOBLESS')
+        if jl:
+            any_data = True
+            jc = '#e74c3c' if jl['value'] > 250000 else ('#e67e22' if jl['value'] > 220000 else '#2ecc71')
+            prev = jl.get('prev', jl['value'])
+            diff = jl['value'] - prev
+            diff_str = f"{'+' if diff >= 0 else ''}{diff:,}"
+            _fred_row(
+                '初領失業金 ICSA', '📋',
+                f"{jl['value']:,}",
+                f"({jl['date']})",
+                color=jc,
+                change_str=f"WoW: {diff_str}",
+            )
+
+        # Labor Force Participation Rate (CIVPART)
+        civpart = m.get('CIVPART')
+        if civpart:
+            any_data = True
+            diff = civpart['value'] - civpart.get('prev', civpart['value'])
+            diff_str = f"{'+' if diff >= 0 else ''}{diff:.1f}pp"
+            cc = '#2ecc71' if civpart['value'] >= 63 else ('#e67e22' if civpart['value'] >= 61 else '#e74c3c')
+            _fred_row(
+                '勞動參與率 CIVPART', '👥',
+                f"{civpart['value']:.1f}%",
+                f"({civpart['date'][:7]})",
+                color=cc,
+                change_str=f"MoM: {diff_str}",
+            )
+
+        if not any_data:
+            st.caption('⚠️ 就業數據暫時無法載入')
+        st.caption('📌 數據來源: FRED (St. Louis Fed)')
+
+
+def render_sidebar_macro_expander(m):
+    """重要宏觀/市場數據 expander – CPI, Core CPI, Fed Rate, yields, VIX, DXY, Oil, SPY/QQQ"""
+    with st.expander("🏦 重要宏觀/市場數據", expanded=False):
+
+        # ── 通脹 ──────────────────────────────
+        st.markdown("<div style='font-size:0.7rem;font-weight:700;color:#888;margin:4px 0 2px'>📦 通脹 Inflation</div>", unsafe_allow_html=True)
+
+        cpi = m.get('CPI_YOY')
+        if cpi:
+            cc = '#e74c3c' if cpi['value'] > 3.5 else ('#e67e22' if cpi['value'] > 2.5 else '#2ecc71')
+            _fred_row('CPI (YoY)', '📦', f"{cpi['value']:.1f}%", f"({cpi['date'][:7]})", color=cc)
+
+        core_cpi = m.get('CORE_CPI')
+        if core_cpi:
+            ccc = '#e74c3c' if core_cpi['value'] > 3.5 else ('#e67e22' if core_cpi['value'] > 2.5 else '#2ecc71')
+            _fred_row('Core CPI (YoY)', '🎯', f"{core_cpi['value']:.1f}%", f"({core_cpi['date'][:7]})", color=ccc)
+
+        # ── 利率 / 債息 ────────────────────────
+        st.markdown("<div style='font-size:0.7rem;font-weight:700;color:#888;margin:6px 0 2px'>🏛️ 利率 & 債息</div>", unsafe_allow_html=True)
+
+        ff = m.get('FEDFUNDS')
+        if ff:
+            _fred_row('聯儲息率 Fed Funds', '🏛️', f"{ff['value']:.2f}%", f"({ff['date'][:7]})", color='#f1c40f')
+
+        tnx = m.get('TNX', {})
+        if tnx and tnx.get('price') is not None:
+            p10 = tnx['price']
+            pct10 = tnx['pct']
+            arrow10 = '▲' if pct10 >= 0 else '▼'
+            c10 = '#e74c3c' if pct10 >= 0 else '#2ecc71'  # rising yields = tighter
+            _fred_row('10Y 美債息', '📉', f"{p10:.3f}%", f"{arrow10}{abs(pct10):.1f}%", color=c10)
+
+        # 2Y / short end (\ IRX = 13-week T-bill annualised)
+        twy = m.get('TWO_Y', {})
+        if twy and twy.get('price') is not None:
+            p2 = twy['price']
+            pct2 = twy.get('pct', 0)
+            arrow2 = '▲' if pct2 >= 0 else '▼'
+            c2 = '#e74c3c' if pct2 >= 0 else '#2ecc71'
+            _fred_row('短端利率 (13W T-Bill)', '🔖', f"{p2:.2f}%", f"{arrow2}{abs(pct2):.1f}%", color=c2)
+
+        # Yield curve spread 10Y - 2Y
+        yr = m.get('YIELD_SPREAD_RAW')
+        if yr:
+            # TNX from yfinance: value is the yield in %, e.g. 4.3 means 4.30%
+            # IRX from yfinance: value is the yield in %, e.g. 5.12 means 5.12%
+            spread = yr['tnx'] - yr['irx']
+            sc = '#2ecc71' if spread > 0 else '#e74c3c'
+            sign = '+' if spread >= 0 else ''
+            _fred_row('殖利率曲線 10Y-短端', '📐', f"{sign}{spread:.2f}%", '(實時)', color=sc)
+
+        # ── 市場恐慌 / 美元 / 商品 ────────────
+        st.markdown("<div style='font-size:0.7rem;font-weight:700;color:#888;margin:6px 0 2px'>📊 市場情緒 & 大類資產</div>", unsafe_allow_html=True)
+
+        vix = m.get('VIX', {})
+        if vix and vix.get('price') is not None:
+            v = vix['price']
+            pctv = vix['pct']
+            vl = '極度恐慌' if v >= 30 else ('市場緊張' if v >= 20 else '平靜')
+            vc = '#e74c3c' if v >= 30 else ('#e67e22' if v >= 20 else '#2ecc71')
+            _fred_row(f'VIX ({vl})', '😱', f"{v:.2f}", f"({'▲' if pctv >= 0 else '▼'}{abs(pctv):.1f}%)", color=vc)
+
+        dxy = m.get('DXY', {})
+        if dxy and dxy.get('price') is not None:
+            dp = dxy['price']; dpct = dxy['pct']
+            dc = '#e67e22' if dpct > 0 else '#2ecc71'  # strong dollar = headwind for risk
+            _fred_row('美元指數 DXY', '💵', f"{dp:.2f}", f"({'▲' if dpct >= 0 else '▼'}{abs(dpct):.1f}%)", color=dc)
+
+        oil = m.get('OIL', {})
+        if oil and oil.get('price') is not None:
+            op = oil['price']; opct = oil['pct']
+            oc = '#e74c3c' if opct > 2 else ('#2ecc71' if opct < -2 else '#f1c40f')
+            _fred_row('WTI 原油 (USD)', '🛢️', f"${op:.2f}", f"({'▲' if opct >= 0 else '▼'}{abs(opct):.1f}%)", color=oc)
+
+        # SPY & QQQ performance
+        spy = m.get('SPY', {})
+        if spy and spy.get('price') is not None:
+            sp = spy['price']; spct = spy['pct']
+            sc2 = '#2ecc71' if spct >= 0 else '#e74c3c'
+            _fred_row('S&P500 ETF (SPY)', '📈', f"${sp:.2f}", f"({'▲' if spct >= 0 else '▼'}{abs(spct):.1f}%)", color=sc2)
+
+        qqq = m.get('QQQ', {})
+        if qqq and qqq.get('price') is not None:
+            qp = qqq['price']; qpct = qqq['pct']
+            qc = '#2ecc71' if qpct >= 0 else '#e74c3c'
+            _fred_row('納指 ETF (QQQ)', '💻', f"${qp:.2f}", f"({'▲' if qpct >= 0 else '▼'}{abs(qpct):.1f}%)", color=qc)
+
+        st.caption('📌 宏觀數據: FRED | 市場數據: yfinance')
+
 
 def render_sidebar_market_panel():
     st.markdown("### 📡 市場實時雷達")
@@ -1996,6 +3102,7 @@ with st.sidebar:
     app_mode = st.radio('選擇模組', [
         '🔥 熱門板塊關係圖',
         '🎯 產業故事 Radar / Scorecard',
+        '📡 新聞催化劑 / RS 選股',
         '🎯 RS x MACD 動能狙擊手',
         '📰 近月 AI 洞察 (廣東話版)',
         '🕵️ 另類數據雷達 (6大維度)',
@@ -2003,11 +3110,25 @@ with st.sidebar:
         '⚔️ 終極雙劍合璧 (Full Integration)'
     ])
 
+    st.markdown('---')
+    # 就業數據 expander + 宏觀燈號
+    try:
+        _sb_m = fetch_sidebar_market_data()
+        render_sidebar_employment_expander(_sb_m)
+        render_sidebar_macro_expander(_sb_m)
+        st.markdown('---')
+        render_macro_signal_sidebar(_sb_m)
+    except Exception as _e:
+        st.caption(f'⚠️ 宏觀數據載入失敗: {_e}')
+
 # ==========================================
 # 模組渲染
 # ==========================================
 if app_mode == '🎯 產業故事 Radar / Scorecard':
     render_market_radar_module()
+
+elif app_mode == '📡 新聞催化劑 / RS 選股':
+    render_catalyst_screener_module()
 
 elif app_mode == '🎯 RS x MACD 動能狙擊手':
     st.title('🎯 美股 RS x MACD x 趨勢 狙擊手')
