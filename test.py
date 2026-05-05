@@ -10,6 +10,66 @@ from finvizfinance.quote import finvizfinance
 
 st.set_page_config(page_title='🚀 美股全方位量化與 AI 平台', page_icon='📈', layout='wide')
 
+
+# ==========================================
+# Global CSS / Dark Theme Polish
+# ==========================================
+st.markdown("""
+<style>
+/* ── Radar table improvements ── */
+.rdr-tbl { width:100%; border-collapse:collapse; font-family:'Inter',sans-serif; font-size:0.79rem; }
+.rdr-tbl th { background:#141824; color:#8a9bb0; padding:8px 10px; text-align:left;
+    border-bottom:2px solid #252d3d; white-space:nowrap; font-size:0.73rem;
+    font-weight:600; letter-spacing:0.3px; }
+.rdr-tbl td { padding:7px 10px; vertical-align:middle; border-bottom:1px solid #1a1e28; }
+.rdr-tbl tr:nth-child(even) { background:#0c0f18; }
+.rdr-tbl tr:nth-child(odd)  { background:#101420; }
+.rdr-tbl tr:hover { background:#1c2535 !important; transition:background 0.15s; }
+
+/* ── Theme rank table ── */
+.theme-rank { width:100%; border-collapse:collapse; font-family:'Inter',sans-serif; font-size:0.78rem; }
+.theme-rank th { background:#181e2e; color:#8a9bb0; padding:7px 10px; text-align:left;
+    border-bottom:2px solid #252d3d; white-space:nowrap; font-size:0.72rem; }
+.theme-rank td { padding:6px 10px; vertical-align:middle; border-bottom:1px solid #1a1e28; }
+.theme-rank tr:hover { background:#1c2535; transition:background 0.15s; }
+
+/* ── Metric cards ── */
+[data-testid="metric-container"] {
+    background:#101420; border:1px solid #252d3d;
+    border-radius:8px; padding:10px 14px; }
+[data-testid="metric-container"] label { color:#8a9bb0 !important; font-size:0.72rem !important; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] {
+    font-size:1.3rem !important; font-weight:700 !important; color:#e0e8f0 !important; }
+
+/* ── Section headers ── */
+.section-divider {
+    border:none; border-top:1px solid #252d3d;
+    margin:14px 0; opacity:1; }
+
+/* ── Streamlit expander ── */
+[data-testid="stExpander"] {
+    border:1px solid #252d3d !important; border-radius:8px !important;
+    background:#0d1018 !important; }
+
+/* ── Buttons ── */
+[data-testid="stButton"] > button {
+    border-radius:7px !important; font-weight:600 !important;
+    transition:all 0.15s ease !important; }
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] { background:#0a0d14 !important; }
+[data-testid="stSidebar"] [data-testid="stExpander"] {
+    background:#0f1219 !important; border-color:#1e2430 !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background:#0a0d14; }
+::-webkit-scrollbar-thumb { background:#2a3a4a; border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:#3a5a7a; }
+</style>
+""", unsafe_allow_html=True)
+
+
 # ==========================================
 # 工具函數
 # ==========================================
@@ -3318,31 +3378,79 @@ def fetch_sidebar_market_data():
     except:
         data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
 
-    # ── FRED helper: parse CSV robustly, skip header row and '.' missing values ──
-    def _fred_csv(series_id, timeout=10):
-        """Fetch a FRED CSV and return list of (date_str, float_value) tuples,
-        newest-first order (last row = most recent). Skips header and '.' rows."""
-        try:
-            url = f'https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}'
-            resp = requests.get(url, headers=get_headers(), timeout=timeout)
-            if resp.status_code != 200:
-                return []
+    # ── FRED helper: parse CSV robustly, multi-strategy fetch ──
+    def _fred_csv(series_id, timeout=12):
+        """Fetch a FRED CSV with multiple fallback strategies.
+        Returns list of (date_str, float_value) tuples, chronological order.
+        Last element = most recent. Empty list if all strategies fail."""
+        url = f'https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}'
+
+        def _parse_csv_text(text):
             rows = []
-            for line in resp.text.strip().splitlines():
+            for line in text.strip().splitlines():
                 parts = line.split(',')
                 if len(parts) != 2:
                     continue
                 date_s, val_s = parts[0].strip(), parts[1].strip()
-                # Skip header row and FRED's missing-value sentinel '.'
-                if date_s == 'DATE' or val_s == '.' or val_s == '':
+                if date_s == 'DATE' or val_s in ('.', '', 'N/A'):
                     continue
                 try:
                     rows.append((date_s, float(val_s)))
                 except ValueError:
                     continue
-            return rows  # chronological order, last element = most recent
+            return rows
+
+        # Strategy 1: requests with browser-like headers
+        try:
+            headers_full = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Cache-Control': 'no-cache',
+            }
+            resp = requests.get(url, headers=headers_full, timeout=timeout)
+            if resp.status_code == 200 and 'DATE' in resp.text:
+                rows = _parse_csv_text(resp.text)
+                if rows:
+                    return rows
         except Exception:
-            return []
+            pass
+
+        # Strategy 2: pandas read_csv (different HTTP stack)
+        try:
+            df = pd.read_csv(url, storage_options={'User-Agent': 'Mozilla/5.0'})
+            if not df.empty and len(df.columns) >= 2:
+                rows = []
+                for _, row in df.iterrows():
+                    date_s = str(row.iloc[0]).strip()
+                    val_s  = str(row.iloc[1]).strip()
+                    if date_s == 'DATE' or val_s in ('.', '', 'nan', 'N/A'):
+                        continue
+                    try:
+                        rows.append((date_s, float(val_s)))
+                    except ValueError:
+                        continue
+                if rows:
+                    return rows
+        except Exception:
+            pass
+
+        # Strategy 3: minimal curl-style get
+        try:
+            resp = requests.get(url, timeout=timeout, verify=False)
+            if resp.status_code == 200:
+                rows = _parse_csv_text(resp.text)
+                if rows:
+                    return rows
+        except Exception:
+            pass
+
+        return []  # all strategies failed
+
+    # ── FRED employment series fetcher (with error tracking) ──
+    employment_errors = {}
 
     # FRED: Unemployment Rate
     try:
@@ -3355,9 +3463,11 @@ def fetch_sidebar_market_data():
                 'prior': prior_val, 'change': round(val - prior_val, 2)
             }
         else:
-            data['UNRATE'] = None
-    except Exception:
-        data['UNRATE'] = None
+            data['UNRATE'] = {'error': 'FRED 暫時無數據'}
+            employment_errors['UNRATE'] = 'FRED 暫時無數據'
+    except Exception as _e:
+        data['UNRATE'] = {'error': str(_e)[:60]}
+        employment_errors['UNRATE'] = str(_e)[:60]
 
     # FRED: CPI YoY
     try:
@@ -3393,9 +3503,11 @@ def fetch_sidebar_market_data():
                 'change': int(val - prior_val),
             }
         else:
-            data['JOBLESS'] = None
-    except Exception:
-        data['JOBLESS'] = None
+            data['JOBLESS'] = {'error': 'FRED 暫時無數據'}
+            employment_errors['JOBLESS'] = 'FRED 暫時無數據'
+    except Exception as _e:
+        data['JOBLESS'] = {'error': str(_e)[:60]}
+        employment_errors['JOBLESS'] = str(_e)[:60]
 
     # FRED: Nonfarm Payrolls (PAYEMS) – monthly change (values in thousands)
     try:
@@ -3409,9 +3521,11 @@ def fetch_sidebar_market_data():
                 'prior': prev_val, 'change': chg
             }
         else:
-            data['PAYEMS'] = None
-    except Exception:
-        data['PAYEMS'] = None
+            data['PAYEMS'] = {'error': 'FRED 暫時無數據'}
+            employment_errors['PAYEMS'] = 'FRED 暫時無數據'
+    except Exception as _e:
+        data['PAYEMS'] = {'error': str(_e)[:60]}
+        employment_errors['PAYEMS'] = str(_e)[:60]
 
     # FRED: Labor Force Participation Rate (CIVPART)
     try:
@@ -3424,9 +3538,14 @@ def fetch_sidebar_market_data():
                 'prior': prior_val, 'change': round(val - prior_val, 2)
             }
         else:
-            data['CIVPART'] = None
-    except Exception:
-        data['CIVPART'] = None
+            data['CIVPART'] = {'error': 'FRED 暫時無數據'}
+            employment_errors['CIVPART'] = 'FRED 暫時無數據'
+    except Exception as _e:
+        data['CIVPART'] = {'error': str(_e)[:60]}
+        employment_errors['CIVPART'] = str(_e)[:60]
+
+    # Store aggregated employment errors
+    data['EMPLOYMENT_ERRORS'] = employment_errors
 
     # FRED: Core CPI (CPILFESL) – ex Food & Energy, YoY
     try:
@@ -3500,28 +3619,81 @@ def _fred_row(label, emoji, value_str, date_str, color='#f1c40f', change_str=Non
 
 
 def render_sidebar_employment_expander(m):
-    """就業數據 expander – UNRATE, PAYEMS, ICSA, CIVPART"""
-    with st.expander("👷 就業數據 Employment", expanded=False):
-        any_data = False
+    """就業數據 expander – UNRATE, PAYEMS, ICSA, CIVPART (with per-series error status)."""
+    # Helper: check if a series dict has a real value or only error
+    def _has_value(d):
+        return isinstance(d, dict) and d.get('value') is not None
 
-        # Unemployment Rate (UNRATE)
-        unemp = m.get('UNRATE')
-        if unemp and unemp.get('value') is not None:
-            any_data = True
+    def _is_error(d):
+        return isinstance(d, dict) and 'error' in d and d.get('value') is None
+
+    def _status_dot(d):
+        """Return a small coloured status indicator."""
+        if _has_value(d):
+            return "<span style='color:#2ecc71;font-size:0.65rem'>✅</span>"
+        elif _is_error(d):
+            return "<span style='color:#e74c3c;font-size:0.65rem'>❌</span>"
+        else:
+            return "<span style='color:#888;font-size:0.65rem'>—</span>"
+
+    unemp   = m.get('UNRATE')
+    payems  = m.get('PAYEMS')
+    jl      = m.get('JOBLESS')
+    civpart = m.get('CIVPART')
+    emp_errors = m.get('EMPLOYMENT_ERRORS', {})
+
+    # Determine overall health
+    all_series = [unemp, payems, jl, civpart]
+    all_failed = all(not _has_value(d) for d in all_series)
+    any_ok     = any(_has_value(d) for d in all_series)
+
+    with st.expander("👷 就業數據 Employment", expanded=False):
+
+        # ── Per-series health bar ───────────────────────────
+        status_html = (
+            "<div style='display:flex;gap:8px;align-items:center;"
+            "font-size:0.68rem;color:#aaa;margin-bottom:6px;flex-wrap:wrap'>"
+            f"<span>{_status_dot(unemp)} UNRATE</span>"
+            f"<span>{_status_dot(payems)} PAYEMS</span>"
+            f"<span>{_status_dot(jl)} ICSA</span>"
+            f"<span>{_status_dot(civpart)} CIVPART</span>"
+            "</div>"
+        )
+        st.markdown(status_html, unsafe_allow_html=True)
+
+        # ── All-fail notice ─────────────────────────────────
+        if all_failed:
+            st.markdown(
+                "<div style='background:#1a0a00;border:1px solid #e67e22;"
+                "border-radius:6px;padding:8px 10px;margin-bottom:8px'>"
+                "<div style='color:#e67e22;font-size:0.77rem;font-weight:700'>"
+                "⚠️ FRED 暫時拉唔到，請檢查網絡</div>"
+                "<div style='color:#aaa;font-size:0.7rem;margin-top:3px'>"
+                "St. Louis FRED API 連線暫時受阻。數據將在下次重試時自動更新。</div>"
+                "</div>",
+                unsafe_allow_html=True
+            )
+
+        # ── Unemployment Rate (UNRATE) ──────────────────────
+        if _has_value(unemp):
             v = unemp['value']
             uc = '#e74c3c' if v > 5 else ('#e67e22' if v > 4 else '#2ecc71')
             chg = unemp.get('change')
             chg_str = f"MoM: {'+' if chg >= 0 else ''}{chg:.1f}pp" if chg is not None else None
             _fred_row('失業率 UNRATE', '📊', f"{v:.1f}%", f"({unemp['date'][:7]})",
                       color=uc, change_str=chg_str)
+        elif _is_error(unemp):
+            err_msg = unemp.get('error', '未知錯誤')[:50]
+            st.markdown(
+                f"<div style='font-size:0.71rem;color:#888'>📊 失業率 UNRATE: "
+                f"<span style='color:#e74c3c'>❌ {err_msg}</span></div>",
+                unsafe_allow_html=True)
         else:
             st.markdown("<div style='font-size:0.72rem;color:#666'>📊 失業率 UNRATE: <span style='color:#888'>N/A</span></div>",
                         unsafe_allow_html=True)
 
-        # Nonfarm Payrolls (PAYEMS)
-        payems = m.get('PAYEMS')
-        if payems and payems.get('value') is not None:
-            any_data = True
+        # ── Nonfarm Payrolls (PAYEMS) ───────────────────────
+        if _has_value(payems):
             chg = payems.get('change', 0)
             _fred_row(
                 '非農就業 PAYEMS', '🏭',
@@ -3530,17 +3702,20 @@ def render_sidebar_employment_expander(m):
                 color='#4FC3F7',
                 change_str=f"MoM: {'+' if chg > 0 else ''}{chg:,}",
             )
+        elif _is_error(payems):
+            err_msg = payems.get('error', '未知錯誤')[:50]
+            st.markdown(
+                f"<div style='font-size:0.71rem;color:#888'>🏭 非農就業 PAYEMS: "
+                f"<span style='color:#e74c3c'>❌ {err_msg}</span></div>",
+                unsafe_allow_html=True)
         else:
             st.markdown("<div style='font-size:0.72rem;color:#666'>🏭 非農就業 PAYEMS: <span style='color:#888'>N/A</span></div>",
                         unsafe_allow_html=True)
 
-        # Initial Jobless Claims (ICSA)
-        jl = m.get('JOBLESS')
-        if jl and jl.get('value') is not None:
-            any_data = True
+        # ── Initial Jobless Claims (ICSA) ───────────────────
+        if _has_value(jl):
             jv = jl['value']
             jc = '#e74c3c' if jv > 250000 else ('#e67e22' if jv > 220000 else '#2ecc71')
-            # support both 'prior' (new) and 'prev' (legacy) keys
             prior = jl.get('prior', jl.get('prev', jv))
             diff = jv - prior
             diff_str = f"WoW: {'+' if diff >= 0 else ''}{diff:,}"
@@ -3551,16 +3726,19 @@ def render_sidebar_employment_expander(m):
                 color=jc,
                 change_str=diff_str,
             )
+        elif _is_error(jl):
+            err_msg = jl.get('error', '未知錯誤')[:50]
+            st.markdown(
+                f"<div style='font-size:0.71rem;color:#888'>📋 初領失業金 ICSA: "
+                f"<span style='color:#e74c3c'>❌ {err_msg}</span></div>",
+                unsafe_allow_html=True)
         else:
             st.markdown("<div style='font-size:0.72rem;color:#666'>📋 初領失業金 ICSA: <span style='color:#888'>N/A</span></div>",
                         unsafe_allow_html=True)
 
-        # Labor Force Participation Rate (CIVPART)
-        civpart = m.get('CIVPART')
-        if civpart and civpart.get('value') is not None:
-            any_data = True
+        # ── Labor Force Participation (CIVPART) ─────────────
+        if _has_value(civpart):
             cv = civpart['value']
-            # support both 'prior' (new) and 'prev' (legacy) keys
             prior_c = civpart.get('prior', civpart.get('prev', cv))
             diff = cv - prior_c
             diff_str = f"MoM: {'+' if diff >= 0 else ''}{diff:.1f}pp"
@@ -3572,16 +3750,21 @@ def render_sidebar_employment_expander(m):
                 color=cc,
                 change_str=diff_str,
             )
+        elif _is_error(civpart):
+            err_msg = civpart.get('error', '未知錯誤')[:50]
+            st.markdown(
+                f"<div style='font-size:0.71rem;color:#888'>👥 勞動參與率 CIVPART: "
+                f"<span style='color:#e74c3c'>❌ {err_msg}</span></div>",
+                unsafe_allow_html=True)
         else:
             st.markdown("<div style='font-size:0.72rem;color:#666'>👥 勞動參與率 CIVPART: <span style='color:#888'>N/A</span></div>",
                         unsafe_allow_html=True)
 
-        if not any_data:
-            st.markdown(
-                "<div style='color:#e67e22;font-size:0.73rem;padding:4px 0'>"
-                "⚠️ 就業數據暫時無法載入 — FRED 連線可能受限，請稍後重試。"
-                "</div>", unsafe_allow_html=True)
-        st.caption('📌 數據來源: FRED (St. Louis Fed) | 每5分鐘自動更新')
+        # ── Footer ──────────────────────────────────────────
+        if any_ok:
+            st.caption('📌 數據來源: FRED (St. Louis Fed) | 每5分鐘自動更新')
+        else:
+            st.caption('📌 FRED 連線暫時受阻 | 本 app 每5分鐘自動重試')
 
 
 def render_sidebar_macro_expander(m):
@@ -3803,7 +3986,8 @@ SETUP_COLORS = {
 
 def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
                         dist_ma20_pct, dist_20d_high_pct,
-                        sent_label, volatility_pct):
+                        sent_label, volatility_pct,
+                        vol_signal=None):
     """
     Classify a stock into one of 5 setup types using purely categorical /
     threshold logic.  No numeric RS rating is used.
@@ -3818,6 +4002,7 @@ def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
     dist_20d_high_pct: float|None – (price/20D_high - 1)*100; ≤0 = below high
     sent_label      : str  – '🟢 正面','⚪ 中性','🔴 負面'
     volatility_pct  : float|None – 20D annualised vol proxy (std of daily returns * sqrt(252))
+    vol_signal      : str|None  – '放量突破' | '縮量回踩' | '量價背馳' | '正常量能' | None
 
     Returns
     -------
@@ -3833,11 +4018,16 @@ def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
 
     # ── ⚠️ 過度延伸/風險高 ─────────────────────────────────────────
     # Price more than 12% above MA20, or RS is outperformer but vol is very high
+    # 量價背馳 also raises caution when price is extended
     overextended = (
         dist_ma20_pct is not None and dist_ma20_pct > 12
     ) or (
         rs_cat == '🟢 跑贏指數'
         and volatility_pct is not None and volatility_pct > 80
+    ) or (
+        vol_signal == '量價背馳'
+        and rs_cat in ('🟢 跑贏指數', '🟠 接近突破')
+        and (dist_ma20_pct is not None and dist_ma20_pct > 8)
     )
     if overextended:
         return SETUP_LABELS['OVEREXTENDED']
@@ -3849,9 +4039,10 @@ def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
     pullback_flag = (dist_20d_high_pct is not None and dist_20d_high_pct < -3)
 
     # ── 🛡️ 低風險回踩 (evaluated BEFORE 接近爆發 for priority) ─────
+    # Enhanced: 縮量回踩 volume signal = strongest low-risk signal
     # Strict: RS near-breakout/just-turned + pulled back to MA20 + not deeply neg sentiment
     if low_risk_rs and near_ma20 and pullback_flag and neutral_or_pos:
-        return SETUP_LABELS['LOW_RISK']
+        return SETUP_LABELS['LOW_RISK']  # 縮量回踩 makes this ideal low-risk entry
     # Broad: near-breakout RS + positive sentiment + price not over-extended (≤6% above MA20)
     if rs_cat == '🟠 接近突破' and positive_sent:
         if dist_ma20_pct is None or dist_ma20_pct <= 6:
@@ -3859,6 +4050,7 @@ def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
 
     # ── 🔥 強勢延續 ────────────────────────────────────────────────
     # Confirmed outperformer + positive sentiment + not overextended
+    # 放量突破 further confirms hot momentum
     if (rs_cat == '🟢 跑贏指數'
             and positive_sent
             and (rel_5d is None or rel_5d >= 0)):
@@ -3866,9 +4058,12 @@ def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
 
     # ── 🚀 接近爆發 ────────────────────────────────────────────────
     # Near-breakout or confirmed RS + positive/neutral sentiment + not a pullback setup
+    # 放量突破 + 剛轉強 => upgrade to near_breakout
     if rs_cat in ('🟠 接近突破', '🟢 跑贏指數'):
         if neutral_or_pos and (rel_5d is None or rel_5d >= -1):
             return SETUP_LABELS['NEAR_BREAKOUT']
+    if vol_signal == '放量突破' and rs_cat == '🟡 剛轉強' and neutral_or_pos:
+        return SETUP_LABELS['NEAR_BREAKOUT']
 
     # ── 👀 早期轉強 ────────────────────────────────────────────────
     # 剛轉強 RS, not deeply negative sentiment
@@ -3877,6 +4072,60 @@ def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
 
     # ── 📉 跑輸觀望 ────────────────────────────────────────────────
     return SETUP_LABELS['LAGGING']
+
+
+# ==========================================
+# 成交量訊號輔助函數
+# ==========================================
+def compute_volume_signal(latest_vol, avg20_vol, dist_ma20_pct, dist_20d_high_pct, rel_5d):
+    """
+    Compute categorical volume signal.
+
+    Returns one of:
+      '放量突破'   – volume breakout: price near/at 20D high, vol ratio >= 1.5
+      '縮量回踩'   – low-vol pullback: price pulled back toward MA20, vol ratio <= 0.85
+      '量價背馳'   – price-volume divergence: price rising but vol drying, or price falling + vol surging
+      '正常量能'   – normal / N/A
+    """
+    if latest_vol is None or avg20_vol is None or avg20_vol == 0:
+        return '正常量能'
+
+    vol_ratio = latest_vol / avg20_vol
+
+    # 放量突破: near/at 20D high (within -3%) AND vol ratio >= 1.5
+    near_high = (dist_20d_high_pct is not None and dist_20d_high_pct >= -3)
+    if near_high and vol_ratio >= 1.5:
+        return '放量突破'
+
+    # 縮量回踩: pulled back toward MA20 (dist_ma20 between -8% and +4%), vol ratio <= 0.85
+    near_ma20 = (dist_ma20_pct is not None and -8 <= dist_ma20_pct <= 4)
+    below_high = (dist_20d_high_pct is not None and dist_20d_high_pct < -3)
+    if near_ma20 and below_high and vol_ratio <= 0.85:
+        return '縮量回踩'
+
+    # 量價背馳: price up (5D rel > +2%) but vol ratio < 0.7 → vol drying while price rises
+    if rel_5d is not None and rel_5d > 2 and vol_ratio < 0.7:
+        return '量價背馳'
+    # 量價背馳: price down (5D rel < -2%) but vol surging (ratio > 1.8) → distribution warning
+    if rel_5d is not None and rel_5d < -2 and vol_ratio > 1.8:
+        return '量價背馳'
+
+    return '正常量能'
+
+
+def _vol_signal_badge(signal):
+    """Return coloured HTML badge for volume signal."""
+    colors = {
+        '放量突破': ('#003820', '#00C851'),
+        '縮量回踩': ('#0A1A2A', '#4FC3F7'),
+        '量價背馳': ('#3A1A00', '#FF8C00'),
+        '正常量能': ('#1A1A1A', '#888888'),
+    }
+    bg, fg = colors.get(signal, ('#1A1A1A', '#888888'))
+    return (
+        f"<span style='background:{bg};color:{fg};padding:1px 7px;"
+        f"border-radius:8px;font-size:0.70rem;font-weight:bold'>{signal}</span>"
+    )
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -3888,9 +4137,12 @@ def fetch_ma_data(tickers_tuple):
       - dist_ma50_pct = (price/MA50 - 1)*100
       - dist_20d_high_pct = (price/rolling_20d_high - 1)*100   (≤0)
       - volatility_pct   = annualised 20-day std of daily returns (%)
+      - latest_volume, avg20_volume, vol_ratio (volume metrics from OHLCV)
+      - vol_signal: '放量突破' | '縮量回踩' | '量價背馳' | '正常量能'
 
     Returns dict: {ticker: {price, MA20, MA50, dist_ma20_pct, dist_ma50_pct,
-                             dist_20d_high_pct, volatility_pct}}
+                             dist_20d_high_pct, volatility_pct,
+                             latest_volume, avg20_volume, vol_ratio, vol_signal}}
     """
     tickers = list(tickers_tuple)
     result = {}
@@ -3905,8 +4157,10 @@ def fetch_ma_data(tickers_tuple):
             return result
         if isinstance(raw.columns, pd.MultiIndex):
             closes = raw['Close']
+            volumes = raw['Volume'] if 'Volume' in raw.columns.get_level_values(0) else None
         else:
             closes = raw[['Close']] if 'Close' in raw.columns else raw
+            volumes = raw[['Volume']] if 'Volume' in raw.columns else None
 
         for ticker in tickers:
             try:
@@ -3929,6 +4183,31 @@ def fetch_ma_data(tickers_tuple):
                 daily_rets = col.pct_change().dropna().tail(20)
                 vol = round(float(daily_rets.std() * (252 ** 0.5) * 100), 1) if len(daily_rets) >= 10 else None
 
+                # ── Volume metrics ───────────────────────────────────
+                latest_volume, avg20_volume, vol_ratio = None, None, None
+                try:
+                    if volumes is not None:
+                        vcol = (volumes[ticker] if ticker in volumes.columns
+                                else pd.Series(dtype=float)).dropna()
+                        if len(vcol) >= 2:
+                            latest_volume = int(vcol.iloc[-1])
+                            avg20_volume  = int(vcol.tail(20).mean())
+                            vol_ratio     = round(latest_volume / avg20_volume, 2) if avg20_volume > 0 else None
+                except Exception:
+                    pass
+
+                # 5D price return (absolute, not relative) for vol signal
+                _5d_ret = None
+                try:
+                    if len(col) >= 6:
+                        _5d_ret = round((float(col.iloc[-1]) / float(col.iloc[-6]) - 1) * 100, 2)
+                except Exception:
+                    pass
+
+                vol_signal = compute_volume_signal(
+                    latest_volume, avg20_volume, dist_ma20, dist_h20, _5d_ret
+                )
+
                 result[ticker] = {
                     'price':           price,
                     'MA20':            round(ma20, 2),
@@ -3937,6 +4216,10 @@ def fetch_ma_data(tickers_tuple):
                     'dist_ma50_pct':   dist_ma50,
                     'dist_20d_high_pct': dist_h20,
                     'volatility_pct':  vol,
+                    'latest_volume':   latest_volume,
+                    'avg20_volume':    avg20_volume,
+                    'vol_ratio':       vol_ratio,
+                    'vol_signal':      vol_signal,
                 }
             except Exception:
                 result[ticker] = {}
@@ -4018,25 +4301,35 @@ def build_radar_rows(selected_themes, perf_data, sentiment_data, ma_data, benchm
             rel1m = _rel(ticker, '1m')
             rel3m = _rel(ticker, '3m')
 
-            dist_ma20 = ma.get('dist_ma20_pct')
-            dist_ma50 = ma.get('dist_ma50_pct')
-            dist_h20  = ma.get('dist_20d_high_pct')
-            vol       = ma.get('volatility_pct')
+            dist_ma20  = ma.get('dist_ma20_pct')
+            dist_ma50  = ma.get('dist_ma50_pct')
+            dist_h20   = ma.get('dist_20d_high_pct')
+            vol        = ma.get('volatility_pct')
+            vol_signal = ma.get('vol_signal', '正常量能')
+            vol_ratio  = ma.get('vol_ratio')
+            latest_vol = ma.get('latest_volume')
+            avg20_vol  = ma.get('avg20_volume')
 
             setup = classify_setup_type(
                 rs_cat, rel5d, rel1m, rel3m,
                 dist_ma20, dist_h20,
-                sent_lbl, vol
+                sent_lbl, vol,
+                vol_signal=vol_signal
             )
 
-            # Generate comment
+            # Generate comment (include volume signal)
             comment = ''
             if setup == SETUP_LABELS['HOT_MOMENTUM'] and sent_lbl == '🟢 正面':
                 comment = '⭐ 技術+情緒雙強'
+                if vol_signal == '放量突破':
+                    comment = '⭐ 放量突破+情緒雙強'
             elif setup == SETUP_LABELS['NEAR_BREAKOUT'] and sent_lbl == '🟢 正面':
                 comment = '🔥 接近突破+正面消息'
             elif setup == SETUP_LABELS['LOW_RISK']:
-                comment = '🛡️ 回踩低風險位'
+                if vol_signal == '縮量回踩':
+                    comment = '🛡️ 縮量回踩低風險'
+                else:
+                    comment = '🛡️ 回踩低風險位'
             elif setup == SETUP_LABELS['EARLY_TURN']:
                 comment = '📈 早期轉強觀察'
 
@@ -4056,6 +4349,10 @@ def build_radar_rows(selected_themes, perf_data, sentiment_data, ma_data, benchm
                 'dist_ma50':  dist_ma50,
                 'dist_h20':   dist_h20,
                 'vol':        vol,
+                'vol_signal': vol_signal,
+                'vol_ratio':  vol_ratio,
+                'latest_vol': latest_vol,
+                'avg20_vol':  avg20_vol,
                 'comment':    comment,
             })
     return rows
@@ -4080,6 +4377,16 @@ def _radar_row_html(r, benchmark):
     # Row background from setup colour
     bg, _ = SETUP_COLORS.get(r['setup'], ('#0E1117', '#aaa'))
 
+    # Volume ratio display
+    vr = r.get('vol_ratio')
+    if vr is not None:
+        vr_color = '#00C851' if vr >= 1.5 else ('#4FC3F7' if vr <= 0.85 else ('#FF8C00' if vr >= 1.8 else '#888'))
+        vol_ratio_html = f"<span class='vol-ratio' style='color:{vr_color}'>{vr:.2f}x</span>"
+    else:
+        vol_ratio_html = "<span style='color:#444;font-size:0.68rem'>N/A</span>"
+
+    vol_sig = r.get('vol_signal', '正常量能') or '正常量能'
+
     return (
         f"<tr style='background:{bg}'>"
         f"<td style='color:#888;font-size:0.73rem'>{r['theme']}</td>"
@@ -4088,6 +4395,8 @@ def _radar_row_html(r, benchmark):
         f"<td>{_setup_badge(r['setup'])}</td>"
         f"<td>{_rs_status_badge(r['rs_cat'])}</td>"
         f"<td>{_sentiment_badge(r['sent_label'])}</td>"
+        f"<td>{_vol_signal_badge(vol_sig)}</td>"
+        f"<td>{vol_ratio_html}</td>"
         f"<td>{tag_html}</td>"
         f"<td style='color:#ccc'>{price_str}</td>"
         f"<td>{_ret_cell(r['rel_5d'])}</td>"
@@ -4105,14 +4414,19 @@ def _radar_row_html(r, benchmark):
 RADAR_TABLE_HEADER = (
     "<style>"
     ".rdr-tbl{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.79rem}"
-    ".rdr-tbl th{background:#1E1E2E;color:#aaa;padding:7px 8px;text-align:left;"
-    "border-bottom:2px solid #333;white-space:nowrap}"
-    ".rdr-tbl td{padding:6px 8px;vertical-align:middle;border-bottom:1px solid #1A1A2A}"
+    ".rdr-tbl th{background:#1A1A2E;color:#9aa;padding:7px 9px;text-align:left;"
+    "border-bottom:2px solid #2A2A3E;white-space:nowrap;font-size:0.76rem}"
+    ".rdr-tbl td{padding:6px 9px;vertical-align:middle;border-bottom:1px solid #1A1A2A}"
+    ".rdr-tbl tr:nth-child(even){background:#0C0F16}"
+    ".rdr-tbl tr:nth-child(odd){background:#10141C}"
     ".rdr-tbl tr:hover{background:#1F2937!important}"
+    ".vol-ratio{font-size:0.68rem;color:#aaa}"
     "</style>"
     '<table class="rdr-tbl"><thead><tr>'
     "<th>板塊</th><th>Ticker</th><th>公司</th>"
-    "<th>Setup 類型</th><th>RS狀態</th><th>新聞情緒</th><th>催化劑</th>"
+    "<th>Setup 類型</th><th>RS狀態</th><th>新聞情緒</th>"
+    "<th>成交量訊號</th><th>Vol比率</th>"
+    "<th>催化劑</th>"
     "<th>現價</th>"
     "<th>5D相對</th><th>1M相對</th><th>3M相對</th>"
     "<th>MA20距離</th><th>MA50距離</th><th>距20日高位</th>"
@@ -4179,6 +4493,189 @@ def render_theme_ranking_table(selected_themes, perf_data, sentiment_data, bench
     return tbl + '\n'.join(rows_html) + '\n</tbody></table>'
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Radar helper: Universe info card
+# ─────────────────────────────────────────────────────────────────────────────
+def _universe_info_card():
+    """Show an informational card explaining the radar's stock universe."""
+    total_themes = len(CATALYST_THEME_MAP)
+    total_tickers = sum(len(v.get('tickers', {})) for v in CATALYST_THEME_MAP.values())
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,#0d1a2d 0%,#1a2740 100%);"
+        f"border:1px solid #2a4a6b;border-radius:10px;padding:12px 16px;margin-bottom:12px'>"
+        f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:6px'>"
+        f"<span style='font-size:1rem'>🌐</span>"
+        f"<span style='font-size:0.9rem;font-weight:700;color:#4FC3F7'>雷達掃描範圍 — 主題精選池</span>"
+        f"<span style='background:#1e3a5f;color:#7ec8e3;font-size:0.65rem;"
+        f"padding:2px 7px;border-radius:10px;border:1px solid #2a5080'>"
+        f"非全市場 8,000+ 股</span>"
+        f"</div>"
+        f"<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px'>"
+        f"<div style='background:#0a1520;border-radius:6px;padding:8px;text-align:center'>"
+        f"<div style='font-size:1.3rem;font-weight:800;color:#4FC3F7'>{total_themes}</div>"
+        f"<div style='font-size:0.68rem;color:#888'>精選板塊主題</div>"
+        f"</div>"
+        f"<div style='background:#0a1520;border-radius:6px;padding:8px;text-align:center'>"
+        f"<div style='font-size:1.3rem;font-weight:800;color:#00C851'>~{total_tickers}</div>"
+        f"<div style='font-size:0.68rem;color:#888'>候選個股</div>"
+        f"</div>"
+        f"<div style='background:#0a1520;border-radius:6px;padding:8px;text-align:center'>"
+        f"<div style='font-size:1.3rem;font-weight:800;color:#f1c40f'>⚡</div>"
+        f"<div style='font-size:0.68rem;color:#888'>即時掃描</div>"
+        f"</div>"
+        f"</div>"
+        f"<div style='font-size:0.73rem;color:#aaa;line-height:1.5'>"
+        f"⚠️ 本雷達係掃描 <b style='color:#4FC3F7'>{total_themes} 個精選主題板塊</b> "
+        f"內嘅約 <b style='color:#00C851'>{total_tickers}</b> 隻個股，"
+        f"<b>並非</b>全部 8,000+ 隻美股。主題池涵蓋 AI、半導體、能源、醫療、消費等高關注度板塊，"
+        f"設計以提升掃描速度同數據質素為主。如需擴闊範圍，可自行添加板塊至 CATALYST_THEME_MAP。"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Radar helper: Stock-level sentiment panel
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_stock_sentiment_panel(candidate_tickers, sentiment_data):
+    """Render a stock-level sentiment analysis expander inside the radar module."""
+    with st.expander("🔍 四. 個股情緒深度分析 Stock Sentiment", expanded=False):
+        st.markdown(
+            "<div style='font-size:0.78rem;color:#aaa;margin-bottom:10px'>"
+            "選擇一隻股票，查看近期新聞標題、情緒評分及關鍵字詞統計。"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+        if not candidate_tickers:
+            st.info("暫無候選股票，請先在上方選擇板塊。")
+            return
+
+        # Ticker selector — sorted alphabetically
+        sorted_tickers = sorted(candidate_tickers)
+        selected_ticker = st.selectbox(
+            "選擇股票 Ticker:",
+            sorted_tickers,
+            key="sentiment_panel_ticker_select",
+        )
+
+        if not selected_ticker:
+            return
+
+        col_sent, col_news = st.columns([1, 2])
+
+        with col_sent:
+            # Sentiment summary card
+            sent = sentiment_data.get(selected_ticker, {})
+            label = sent.get("label", "⚪ 中性")
+            pos   = sent.get("pos", 0)
+            neg   = sent.get("neg", 0)
+            count = sent.get("count", 0)
+            pos_kw = sent.get("pos_kw", [])
+            neg_kw = sent.get("neg_kw", [])
+
+            if label == "🟢 正面":
+                card_bg, label_color, border_color = "#0D2010", "#00C851", "#00C851"
+            elif label == "🔴 負面":
+                card_bg, label_color, border_color = "#200808", "#FF4444", "#FF4444"
+            else:
+                card_bg, label_color, border_color = "#141414", "#aaa", "#444"
+
+            st.markdown(
+                f"<div style='background:{card_bg};border:1px solid {border_color};"
+                f"border-radius:10px;padding:14px'>"
+                f"<div style='font-size:1.1rem;font-weight:800;color:{label_color};"
+                f"margin-bottom:8px'>{label}</div>"
+                f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px'>"
+                f"<div style='background:#0a1010;border-radius:6px;padding:6px;text-align:center'>"
+                f"<div style='font-size:1.1rem;font-weight:700;color:#00C851'>{pos}</div>"
+                f"<div style='font-size:0.65rem;color:#888'>正面訊號</div>"
+                f"</div>"
+                f"<div style='background:#0a1010;border-radius:6px;padding:6px;text-align:center'>"
+                f"<div style='font-size:1.1rem;font-weight:700;color:#FF4444'>{neg}</div>"
+                f"<div style='font-size:0.65rem;color:#888'>負面訊號</div>"
+                f"</div>"
+                f"</div>"
+                f"<div style='font-size:0.68rem;color:#aaa'>新聞數量: {count} 條</div>"
+                + (
+                    f"<div style='margin-top:6px;font-size:0.68rem'>"
+                    f"<span style='color:#00C851'>▲ 正面詞: </span>"
+                    f"<span style='color:#ccc'>{', '.join(pos_kw) if pos_kw else '—'}</span></div>"
+                    if pos_kw else ""
+                )
+                + (
+                    f"<div style='font-size:0.68rem'>"
+                    f"<span style='color:#FF4444'>▼ 負面詞: </span>"
+                    f"<span style='color:#ccc'>{', '.join(neg_kw) if neg_kw else '—'}</span></div>"
+                    if neg_kw else ""
+                )
+                + "</div>",
+                unsafe_allow_html=True
+            )
+
+        with col_news:
+            # Fetch and display raw headlines
+            st.markdown(
+                f"<div style='font-size:0.8rem;font-weight:700;color:#4FC3F7;"
+                f"margin-bottom:6px'>📰 近期新聞標題 — {selected_ticker}</div>",
+                unsafe_allow_html=True
+            )
+            try:
+                raw_headlines = []
+                tkr = yf.Ticker(selected_ticker)
+                news_list = tkr.news if hasattr(tkr, "news") and isinstance(tkr.news, list) else []
+                for item in news_list[:10]:
+                    content_d = item.get("content", {}) if isinstance(item, dict) else {}
+                    title = str(content_d.get("title", item.get("title", ""))).strip()
+                    if title:
+                        raw_headlines.append(title)
+            except Exception:
+                raw_headlines = []
+
+            if not raw_headlines:
+                # Fallback: use finviz
+                try:
+                    news_df = finvizfinance(selected_ticker).ticker_news()
+                    if not news_df.empty:
+                        for _, row in news_df.head(10).iterrows():
+                            t = str(row.get("Title", "")).strip()
+                            if t:
+                                raw_headlines.append(t)
+                except Exception:
+                    pass
+
+            if raw_headlines:
+                _, pos_s, neg_s, pos_kw_s, neg_kw_s = classify_news_sentiment(raw_headlines)
+                for i, hl in enumerate(raw_headlines[:8], 1):
+                    hl_lower = hl.lower()
+                    has_pos = any(k in hl_lower for k in pos_kw_s)
+                    has_neg = any(k in hl_lower for k in neg_kw_s)
+                    if has_pos:
+                        row_color = "#1a3a1a"
+                        dot = "🟢"
+                    elif has_neg:
+                        row_color = "#3a1a1a"
+                        dot = "🔴"
+                    else:
+                        row_color = "#1a1a1a"
+                        dot = "⚪"
+                    st.markdown(
+                        f"<div style='background:{row_color};border-radius:5px;"
+                        f"padding:5px 8px;margin-bottom:3px;font-size:0.74rem;color:#ddd'>"
+                        f"{dot} {hl[:120]}</div>",
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.markdown(
+                    "<div style='color:#666;font-size:0.76rem;padding:8px'>"
+                    "⚠️ 暫時找不到近期新聞，請稍後再試。</div>",
+                    unsafe_allow_html=True
+                )
+
+
+
 def render_radar_module():
     """Main render function for 🔥 當炒 / 低風險機會雷達."""
     st.title('🔥 當炒 / 低風險機會雷達')
@@ -4187,7 +4684,10 @@ def render_radar_module():
         '  ⚠️ 本模組僅供技術篩選/觀察清單用途，所有數據不構成任何形式之投資建議。'
     )
 
-    # ── Controls ────────────────────────────────────────────────────
+    # ── Universe Info Card ─────────────────────────────────────────
+    _universe_info_card()
+
+        # ── Controls ────────────────────────────────────────────────────
     col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 2, 1])
     with col_ctrl1:
         all_themes = list(CATALYST_THEME_MAP.keys())
@@ -4376,7 +4876,10 @@ def render_radar_module():
     else:
         st.warning('⚠️ 當前篩選條件下無候選股票，請調整 Setup 類型篩選。')
 
-    # ── D. 點樣用 usage guide ──────────────────────────────────────
+    # ── D. Stock-level sentiment panel ────────────────────────────
+    _render_stock_sentiment_panel(candidate_tickers, sentiment_data)
+
+        # ── D. 點樣用 usage guide ──────────────────────────────────────
     st.markdown('---')
     with st.expander('📖 點樣用 — 篩選邏輯與注意事項', expanded=False):
         st.markdown("""
