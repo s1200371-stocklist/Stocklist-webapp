@@ -3775,6 +3775,651 @@ def render_sidebar_market_panel():
     _pm("恒生指數", "🇭🇰", m.get('HSI'), fmt='{:,.0f}')
     _pm("上證指數", "🇨🇳", m.get('SHCOMP'), fmt='{:,.0f}')
 
+
+
+# ==========================================
+# 🔥 當炒 / 低風險機會雷達  (新增模組)
+# ==========================================
+
+# ── Setup type labels ──────────────────────────────────────────────
+SETUP_LABELS = {
+    'HOT_MOMENTUM':   '🔥 強勢延續',
+    'NEAR_BREAKOUT':  '🚀 接近爆發',
+    'LOW_RISK':       '🛡️ 低風險回踩',
+    'EARLY_TURN':     '👀 早期轉強',
+    'OVEREXTENDED':   '⚠️ 過度延伸/風險高',
+    'LAGGING':        '📉 跑輸觀望',
+}
+
+SETUP_COLORS = {
+    '🔥 強勢延續':      ('#0D2010', '#00C851'),
+    '🚀 接近爆發':      ('#1A0E00', '#FF8C00'),
+    '🛡️ 低風險回踩':    ('#0A1A2A', '#4FC3F7'),
+    '👀 早期轉強':      ('#1A1A00', '#F9A825'),
+    '⚠️ 過度延伸/風險高': ('#2A1A00', '#FF6D00'),
+    '📉 跑輸觀望':      ('#1A1A1A', '#888888'),
+}
+
+
+def classify_setup_type(rs_cat, rel_5d, rel_1m, rel_3m,
+                        dist_ma20_pct, dist_20d_high_pct,
+                        sent_label, volatility_pct):
+    """
+    Classify a stock into one of 5 setup types using purely categorical /
+    threshold logic.  No numeric RS rating is used.
+
+    Parameters
+    ----------
+    rs_cat          : str  – one of '🟢 跑贏指數','🟠 接近突破','🟡 剛轉強','🔴 跑輸指數'
+    rel_5d          : float|None – 5D relative return vs benchmark (pct)
+    rel_1m          : float|None – 1M relative return vs benchmark (pct)
+    rel_3m          : float|None – 3M relative return vs benchmark (pct)
+    dist_ma20_pct   : float|None – (price/MA20 - 1)*100; positive = above MA20
+    dist_20d_high_pct: float|None – (price/20D_high - 1)*100; ≤0 = below high
+    sent_label      : str  – '🟢 正面','⚪ 中性','🔴 負面'
+    volatility_pct  : float|None – 20D annualised vol proxy (std of daily returns * sqrt(252))
+
+    Returns
+    -------
+    str – one of the SETUP_LABELS values
+    """
+    # Fallback when data is completely missing
+    if rs_cat is None:
+        return SETUP_LABELS['LAGGING']
+
+    positive_sent = sent_label == '🟢 正面'
+    neutral_or_pos = sent_label in ('🟢 正面', '⚪ 中性')
+    negative_sent  = sent_label == '🔴 負面'
+
+    # ── ⚠️ 過度延伸/風險高 ─────────────────────────────────────────
+    # Price more than 12% above MA20, or RS is outperformer but vol is very high
+    overextended = (
+        dist_ma20_pct is not None and dist_ma20_pct > 12
+    ) or (
+        rs_cat == '🟢 跑贏指數'
+        and volatility_pct is not None and volatility_pct > 80
+    )
+    if overextended:
+        return SETUP_LABELS['OVEREXTENDED']
+
+    # ── Pre-compute low-risk pullback conditions ──────────────────
+    # Pulled back toward MA20 (-8% to +4%) AND below recent 20D high (< -3%)
+    low_risk_rs   = rs_cat in ('🟠 接近突破', '🟡 剛轉強')
+    near_ma20     = (dist_ma20_pct is not None and -8 <= dist_ma20_pct <= 4)
+    pullback_flag = (dist_20d_high_pct is not None and dist_20d_high_pct < -3)
+
+    # ── 🛡️ 低風險回踩 (evaluated BEFORE 接近爆發 for priority) ─────
+    # Strict: RS near-breakout/just-turned + pulled back to MA20 + not deeply neg sentiment
+    if low_risk_rs and near_ma20 and pullback_flag and neutral_or_pos:
+        return SETUP_LABELS['LOW_RISK']
+    # Broad: near-breakout RS + positive sentiment + price not over-extended (≤6% above MA20)
+    if rs_cat == '🟠 接近突破' and positive_sent:
+        if dist_ma20_pct is None or dist_ma20_pct <= 6:
+            return SETUP_LABELS['LOW_RISK']
+
+    # ── 🔥 強勢延續 ────────────────────────────────────────────────
+    # Confirmed outperformer + positive sentiment + not overextended
+    if (rs_cat == '🟢 跑贏指數'
+            and positive_sent
+            and (rel_5d is None or rel_5d >= 0)):
+        return SETUP_LABELS['HOT_MOMENTUM']
+
+    # ── 🚀 接近爆發 ────────────────────────────────────────────────
+    # Near-breakout or confirmed RS + positive/neutral sentiment + not a pullback setup
+    if rs_cat in ('🟠 接近突破', '🟢 跑贏指數'):
+        if neutral_or_pos and (rel_5d is None or rel_5d >= -1):
+            return SETUP_LABELS['NEAR_BREAKOUT']
+
+    # ── 👀 早期轉強 ────────────────────────────────────────────────
+    # 剛轉強 RS, not deeply negative sentiment
+    if rs_cat == '🟡 剛轉強' and neutral_or_pos:
+        return SETUP_LABELS['EARLY_TURN']
+
+    # ── 📉 跑輸觀望 ────────────────────────────────────────────────
+    return SETUP_LABELS['LAGGING']
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_ma_data(tickers_tuple):
+    """
+    For each ticker, compute:
+      - MA20, MA50 (20/50-day simple moving averages of Close)
+      - dist_ma20_pct = (price/MA20 - 1)*100
+      - dist_ma50_pct = (price/MA50 - 1)*100
+      - dist_20d_high_pct = (price/rolling_20d_high - 1)*100   (≤0)
+      - volatility_pct   = annualised 20-day std of daily returns (%)
+
+    Returns dict: {ticker: {price, MA20, MA50, dist_ma20_pct, dist_ma50_pct,
+                             dist_20d_high_pct, volatility_pct}}
+    """
+    tickers = list(tickers_tuple)
+    result = {}
+    if not tickers:
+        return result
+    try:
+        raw = yf.download(
+            tickers, period='3mo', interval='1d',
+            progress=False, auto_adjust=True, group_by='column', threads=True
+        )
+        if raw.empty:
+            return result
+        if isinstance(raw.columns, pd.MultiIndex):
+            closes = raw['Close']
+        else:
+            closes = raw[['Close']] if 'Close' in raw.columns else raw
+
+        for ticker in tickers:
+            try:
+                col = (closes[ticker] if ticker in closes.columns
+                       else pd.Series(dtype=float)).dropna()
+                if len(col) < 21:
+                    result[ticker] = {}
+                    continue
+                price  = float(col.iloc[-1])
+                ma20   = float(col.rolling(20).mean().iloc[-1])
+                ma50v  = col.rolling(50).mean().iloc[-1]
+                ma50   = float(ma50v) if not pd.isna(ma50v) else None
+                high20 = float(col.rolling(20).max().iloc[-1])
+
+                dist_ma20 = round((price / ma20 - 1) * 100, 2) if ma20 else None
+                dist_ma50 = round((price / ma50 - 1) * 100, 2) if ma50 else None
+                dist_h20  = round((price / high20 - 1) * 100, 2) if high20 else None
+
+                # 20-day annualised volatility
+                daily_rets = col.pct_change().dropna().tail(20)
+                vol = round(float(daily_rets.std() * (252 ** 0.5) * 100), 1) if len(daily_rets) >= 10 else None
+
+                result[ticker] = {
+                    'price':           price,
+                    'MA20':            round(ma20, 2),
+                    'MA50':            round(ma50, 2) if ma50 else None,
+                    'dist_ma20_pct':   dist_ma20,
+                    'dist_ma50_pct':   dist_ma50,
+                    'dist_20d_high_pct': dist_h20,
+                    'volatility_pct':  vol,
+                }
+            except Exception:
+                result[ticker] = {}
+    except Exception:
+        pass
+    return result
+
+
+def _setup_badge(setup_label):
+    bg, fg = SETUP_COLORS.get(setup_label, ('#1A1A2E', '#aaa'))
+    return (
+        f"<span style='background:{bg};color:{fg};padding:2px 9px;"
+        f"border-radius:10px;font-size:0.72rem;font-weight:bold'>{setup_label}</span>"
+    )
+
+
+def _ma_dist_cell(val):
+    """Coloured cell for MA/high distance percentage."""
+    if val is None:
+        return "<span style='color:#555'>N/A</span>"
+    if val > 12:
+        color, label = '#FF6D00', f'+{val:.1f}%'
+    elif val >= 0:
+        color, label = '#00C851', f'+{val:.1f}%'
+    elif val >= -8:
+        color, label = '#F9A825', f'{val:.1f}%'
+    else:
+        color, label = '#FF4444', f'{val:.1f}%'
+    return f"<span style='color:{color}'>{label}</span>"
+
+
+def _vol_flag(vol):
+    """Return risk flag text for volatility."""
+    if vol is None:
+        return "<span style='color:#555'>N/A</span>"
+    if vol > 80:
+        return f"<span style='color:#FF4444'>🔴 高 ({vol:.0f}%)</span>"
+    elif vol > 50:
+        return f"<span style='color:#FF8C00'>🟠 中 ({vol:.0f}%)</span>"
+    else:
+        return f"<span style='color:#00C851'>🟢 低 ({vol:.0f}%)</span>"
+
+
+def build_radar_rows(selected_themes, perf_data, sentiment_data, ma_data, benchmark='SPY'):
+    """
+    Build a unified list of rows for the radar watchlist.
+    Each row contains all columns needed for display + setup classification.
+    """
+    seen  = set()
+    rows  = []
+    bench = perf_data.get(benchmark, {})
+
+    def _rel(ticker, period):
+        tv = perf_data.get(ticker, {}).get(period)
+        bv = bench.get(period)
+        if tv is None or bv is None:
+            return None
+        return round(tv - bv, 2)
+
+    for theme in selected_themes:
+        tdata = CATALYST_THEME_MAP.get(theme, {})
+        for ticker, company in tdata.get('tickers', {}).items():
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+
+            p    = perf_data.get(ticker, {})
+            sent = sentiment_data.get(ticker, {})
+            ma   = ma_data.get(ticker, {})
+
+            rs_cat    = compute_rs_category(ticker, perf_data, benchmark)
+            sent_lbl  = sent.get('label', '⚪ 中性')
+            pos_kw    = sent.get('pos_kw', [])
+            cat_tags  = tdata.get('catalyst_tags', [])
+            all_tags  = list(dict.fromkeys(cat_tags[:2] + pos_kw[:1]))[:3]
+            tag_str   = ' | '.join(all_tags) if all_tags else '—'
+
+            rel5d = _rel(ticker, '5d')
+            rel1m = _rel(ticker, '1m')
+            rel3m = _rel(ticker, '3m')
+
+            dist_ma20 = ma.get('dist_ma20_pct')
+            dist_ma50 = ma.get('dist_ma50_pct')
+            dist_h20  = ma.get('dist_20d_high_pct')
+            vol       = ma.get('volatility_pct')
+
+            setup = classify_setup_type(
+                rs_cat, rel5d, rel1m, rel3m,
+                dist_ma20, dist_h20,
+                sent_lbl, vol
+            )
+
+            # Generate comment
+            comment = ''
+            if setup == SETUP_LABELS['HOT_MOMENTUM'] and sent_lbl == '🟢 正面':
+                comment = '⭐ 技術+情緒雙強'
+            elif setup == SETUP_LABELS['NEAR_BREAKOUT'] and sent_lbl == '🟢 正面':
+                comment = '🔥 接近突破+正面消息'
+            elif setup == SETUP_LABELS['LOW_RISK']:
+                comment = '🛡️ 回踩低風險位'
+            elif setup == SETUP_LABELS['EARLY_TURN']:
+                comment = '📈 早期轉強觀察'
+
+            rows.append({
+                'theme':      theme.split(' ', 1)[-1][:18] if ' ' in theme else theme[:18],
+                'ticker':     ticker,
+                'company':    company,
+                'setup':      setup,
+                'rs_cat':     rs_cat,
+                'sent_label': sent_lbl,
+                'tags':       tag_str,
+                'price':      p.get('price'),
+                'rel_5d':     rel5d,
+                'rel_1m':     rel1m,
+                'rel_3m':     rel3m,
+                'dist_ma20':  dist_ma20,
+                'dist_ma50':  dist_ma50,
+                'dist_h20':   dist_h20,
+                'vol':        vol,
+                'comment':    comment,
+            })
+    return rows
+
+
+def _radar_row_html(r, benchmark):
+    """Build one HTML <tr> for the radar watchlist table."""
+    price_str = f"${r['price']:.2f}" if r['price'] else 'N/A'
+    tag_html  = (
+        ''.join(
+            f"<span style='background:#1A2A3A;color:#7EC8E3;padding:1px 5px;"
+            f"border-radius:4px;font-size:0.68rem;margin:1px;display:inline-block'>{t}</span>"
+            for t in r['tags'].split(' | ') if t and t != '—'
+        ) or '—'
+    )
+    comment_html = (
+        f"<span style='background:#004020;color:#00C851;padding:1px 6px;"
+        f"border-radius:8px;font-size:0.67rem;font-weight:bold'>{r['comment']}</span>"
+        if r['comment'] else ''
+    )
+
+    # Row background from setup colour
+    bg, _ = SETUP_COLORS.get(r['setup'], ('#0E1117', '#aaa'))
+
+    return (
+        f"<tr style='background:{bg}'>"
+        f"<td style='color:#888;font-size:0.73rem'>{r['theme']}</td>"
+        f"<td><span style='font-weight:bold;color:#4FC3F7'>{r['ticker']}</span></td>"
+        f"<td style='color:#ccc;font-size:0.74rem'>{r['company']}</td>"
+        f"<td>{_setup_badge(r['setup'])}</td>"
+        f"<td>{_rs_status_badge(r['rs_cat'])}</td>"
+        f"<td>{_sentiment_badge(r['sent_label'])}</td>"
+        f"<td>{tag_html}</td>"
+        f"<td style='color:#ccc'>{price_str}</td>"
+        f"<td>{_ret_cell(r['rel_5d'])}</td>"
+        f"<td>{_ret_cell(r['rel_1m'])}</td>"
+        f"<td>{_ret_cell(r['rel_3m'])}</td>"
+        f"<td>{_ma_dist_cell(r['dist_ma20'])}</td>"
+        f"<td>{_ma_dist_cell(r['dist_ma50'])}</td>"
+        f"<td>{_ma_dist_cell(r['dist_h20'])}</td>"
+        f"<td>{_vol_flag(r['vol'])}</td>"
+        f"<td>{comment_html}</td>"
+        f"</tr>"
+    )
+
+
+RADAR_TABLE_HEADER = (
+    "<style>"
+    ".rdr-tbl{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.79rem}"
+    ".rdr-tbl th{background:#1E1E2E;color:#aaa;padding:7px 8px;text-align:left;"
+    "border-bottom:2px solid #333;white-space:nowrap}"
+    ".rdr-tbl td{padding:6px 8px;vertical-align:middle;border-bottom:1px solid #1A1A2A}"
+    ".rdr-tbl tr:hover{background:#1F2937!important}"
+    "</style>"
+    '<table class="rdr-tbl"><thead><tr>'
+    "<th>板塊</th><th>Ticker</th><th>公司</th>"
+    "<th>Setup 類型</th><th>RS狀態</th><th>新聞情緒</th><th>催化劑</th>"
+    "<th>現價</th>"
+    "<th>5D相對</th><th>1M相對</th><th>3M相對</th>"
+    "<th>MA20距離</th><th>MA50距離</th><th>距20日高位</th>"
+    "<th>波動風險</th><th>備注</th>"
+    "</tr></thead><tbody>"
+)
+
+
+def render_theme_ranking_table(selected_themes, perf_data, sentiment_data, benchmark):
+    """Compact theme-level ranking for the radar section."""
+    heat_results = []
+    for theme in selected_themes:
+        h = compute_theme_heat(theme, perf_data, sentiment_data, benchmark)
+        heat_results.append((theme, h))
+
+    heat_order = {'🔥 當炒主線': 0, '🚀 下一輪潛在': 1, '👀 觀察/未確認': 2}
+    heat_results.sort(
+        key=lambda x: (heat_order.get(x[1]['heat_label'], 9),
+                       -(x[1]['etf_rel_1m'] or -99))
+    )
+
+    heat_colors_map = {
+        '🔥 當炒主線':   ('#0D2010', '#00C851'),
+        '🚀 下一輪潛在': ('#1A0E00', '#FF8C00'),
+        '👀 觀察/未確認': ('#101010', '#888'),
+    }
+
+    tbl = (
+        "<style>"
+        ".theme-rank{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:0.78rem}"
+        ".theme-rank th{background:#1E1E2E;color:#aaa;padding:6px 8px;text-align:left;"
+        "border-bottom:2px solid #333;white-space:nowrap}"
+        ".theme-rank td{padding:5px 8px;vertical-align:middle;border-bottom:1px solid #1A1A2E}"
+        ".theme-rank tr:hover{background:#1F2937}"
+        "</style>"
+        '<table class="theme-rank"><thead><tr>'
+        f"<th>#</th><th>板塊</th><th>ETF</th>"
+        f"<th>ETF 5D相對({benchmark})</th><th>ETF 1M相對({benchmark})</th>"
+        "<th>廣度(跑贏+接近)</th><th>板塊情緒</th><th>🌡️ 熱力</th>"
+        "</tr></thead><tbody>"
+    )
+    rows_html = []
+    for rank, (theme, h) in enumerate(heat_results, 1):
+        bg, fg = heat_colors_map.get(h['heat_label'], ('#101010', '#888'))
+        heat_badge = (
+            f"<span style='background:{bg};color:{fg};padding:2px 7px;"
+            f"border-radius:8px;font-size:0.71rem;font-weight:bold'>{h['heat_label']}</span>"
+        )
+        icon = theme.split()[0]
+        name = theme.split(' ', 1)[-1][:20]
+        breadth = f"{h['n_win'] + h['n_near']}/{h['total']}"
+        rows_html.append(
+            f"<tr style='background:{bg}'>"
+            f"<td style='color:#666'>{rank}</td>"
+            f"<td style='color:#ddd'>{icon} {name}</td>"
+            f"<td style='color:#4FC3F7;font-weight:bold'>{h['etf']}</td>"
+            f"<td>{_ret_cell(h['etf_rel_5d'])}</td>"
+            f"<td>{_ret_cell(h['etf_rel_1m'])}</td>"
+            f"<td style='color:#00C851'>{breadth}</td>"
+            f"<td>{_sentiment_badge(h['theme_sent'])}</td>"
+            f"<td>{heat_badge}</td>"
+            f"</tr>"
+        )
+    return tbl + '\n'.join(rows_html) + '\n</tbody></table>'
+
+
+def render_radar_module():
+    """Main render function for 🔥 當炒 / 低風險機會雷達."""
+    st.title('🔥 當炒 / 低風險機會雷達')
+    st.caption(
+        '目標：快速識別 🔥 潛在當炒股票/板塊 及 🛡️ 低風險買入機會。'
+        '  ⚠️ 本模組僅供技術篩選/觀察清單用途，所有數據不構成任何形式之投資建議。'
+    )
+
+    # ── Controls ────────────────────────────────────────────────────
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 2, 1])
+    with col_ctrl1:
+        all_themes = list(CATALYST_THEME_MAP.keys())
+        radar_themes = st.multiselect(
+            '選擇板塊 (可多選):',
+            all_themes,
+            default=all_themes[:5],
+            key='radar_theme_select',
+        )
+    with col_ctrl2:
+        radar_bench = st.selectbox(
+            'RS 比較基準:',
+            ['SPY', 'QQQ', 'IWM'],
+            key='radar_bench',
+        )
+        setup_filter = st.multiselect(
+            '篩選 Setup 類型:',
+            list(SETUP_LABELS.values()),
+            default=[
+                SETUP_LABELS['HOT_MOMENTUM'],
+                SETUP_LABELS['NEAR_BREAKOUT'],
+                SETUP_LABELS['LOW_RISK'],
+                SETUP_LABELS['EARLY_TURN'],
+            ],
+            key='radar_setup_filter',
+        )
+    with col_ctrl3:
+        st.markdown('<br>', unsafe_allow_html=True)
+        prefer_low_risk = st.checkbox('優先顯示低風險', value=False, key='radar_prefer_lowrisk')
+        max_rows = st.number_input('最多顯示行數', min_value=5, max_value=100, value=30, step=5, key='radar_max_rows')
+        refresh_radar_btn = st.button('🔄 刷新', use_container_width=True, key='refresh_radar_main')
+
+    if refresh_radar_btn:
+        try:
+            fetch_catalyst_rs_data.clear()
+            fetch_ticker_news_sentiment.clear()
+            fetch_ma_data.clear()
+        except Exception:
+            pass
+        st.rerun()
+
+    if not radar_themes:
+        st.info('請至少選擇一個板塊。')
+        return
+
+    # ── Collect candidate tickers ───────────────────────────────────
+    candidate_tickers = []
+    for theme in radar_themes:
+        for t in CATALYST_THEME_MAP[theme].get('tickers', {}):
+            if t not in candidate_tickers:
+                candidate_tickers.append(t)
+
+    # Include theme ETFs for heatmap
+    theme_etfs = list(THEME_ETF_MAP.values())
+    all_fetch = list(set(candidate_tickers + theme_etfs + [radar_bench]))
+
+    # ── Fetch data ──────────────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### 📡 一. 板塊熱力排名')
+
+    with st.spinner(f'正在抓取 {len(all_fetch)} 隻股票數據...'):
+        try:
+            perf_data = fetch_catalyst_rs_data(
+                tuple(sorted(all_fetch)), benchmark=radar_bench
+            )
+        except Exception:
+            perf_data = {}
+
+    with st.spinner('分析新聞情緒...'):
+        try:
+            sentiment_data = fetch_ticker_news_sentiment(tuple(candidate_tickers))
+        except Exception:
+            sentiment_data = {}
+
+    with st.spinner('計算 MA20/MA50 及波動率...'):
+        try:
+            ma_data = fetch_ma_data(tuple(candidate_tickers))
+        except Exception:
+            ma_data = {}
+
+    # ── A. Theme ranking table ──────────────────────────────────────
+    st.markdown(render_theme_ranking_table(radar_themes, perf_data, sentiment_data, radar_bench),
+                unsafe_allow_html=True)
+    st.caption(
+        '🔥 當炒主線 = ETF 1M相對>0 + 強勢廣度≥40% + 正面情緒；'
+        '🚀 下一輪潛在 = ETF 5D改善 + 廣度≥35%；👀 觀察/未確認 = 其他情況。'
+    )
+
+    # ── B. Build watchlist rows ────────────────────────────────────
+    all_rows = build_radar_rows(
+        radar_themes, perf_data, sentiment_data, ma_data, radar_bench
+    )
+
+    # ── Bucket summaries ───────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### 🗂️ 二. 觀察清單 Watchlist 分類')
+
+    hot_rows  = [r for r in all_rows if r['setup'] in (SETUP_LABELS['HOT_MOMENTUM'], SETUP_LABELS['NEAR_BREAKOUT'])]
+    low_rows  = [r for r in all_rows if r['setup'] in (SETUP_LABELS['LOW_RISK'], SETUP_LABELS['EARLY_TURN'])]
+    other_rows = [r for r in all_rows if r['setup'] not in (
+        SETUP_LABELS['HOT_MOMENTUM'], SETUP_LABELS['NEAR_BREAKOUT'],
+        SETUP_LABELS['LOW_RISK'], SETUP_LABELS['EARLY_TURN']
+    )]
+
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        st.markdown(
+            "<div style='background:#0D2010;border:1px solid #00C851;border-radius:8px;padding:10px 12px'>"
+            "<div style='font-size:0.9rem;font-weight:bold;color:#00C851'>🔥 潛在當炒 / Hot Momentum</div>"
+            "<div style='font-size:0.72rem;color:#888;margin:3px 0 6px'>RS強勢+正面情緒+板塊熱度高</div>"
+            + ''.join(
+                f"<div style='font-size:0.79rem;color:#ccc;padding:1px 0'>"
+                f"• <b style='color:#4FC3F7'>{r['ticker']}</b> {r['company'][:20]}  "
+                f"<span style='color:#00C851;font-size:0.72rem'>{r['setup']}</span></div>"
+                for r in hot_rows[:8]
+            )
+            + (f"<div style='color:#555;font-size:0.72rem'>⋯ 另 {len(hot_rows)-8} 隻</div>" if len(hot_rows) > 8 else '')
+            + (f"<div style='color:#555;font-size:0.72rem'>（暫無符合條件股票）</div>" if not hot_rows else '')
+            + "</div>",
+            unsafe_allow_html=True
+        )
+    with bc2:
+        st.markdown(
+            "<div style='background:#0A1A2A;border:1px solid #4FC3F7;border-radius:8px;padding:10px 12px'>"
+            "<div style='font-size:0.9rem;font-weight:bold;color:#4FC3F7'>🛡️ 低風險買入 / Lower-Risk Setup</div>"
+            "<div style='font-size:0.72rem;color:#888;margin:3px 0 6px'>回踩至MA20附近+RS仍強+未過度延伸</div>"
+            + ''.join(
+                f"<div style='font-size:0.79rem;color:#ccc;padding:1px 0'>"
+                f"• <b style='color:#4FC3F7'>{r['ticker']}</b> {r['company'][:20]}  "
+                f"<span style='color:#4FC3F7;font-size:0.72rem'>{r['setup']}</span></div>"
+                for r in low_rows[:8]
+            )
+            + (f"<div style='color:#555;font-size:0.72rem'>⋯ 另 {len(low_rows)-8} 隻</div>" if len(low_rows) > 8 else '')
+            + (f"<div style='color:#555;font-size:0.72rem'>（暫無符合條件股票）</div>" if not low_rows else '')
+            + "</div>",
+            unsafe_allow_html=True
+        )
+
+    # ── C. Full filtered table ─────────────────────────────────────
+    st.markdown('<br>', unsafe_allow_html=True)
+    st.markdown('### 📋 三. 完整篩選名單')
+
+    # Sort order
+    setup_order = {
+        SETUP_LABELS['HOT_MOMENTUM']:  0,
+        SETUP_LABELS['NEAR_BREAKOUT']: 1,
+        SETUP_LABELS['LOW_RISK']:      2,
+        SETUP_LABELS['EARLY_TURN']:    3,
+        SETUP_LABELS['OVEREXTENDED']:  4,
+        SETUP_LABELS['LAGGING']:       5,
+    }
+    rows_display = [r for r in all_rows if r['setup'] in setup_filter]
+    if prefer_low_risk:
+        rows_display.sort(key=lambda r: (
+            0 if r['setup'] == SETUP_LABELS['LOW_RISK'] else
+            1 if r['setup'] == SETUP_LABELS['EARLY_TURN'] else
+            setup_order.get(r['setup'], 9),
+            -(r['rel_1m'] or -999)
+        ))
+    else:
+        rows_display.sort(key=lambda r: (
+            setup_order.get(r['setup'], 9),
+            -(r['rel_1m'] or -999)
+        ))
+    rows_display = rows_display[:int(max_rows)]
+
+    # Metric bar
+    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
+    bench_1d = perf_data.get(radar_bench, {}).get('1d')
+    mc1.metric('候選股票', len(all_rows))
+    mc2.metric('🔥 強勢延續', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['HOT_MOMENTUM']))
+    mc3.metric('🚀 接近爆發', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['NEAR_BREAKOUT']))
+    mc4.metric('🛡️ 低風險', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['LOW_RISK']))
+    mc5.metric('👀 早期轉強', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['EARLY_TURN']))
+    mc6.metric(f'{radar_bench} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
+
+    if rows_display:
+        st.markdown(
+            f"<div style='color:#888;font-size:0.78rem;margin:4px 0'>"
+            f"顯示 {len(rows_display)} / {len(all_rows)} 隻（已套用篩選）。</div>",
+            unsafe_allow_html=True
+        )
+        body_html = '\n'.join(_radar_row_html(r, radar_bench) for r in rows_display)
+        st.markdown(RADAR_TABLE_HEADER + body_html + '\n</tbody></table>',
+                    unsafe_allow_html=True)
+    else:
+        st.warning('⚠️ 當前篩選條件下無候選股票，請調整 Setup 類型篩選。')
+
+    # ── D. 點樣用 usage guide ──────────────────────────────────────
+    st.markdown('---')
+    with st.expander('📖 點樣用 — 篩選邏輯與注意事項', expanded=False):
+        st.markdown("""
+### 🎯 兩個主要工作流程
+
+**工作流程 A：搵潛在當炒股票/板塊**
+1. 睇板塊熱力排名（第一節）→ 優先關注 🔥 當炒主線 板塊
+2. 睇 🔥 潛在當炒 Bucket → 重點係 **🔥 強勢延續** 及 **🚀 接近爆發** 兩類
+3. 新聞情緒係 🟢 正面、RS狀態係 🟢 跑贏指數 或 🟠 接近突破，資金流向最明確
+4. 配合右邊「板塊熱力圖」確認整體板塊動力
+
+**工作流程 B：搵低風險買入機會**
+1. 開啟「優先顯示低風險」核取方塊
+2. 重點係 **🛡️ 低風險回踩** 類別：股價回踩到 MA20 附近（MA20距離 -8% 至 +4%），但 RS 仍係 🟠接近突破 或 🟡剛轉強
+3. 距20日高位 應係負數（即已回踩），波動風險最好係 🟢 低（年化波動率 <50%）
+4. **👀 早期轉強** 類別亦值得留意：5D相對已轉正但1M仍負，屬於早期進場訊號
+
+### 📊 各欄位說明
+
+| 欄位 | 含義 |
+|------|------|
+| Setup 類型 | 綜合 RS狀態、MA距離、情緒分類的操作形態 |
+| RS狀態 | 相對強度 vs 基準指數（4級分類） |
+| MA20距離 | 現價距20日均線百分比；正數=在均線之上 |
+| MA50距離 | 現價距50日均線百分比 |
+| 距20日高位 | 現價距近20日最高位；負數=回踩中 |
+| 波動風險 | 年化20日歷史波動率：🟢<50% 🟠50-80% 🔴>80% |
+
+### 🛡️ Setup 類型邏輯
+
+| Setup | 條件 |
+|-------|------|
+| 🔥 強勢延續 | RS=跑贏指數 + 正面情緒 + 未過度延伸 |
+| 🚀 接近爆發 | RS=接近突破/跑贏 + 正面/中性情緒 + 5D相對≥-1% |
+| 🛡️ 低風險回踩 | RS=接近突破/剛轉強 + 回踩至MA20附近(-8%至+4%) + 距20日高位<-3% + 正面/中性情緒 |
+| 👀 早期轉強 | RS=剛轉強 + 正面/中性情緒 |
+| ⚠️ 過度延伸 | 距MA20 >12% 或 高波動 |
+
+### ⚠️ 風險免責聲明
+> 本雷達係純技術篩選/觀察工具。所有 Setup 類別、RS狀態、情緒分析均係基於歷史價格數據同新聞標題關鍵字，並**非**前瞻性預測，亦**不構成任何投資建議**。買賣前請做獨立研究，並了解個人風險承受能力。
+        """)
+
+
 # ==========================================
 # Sidebar
 # ==========================================
@@ -3797,6 +4442,7 @@ with st.sidebar:
     app_mode = st.radio(
         label='模組',
         options=[
+            '🔥 當炒/低風險機會雷達',
             '🔥 熱門板塊關係圖',
             '🎯 產業故事 Radar / Scorecard',
             '📡 新聞催化劑 / RS 方法選股',
@@ -3827,7 +4473,10 @@ with st.sidebar:
 # ==========================================
 # 模組渲染
 # ==========================================
-if app_mode == '🎯 產業故事 Radar / Scorecard':
+if app_mode == '🔥 當炒/低風險機會雷達':
+    render_radar_module()
+
+elif app_mode == '🎯 產業故事 Radar / Scorecard':
     render_market_radar_module()
 
 elif app_mode == '📡 新聞催化劑 / RS 方法選股':
