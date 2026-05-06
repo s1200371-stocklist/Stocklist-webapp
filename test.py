@@ -3906,32 +3906,120 @@ def render_sidebar_macro_expander(m):
 # ==========================================
 # 📡 市場實時雷達 — 獨立頁面 (Fast, no blocking)
 # ==========================================
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_market_radar_quick():
+    """Lightweight market radar fetch.
+    Only yfinance for a small set of liquid US tickers. No FRED, no Asia, no crypto.
+    Designed to return within a few seconds on Streamlit Cloud and never hang the
+    UI. Failures per-ticker are captured as N/A; whole-fetch failure returns {}.
+    """
+    data = {}
+    tickers = {
+        'SPY': 'SPY', 'QQQ': 'QQQ', 'DIA': 'DIA', 'IWM': 'IWM',
+        'VIX': '^VIX', 'TLT': 'TLT', 'UUP': 'UUP', 'USO': 'USO',
+    }
+    try:
+        raw = yf.download(
+            list(tickers.values()),
+            period='2d',
+            interval='1d',
+            progress=False,
+            auto_adjust=True,
+            threads=True,
+            timeout=8,
+        )
+        closes = raw['Close'] if hasattr(raw, 'columns') and 'Close' in raw.columns.get_level_values(0) else raw
+        for label, sym in tickers.items():
+            try:
+                prices = closes[sym].dropna()
+                if len(prices) >= 2:
+                    prev, curr = float(prices.iloc[-2]), float(prices.iloc[-1])
+                    pct = (curr - prev) / prev * 100 if prev else 0.0
+                    data[label] = {'price': curr, 'pct': pct}
+                elif len(prices) == 1:
+                    data[label] = {'price': float(prices.iloc[-1]), 'pct': 0.0}
+                else:
+                    data[label] = {'price': None, 'pct': 0.0}
+            except Exception:
+                data[label] = {'price': None, 'pct': 0.0}
+    except Exception:
+        for label in tickers:
+            data[label] = {'price': None, 'pct': 0.0}
+
+    # CNN Fear & Greed (optional, short timeout, never blocks)
+    try:
+        r = requests.get(
+            'https://production.dataviz.cnn.io/index/fearandgreed/graphdata',
+            headers=get_headers(), timeout=5,
+        )
+        if r.status_code == 200:
+            fg = r.json().get('fear_and_greed', {})
+            score = fg.get('score')
+            data['FEAR_GREED'] = {
+                'score': round(float(score), 1) if score else None,
+                'rating': fg.get('rating', 'N/A'),
+            }
+        else:
+            data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
+    except Exception:
+        data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
+    return data
+
+
 def render_market_real_time_radar_page():
     """
     獨立頁面：市場實時雷達。
-    快速顯示 SPY/QQQ/VIX/Fear&Greed + 商品/債市/加密 + 亞洲市場。
-    使用快取數據，網絡失敗時顯示 N/A card，不阻塞頁面。
+    Page renders instantly: shows cached session_state data if any, else an
+    empty state with a button. No automatic network calls on first render.
     """
     st.title('📡 市場實時雷達')
     st.caption(
-        '快速總覽美股大市、宏觀指標、商品、加密、亞洲市場。'
-        '數據每5分鐘自動快取，失敗時顯示 N/A 卡片，唔會阻塞頁面。'
+        '美股大市核心指標 — SPY / QQQ / DIA / IWM / VIX / TLT / UUP / USO + CNN 恐貪指數。'
+        '為加快頁面載入，數據只在按下按鈕後才會抓取（每5分鐘快取一次）。'
     )
 
+    cached = st.session_state.get('mrr_data')
+    cached_ts = st.session_state.get('mrr_data_ts')
+    fetch_err = None
+
     rc1, rc2 = st.columns([5, 1])
+    with rc1:
+        btn_label = '🔄 重新抓取市場數據' if cached else '📡 載入/更新市場雷達數據'
+        load_clicked = st.button(btn_label, key='mrr_load_btn')
     with rc2:
-        if st.button('🔄 刷新', use_container_width=True, key='mrr_refresh'):
+        if cached and st.button('🧹 清除快取', use_container_width=True, key='mrr_clear'):
             try:
-                fetch_sidebar_market_data.clear()
+                fetch_market_radar_quick.clear()
             except Exception:
                 pass
+            st.session_state.pop('mrr_data', None)
+            st.session_state.pop('mrr_data_ts', None)
             st.rerun()
 
-    # Load data (cached, with graceful fallback)
-    try:
-        m = fetch_sidebar_market_data()
-    except Exception:
-        m = {}
+    if load_clicked:
+        try:
+            fetch_market_radar_quick.clear()
+        except Exception:
+            pass
+        with st.spinner('正在抓取市場數據（最多 ~10 秒）…'):
+            try:
+                cached = fetch_market_radar_quick()
+                st.session_state['mrr_data'] = cached
+                st.session_state['mrr_data_ts'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                cached_ts = st.session_state['mrr_data_ts']
+            except Exception as e:
+                fetch_err = str(e)[:200]
+
+    if fetch_err:
+        st.error(f'⚠️ 抓取失敗：{fetch_err}。下面顯示 N/A 卡片，請稍後再試。')
+
+    if not cached:
+        st.info('尚未載入市場雷達數據。請點擊上方「載入/更新市場雷達數據」按鈕。')
+        cached = {}
+    elif cached_ts:
+        st.caption(f'⏱ 數據快照時間: {cached_ts}（5分鐘內快取）')
+
+    m = cached if isinstance(cached, dict) else {}
 
     # ── Fear & Greed + VIX top strip ──────────────────────────────────
     st.markdown('#### 🌡️ 市場情緒指標')
@@ -4026,37 +4114,27 @@ def render_market_real_time_radar_page():
 
     col_l, col_r = st.columns(2)
     with col_l:
-        st.markdown('#### 🇺🇸 美股指數 & 宏觀')
+        st.markdown('#### 🇺🇸 美股核心指數')
         rows = (
             _index_row('S&P500 (SPY)', 'SPY') +
             _index_row('納指 (QQQ)', 'QQQ') +
             _index_row('道指 (DIA)', 'DIA') +
-            _index_row('美元指數 (DXY)', 'DXY', '{:.2f}') +
-            _index_row('10年美債息 (%)', 'TNX', '{:.3f}') +
-            _index_row('30年美債息 (%)', 'TYX', '{:.3f}')
+            _index_row('小型股 (IWM)', 'IWM')
         )
         st.markdown(tbl_style + f"<table class='mkt-tbl'><thead><tr><th>指標</th><th>現價</th><th>日變動</th></tr></thead><tbody>{rows}</tbody></table>", unsafe_allow_html=True)
 
-        # Fed Funds
-        ff = m.get('FEDFUNDS')
-        if ff:
-            st.caption(f"🏛️ 聯儲息率: **{ff.get('value', 'N/A'):.2f}%** ({ff.get('date', '')[:7]})")
-
     with col_r:
-        st.markdown('#### 🛢️ 商品 & 加密 & 亞洲')
+        st.markdown('#### 🌐 風險 / 利率 / 美元 / 油價')
         rows2 = (
-            _index_row('WTI 原油 (USD)', 'OIL', '${:.2f}') +
-            _index_row('黃金 (USD/oz)', 'GOLD', '${:.2f}') +
-            _index_row('Bitcoin (USD)', 'BTC', '${:,.0f}') +
-            _index_row('Ethereum (USD)', 'ETH', '${:,.0f}') +
-            _index_row('日經 225', 'NIKKEI', '{:,.0f}') +
-            _index_row('恒生指數', 'HSI', '{:,.0f}') +
-            _index_row('上證指數', 'SHCOMP', '{:,.0f}')
+            _index_row('VIX 波動率', 'VIX', '{:.2f}') +
+            _index_row('長債 (TLT)', 'TLT') +
+            _index_row('美元 (UUP)', 'UUP') +
+            _index_row('原油 (USO)', 'USO')
         )
         st.markdown(tbl_style + f"<table class='mkt-tbl'><thead><tr><th>指標</th><th>現價</th><th>日變動</th></tr></thead><tbody>{rows2}</tbody></table>", unsafe_allow_html=True)
 
     ts = datetime.datetime.now().strftime('%H:%M:%S')
-    st.caption(f"⏱ 頁面渲染時間: {ts} | 數據快取: 5 分鐘 | 來源: yfinance + CNN F&G")
+    st.caption(f"⏱ 頁面渲染時間: {ts} | 數據快取: 5 分鐘 | 來源: yfinance + CNN F&G（按鈕觸發抓取）")
 
     # ── System Architecture Guide ──────────────────────────────────────
     st.markdown('---')
