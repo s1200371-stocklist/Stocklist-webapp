@@ -1,6 +1,13 @@
 name: Daily Market Scanner
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Runs scanner.py after US market close.
+#
+# When no tickers/universe_file input is given, scanner.py automatically
+# loads data/tradable_universe.parquet if present (built by the
+# "Build Tradable Universe" workflow — market cap >= 500M USD filter, no
+# price / dollar-volume hard filters, no 100-ticker shortlist cap).
+# ──────────────────────────────────────────────────────────────────────────────
 # Triggers
 # ──────────────────────────────────────────────────────────────────────────────
 on:

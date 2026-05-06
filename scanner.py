@@ -3,6 +3,15 @@ scanner.py — 每日盤後預掃描器 (Fast Mode Pre-Scanner)
 ======================================================
 獨立運行，將掃描結果存入 Parquet / CSV，讓 Streamlit 只需讀取快取。
 
+Universe loading priority (when no --tickers / --universe-file given):
+  1. data/tradable_universe.parquet (or .csv) — built by universe_builder.py.
+     This is the canonical universe: market cap >= 500M USD only.
+     Price (>$5) and avg dollar volume ($10M) are NOT hard filters here.
+  2. Fallback DEFAULT_TICKERS curated list.
+
+There is no shortlist cap of 100 — every qualifying ticker is scanned. UI
+display row limits are display-only and must be labelled as such.
+
 Usage examples:
   python scanner.py
   python scanner.py --tickers "AAPL,MSFT,NVDA,SPY"
@@ -14,7 +23,7 @@ CLI Arguments:
   --universe-file   CSV file with ticker column (first col or 'ticker'/'symbol')
   --output          Output path (default: data/latest_scan.parquet)
   --benchmark       Benchmark ticker (default: SPY)
-  --max-tickers     Safety limit; 0 = no limit
+  --max-tickers     Optional safety limit; 0 = no limit (default 0)
 """
 
 from __future__ import annotations
@@ -540,6 +549,45 @@ def read_ticker_list_from_file(filepath: str) -> List[str]:
         return []
 
 
+def load_tradable_universe(
+    base_path: str = "data/tradable_universe",
+) -> Tuple[List[str], Optional[str]]:
+    """
+    Load tickers from data/tradable_universe.parquet (or .csv) where
+    pass_market_cap_filter is True. Returns (tickers, source_path) or
+    ([], None) if no universe file is present.
+
+    The tradable universe is the only hard filter: market cap >= 500M USD
+    (configured by universe_builder.py). Price and dollar-volume thresholds
+    are NOT applied here.
+    """
+    parquet_path = Path(base_path + ".parquet")
+    csv_path     = Path(base_path + ".csv")
+    for p in [parquet_path, csv_path]:
+        if not p.exists():
+            continue
+        try:
+            df = pd.read_parquet(str(p)) if p.suffix == ".parquet" else pd.read_csv(str(p))
+            if df.empty or "ticker" not in df.columns:
+                continue
+            if "pass_market_cap_filter" in df.columns:
+                # Coerce string "True"/"False" from CSV to bool
+                flag = df["pass_market_cap_filter"]
+                if flag.dtype == object:
+                    flag = flag.astype(str).str.lower().isin({"true", "1", "yes"})
+                df = df[flag]
+            tickers = [
+                str(t).strip().upper()
+                for t in df["ticker"].dropna().tolist()
+                if str(t).strip()
+            ]
+            return tickers, str(p)
+        except Exception as e:
+            print(f"  [WARN] 無法讀取 {p}: {e}", flush=True)
+            continue
+    return [], None
+
+
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -605,9 +653,21 @@ Examples:
             if t not in tickers:
                 tickers.append(t)
 
+    universe_source = "explicit args"
+
     if not tickers:
-        print("使用預設精選股票池...", flush=True)
-        tickers = DEFAULT_TICKERS.copy()
+        # Prefer the tradable universe built by universe_builder.py
+        # (market cap >= 500M USD). No 100-ticker cap is applied — every
+        # qualifying ticker is scanned unless --max-tickers is set explicitly.
+        univ_tickers, univ_path = load_tradable_universe()
+        if univ_tickers:
+            tickers = univ_tickers
+            universe_source = f"tradable_universe ({univ_path}, {len(tickers)} tickers)"
+        else:
+            tickers = DEFAULT_TICKERS.copy()
+            universe_source = f"DEFAULT_TICKERS ({len(tickers)} tickers)"
+
+    print(f"  Universe source: {universe_source}", flush=True)
 
     # Ensure benchmark is in list
     if args.benchmark not in tickers:

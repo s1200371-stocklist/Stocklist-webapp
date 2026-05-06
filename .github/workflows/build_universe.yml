@@ -1,0 +1,95 @@
+name: Build Tradable Universe
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Builds data/tradable_universe.parquet (and .csv) by reading the listing CSVs,
+# fetching market caps via yfinance, and tagging rows with
+# pass_market_cap_filter (>= 500M USD by default).
+#
+# This is the *only* hard universe filter the scanner relies on. Price and
+# average dollar volume are NOT applied here.
+# ──────────────────────────────────────────────────────────────────────────────
+on:
+  workflow_dispatch:
+    inputs:
+      min_market_cap:
+        description: 'Minimum market cap in USD (default: 500000000)'
+        required: false
+        default: '500000000'
+      max_tickers:
+        description: 'Smoke-test cap on input listings (0 = no cap)'
+        required: false
+        default: '0'
+      commit_results:
+        description: 'Commit data/tradable_universe.* back to repo? (true / false)'
+        required: false
+        default: 'true'
+
+  # Weekly: Sunday 03:00 UTC. Market cap moves slowly; weekly is enough.
+  schedule:
+    - cron: '0 3 * * 0'
+
+jobs:
+  build:
+    name: Build tradable universe
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            pandas \
+            yfinance \
+            numpy \
+            pyarrow \
+            requests
+
+      - name: Build universe
+        run: |
+          MIN_MC="${{ github.event.inputs.min_market_cap }}"
+          MAX_T="${{ github.event.inputs.max_tickers }}"
+
+          [ -z "$MIN_MC" ] && MIN_MC="500000000"
+          [ -z "$MAX_T" ]  && MAX_T="0"
+
+          python universe_builder.py \
+            --min-market-cap "$MIN_MC" \
+            --max-tickers "$MAX_T" \
+            --output data/tradable_universe.parquet
+
+      - name: Upload tradable universe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tradable-universe-${{ github.run_number }}
+          path: |
+            data/tradable_universe.parquet
+            data/tradable_universe.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Commit tradable universe to repo
+        if: |
+          github.event.inputs.commit_results == 'true' ||
+          github.event_name == 'schedule' ||
+          vars.COMMIT_RESULTS == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/tradable_universe.parquet data/tradable_universe.csv || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: update tradable universe [skip ci]"
+            git pull --rebase origin "${GITHUB_REF_NAME:-main}"
+            git push
+          fi

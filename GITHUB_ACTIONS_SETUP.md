@@ -1,6 +1,16 @@
 # GitHub Actions Setup — Daily Market Scanner
 
-This repo includes a GitHub Actions workflow that runs `scanner.py` automatically after the US market closes every weekday, producing `data/latest_scan.parquet` and `data/latest_scan.csv`.
+This repo includes two GitHub Actions workflows:
+
+1. **Build Tradable Universe** (`build_universe.yml`) — runs weekly. Reads the listing CSVs (`nasdaq-listed.csv`, `nyse-listed.csv`, `other-listed.csv`), fetches market caps via yfinance, and writes `data/tradable_universe.parquet` / `.csv`.
+2. **Daily Market Scanner** (`daily_scan.yml`) — runs every weekday after the US close. If `data/tradable_universe.parquet` is present, `scanner.py` loads it automatically (otherwise falls back to a small curated `DEFAULT_TICKERS` list).
+
+## Universe rules (per product owner)
+
+- **Hard filter (only one):** market cap >= **500M USD**. Configured via `--min-market-cap` on `universe_builder.py` (default `500000000`).
+- **Not** filtered by price (>$5) or average dollar volume ($10M). Those metrics are surfaced downstream as informational, not as gating filters.
+- **No shortlist cap of 100.** Every ticker that passes the market-cap filter is scanned. UI display row limits exist for readability and are labelled as display-only.
+
 
 ---
 
@@ -16,8 +26,11 @@ git push -u origin main
 
 Files that must be in the repo root:
 - `scanner.py`
+- `universe_builder.py`
+- `nasdaq-listed.csv`, `nyse-listed.csv`, `other-listed.csv` (used by `universe_builder.py`)
 - `.github/workflows/daily_scan.yml`
-- (optional) a `data/` directory — the scanner creates it automatically
+- `.github/workflows/build_universe.yml`
+- (optional) a `data/` directory — the scanner / universe builder create it automatically
 
 ---
 
@@ -93,7 +106,29 @@ Go to **Settings → Actions → General → Workflow permissions** and select
 
 ---
 
-## 7. Limitations & tips
+## 7. Build Tradable Universe workflow
+
+The `build_universe.yml` workflow runs `python universe_builder.py` and uploads / commits `data/tradable_universe.parquet` and `data/tradable_universe.csv`.
+
+| Input | Description | Default |
+|-------|-------------|---------|
+| `min_market_cap` | Hard filter, USD | `500000000` |
+| `max_tickers` | Smoke-test cap on input listings (0 = no cap) | `0` |
+| `commit_results` | Commit the universe back to repo | `true` |
+
+Schedule: Sunday 03:00 UTC weekly. Market caps move slowly; weekly is sufficient.
+
+After this workflow runs and commits, `daily_scan.yml` automatically picks up the new universe — no extra config required.
+
+To smoke-test locally:
+
+```bash
+python universe_builder.py --max-tickers 50 --output data/test_universe.parquet
+```
+
+---
+
+## 8. Limitations & tips
 
 | Topic | Notes |
 |-------|-------|

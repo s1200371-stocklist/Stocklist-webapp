@@ -2716,7 +2716,7 @@ def render_catalyst_screener_module():
             '👉 設定好上方主題 / 基準後，按 **「📡 載入 / 更新數據」** 才會發起抓取。'
             '抓取一次後可直接調整篩選條件，不會重新發起網絡請求。'
         )
-        st.caption('💡 大型 universe 建議改用 GitHub Actions scanner（盤後預掃描），或於 Universe Manager 限制掃描隻數。')
+        st.caption('💡 大型 universe（市值 ≥ 500M USD 全市場）建議改用 GitHub Actions scanner（盤後預掃描），或於 Universe Manager 限制掃描隻數。')
         return
 
     # Collect ALL candidate tickers (no RS truncation)
@@ -5393,8 +5393,10 @@ def render_radar_module():
             candidate_tickers = list(_universe_pool[:_max_scan_limit])
             if len(_universe_pool) > _max_scan_limit:
                 st.warning(
-                    f'⚠️ 當前 Universe「{_active_universe_name}」共 {len(_universe_pool)} 隻，'
-                    f'已限制掃描首 {_max_scan_limit} 隻。可於 Universe Manager 調整上限。'
+                    f'⚠️ 當前 Universe「{_active_universe_name}」共 {len(_universe_pool)} 隻 '
+                    f'(市值 ≥ 500M USD，無價格 / 流動性硬篩；shortlist 不設 100 上限)。'
+                    f'此處為 **顯示行數限制** — 已顯示首 {_max_scan_limit} 隻，'
+                    f'可於 Universe Manager 調整上限。'
                 )
 
         # Include theme ETFs for heatmap
