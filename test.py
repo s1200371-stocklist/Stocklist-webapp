@@ -5,8 +5,53 @@ import streamlit as st
 import yfinance as yf
 import concurrent.futures
 from datetime import timedelta
+from pathlib import Path
 from finvizfinance.screener.overview import Overview
 from finvizfinance.quote import finvizfinance
+
+# ── Fast Mode: pre-computed scan cache helpers ──────────────────────────────
+DEFAULT_SCAN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'latest_scan.parquet')
+
+def load_latest_scan_cache(path: str = DEFAULT_SCAN_PATH):
+    """
+    Load pre-computed scan cache from Parquet (preferred) or CSV fallback.
+    Returns (df, scan_timestamp_str, status_message).
+    df is empty DataFrame if no cache found.
+    """
+    base = Path(path)
+    parquet_path = base.with_suffix('.parquet') if base.suffix != '.parquet' else base
+    csv_path = base.with_suffix('.csv')
+
+    for p in [parquet_path, csv_path]:
+        if p.exists():
+            try:
+                df = pd.read_parquet(str(p)) if p.suffix == '.parquet' else pd.read_csv(str(p))
+                if df.empty:
+                    continue
+                ts = str(df['scan_timestamp'].iloc[0]) if 'scan_timestamp' in df.columns else None
+                try:
+                    mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+                    age = datetime.datetime.now() - mtime
+                    h, m = int(age.total_seconds() // 3600), int((age.total_seconds() % 3600) // 60)
+                    age_str = f'{h}h {m}m 前' if h else f'{m}m 前'
+                except Exception:
+                    age_str = '未知'
+                status = f'✅ 快取載入成功 ({p.name}) — {len(df)} 筆 — 更新於 {age_str}'
+                return df, ts, status
+            except Exception:
+                continue
+    return pd.DataFrame(), None, '⚠️ 尚未有掃描快取。請運行 `python scanner.py` 生成。'
+
+def _cache_age_hours(path: str = DEFAULT_SCAN_PATH) -> float:
+    """Return age of cache file in hours, or 999 if not found."""
+    base = Path(path)
+    for p in [base.with_suffix('.parquet'), base.with_suffix('.csv')]:
+        if p.exists():
+            try:
+                return (datetime.datetime.now() - datetime.datetime.fromtimestamp(p.stat().st_mtime)).total_seconds() / 3600
+            except Exception:
+                pass
+    return 999
 
 st.set_page_config(page_title='🚀 美股全方位量化與 AI 平台', page_icon='📈', layout='wide')
 
@@ -3857,6 +3902,227 @@ def render_sidebar_macro_expander(m):
         st.caption('📌 宏觀數據: FRED | 市場數據: yfinance')
 
 
+
+# ==========================================
+# 📡 市場實時雷達 — 獨立頁面 (Fast, no blocking)
+# ==========================================
+def render_market_real_time_radar_page():
+    """
+    獨立頁面：市場實時雷達。
+    快速顯示 SPY/QQQ/VIX/Fear&Greed + 商品/債市/加密 + 亞洲市場。
+    使用快取數據，網絡失敗時顯示 N/A card，不阻塞頁面。
+    """
+    st.title('📡 市場實時雷達')
+    st.caption(
+        '快速總覽美股大市、宏觀指標、商品、加密、亞洲市場。'
+        '數據每5分鐘自動快取，失敗時顯示 N/A 卡片，唔會阻塞頁面。'
+    )
+
+    rc1, rc2 = st.columns([5, 1])
+    with rc2:
+        if st.button('🔄 刷新', use_container_width=True, key='mrr_refresh'):
+            try:
+                fetch_sidebar_market_data.clear()
+            except Exception:
+                pass
+            st.rerun()
+
+    # Load data (cached, with graceful fallback)
+    try:
+        m = fetch_sidebar_market_data()
+    except Exception:
+        m = {}
+
+    # ── Fear & Greed + VIX top strip ──────────────────────────────────
+    st.markdown('#### 🌡️ 市場情緒指標')
+    fg = m.get('FEAR_GREED', {}) or {}
+    vix = m.get('VIX', {}) or {}
+    spy = m.get('SPY', {}) or {}
+    qqq = m.get('QQQ', {}) or {}
+
+    def _mini_card(label, value_str, pct_str, bg, fg_color):
+        return (
+            f"<div style='background:{bg};border:1px solid {fg_color}33;border-radius:8px;"
+            f"padding:10px 12px;text-align:center;flex:1;min-width:120px'>"
+            f"<div style='font-size:0.68rem;color:{fg_color}aa'>{label}</div>"
+            f"<div style='font-size:1.1rem;font-weight:bold;color:{fg_color}'>{value_str}</div>"
+            f"<div style='font-size:0.65rem;color:{fg_color}88'>{pct_str}</div>"
+            f"</div>"
+        )
+
+    def _pct_arrow(pct):
+        if pct is None: return 'N/A'
+        arrow = '▲' if pct >= 0 else '▼'
+        c = '#00C851' if pct >= 0 else '#e74c3c'
+        return f"<span style='color:{c}'>{arrow}{abs(pct):.2f}%</span>"
+
+    cards = []
+    # Fear & Greed
+    fgscore = fg.get('score')
+    if fgscore is not None:
+        if fgscore >= 75: fbg, ffg, flabel = '#3A0A0A', '#e74c3c', '極度貪婪'
+        elif fgscore >= 55: fbg, ffg, flabel = '#2A1A0A', '#e67e22', '貪婪'
+        elif fgscore >= 45: fbg, ffg, flabel = '#1A1A0A', '#f1c40f', '中立'
+        elif fgscore >= 25: fbg, ffg, flabel = '#0A1A2A', '#3498db', '恐懼'
+        else: fbg, ffg, flabel = '#0A1020', '#2980b9', '極度恐懼'
+        cards.append(_mini_card('CNN 恐貪指數', f'{fgscore:.0f}', flabel, fbg, ffg))
+    else:
+        cards.append(_mini_card('CNN 恐貪指數', 'N/A', '無法取得', '#111', '#555'))
+
+    # VIX
+    vp = vix.get('price')
+    if vp is not None:
+        if vp >= 30: vbg, vfg, vl = '#3A0A0A', '#e74c3c', '恐慌'
+        elif vp >= 20: vbg, vfg, vl = '#2A1000', '#e67e22', '緊張'
+        else: vbg, vfg, vl = '#0A1A0A', '#2ecc71', '平靜'
+        cards.append(_mini_card('VIX 波動率指數', f'{vp:.1f}', vl, vbg, vfg))
+    else:
+        cards.append(_mini_card('VIX', 'N/A', '', '#111', '#555'))
+
+    # SPY
+    sp = spy.get('price')
+    if sp is not None:
+        spct = spy.get('pct', 0)
+        scol = '#00C851' if spct >= 0 else '#e74c3c'
+        cards.append(_mini_card('SPY (S&P500)', f'${sp:.2f}', f"{'▲' if spct >= 0 else '▼'}{abs(spct):.2f}%", '#0A140A' if spct >= 0 else '#1A0A0A', scol))
+    else:
+        cards.append(_mini_card('SPY', 'N/A', '', '#111', '#555'))
+
+    # QQQ
+    qp = qqq.get('price')
+    if qp is not None:
+        qpct = qqq.get('pct', 0)
+        qcol = '#00C851' if qpct >= 0 else '#e74c3c'
+        cards.append(_mini_card('QQQ (納指ETF)', f'${qp:.2f}', f"{'▲' if qpct >= 0 else '▼'}{abs(qpct):.2f}%", '#0A140A' if qpct >= 0 else '#1A0A0A', qcol))
+    else:
+        cards.append(_mini_card('QQQ', 'N/A', '', '#111', '#555'))
+
+    st.markdown(
+        "<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px'>" +
+        ''.join(cards) + "</div>",
+        unsafe_allow_html=True
+    )
+
+    # ── Major Indices table ────────────────────────────────────────────
+    def _index_row(label, key, fmt='${:.2f}'):
+        d = m.get(key, {}) or {}
+        price = d.get('price')
+        pct = d.get('pct')
+        if price is None:
+            return f"<tr><td>{label}</td><td style='color:#555'>N/A</td><td style='color:#555'>—</td></tr>"
+        try: pstr = fmt.format(price)
+        except: pstr = str(price)
+        col = '#00C851' if (pct or 0) >= 0 else '#e74c3c'
+        arrow = '▲' if (pct or 0) >= 0 else '▼'
+        pct_str = f"{arrow}{abs(pct):.2f}%" if pct is not None else '—'
+        return f"<tr><td>{label}</td><td>{pstr}</td><td style='color:{col}'>{pct_str}</td></tr>"
+
+    tbl_style = """<style>
+.mkt-tbl{width:100%;border-collapse:collapse;font-size:0.82rem;font-family:Inter,sans-serif}
+.mkt-tbl th{background:#141824;color:#8a9bb0;padding:6px 10px;text-align:left;border-bottom:2px solid #252d3d}
+.mkt-tbl td{padding:6px 10px;border-bottom:1px solid #1a1e28}
+.mkt-tbl tr:hover{background:#1c2535}
+</style>"""
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown('#### 🇺🇸 美股指數 & 宏觀')
+        rows = (
+            _index_row('S&P500 (SPY)', 'SPY') +
+            _index_row('納指 (QQQ)', 'QQQ') +
+            _index_row('道指 (DIA)', 'DIA') +
+            _index_row('美元指數 (DXY)', 'DXY', '{:.2f}') +
+            _index_row('10年美債息 (%)', 'TNX', '{:.3f}') +
+            _index_row('30年美債息 (%)', 'TYX', '{:.3f}')
+        )
+        st.markdown(tbl_style + f"<table class='mkt-tbl'><thead><tr><th>指標</th><th>現價</th><th>日變動</th></tr></thead><tbody>{rows}</tbody></table>", unsafe_allow_html=True)
+
+        # Fed Funds
+        ff = m.get('FEDFUNDS')
+        if ff:
+            st.caption(f"🏛️ 聯儲息率: **{ff.get('value', 'N/A'):.2f}%** ({ff.get('date', '')[:7]})")
+
+    with col_r:
+        st.markdown('#### 🛢️ 商品 & 加密 & 亞洲')
+        rows2 = (
+            _index_row('WTI 原油 (USD)', 'OIL', '${:.2f}') +
+            _index_row('黃金 (USD/oz)', 'GOLD', '${:.2f}') +
+            _index_row('Bitcoin (USD)', 'BTC', '${:,.0f}') +
+            _index_row('Ethereum (USD)', 'ETH', '${:,.0f}') +
+            _index_row('日經 225', 'NIKKEI', '{:,.0f}') +
+            _index_row('恒生指數', 'HSI', '{:,.0f}') +
+            _index_row('上證指數', 'SHCOMP', '{:,.0f}')
+        )
+        st.markdown(tbl_style + f"<table class='mkt-tbl'><thead><tr><th>指標</th><th>現價</th><th>日變動</th></tr></thead><tbody>{rows2}</tbody></table>", unsafe_allow_html=True)
+
+    ts = datetime.datetime.now().strftime('%H:%M:%S')
+    st.caption(f"⏱ 頁面渲染時間: {ts} | 數據快取: 5 分鐘 | 來源: yfinance + CNN F&G")
+
+    # ── System Architecture Guide ──────────────────────────────────────
+    st.markdown('---')
+    with st.expander('📖 系統架構說明 — Fast Mode / Scanner / 數據庫建議', expanded=False):
+        st.markdown(_architecture_guide())
+
+
+def _architecture_guide() -> str:
+    """Return architecture guidance markdown text."""
+    return """
+### ⚡ Fast Mode 架構說明
+
+#### 當前推薦架構（免費方案）
+```
+scanner.py（每日盤後跑）
+    ↓ yfinance 批量下載（100-250 隻/批）
+    ↓ 計算 RS/MA/Volume/Setup 訊號
+    ↓ 儲存 latest_scan.parquet + latest_scan.csv
+        ↓
+test-2.py（Streamlit 前端）
+    ↓ 讀取 Parquet（毫秒級）
+    ↓ 篩選 / 排序 / 顯示
+    ↓ 按需新聞情緒（單隻股票）
+```
+
+#### MongoDB 唔係必須
+- **MongoDB 唔係必須**，當前用法（Parquet/CSV）係最簡單嘅免費方案。
+- Parquet 係列式儲存，讀取速度遠快於 SQLite/CSV，適合 Pandas 篩選。
+- 如果股票池 < 2,000 隻，Parquet + Pandas 已經夠快。
+
+#### DuckDB vs MongoDB（進階選項）
+| 方案 | 優點 | 適用場景 |
+|------|------|----------|
+| **Parquet + Pandas** | 最簡單，無依賴 | < 2,000 隻，每日掃描 |
+| **DuckDB + Parquet** | SQL 查詢，極快篩選 | 2,000–50,000 隻 |
+| **MongoDB** | 彈性 Schema | 需要即時更新、多用戶 |
+
+#### 如何處理 8,000+ 隻股票
+1. **夜間排程掃描**（推薦）：`cron` 或 GitHub Actions 每晚盤後跑 `scanner.py`
+2. **分批下載**：yfinance 每批 200 隻，共需約 10–20 分鐘
+3. **付費 API**（可選）：Polygon.io / Tiingo / EOD Historical Data 支援大批量快速下載
+4. **DuckDB**：將 Parquet 用 DuckDB 查詢，毫秒級篩選 8,000 隻
+
+#### 如何運行 Scanner
+```bash
+# 最小測試（3隻）
+python scanner.py --tickers "AAPL,MSFT,SPY" --max-tickers 3
+
+# 預設精選池（約80隻）
+python scanner.py
+
+# 自定義 Universe
+python scanner.py --universe-file my_tickers.csv --benchmark SPY
+
+# 大型掃描
+python scanner.py --universe-file sp500.csv --max-tickers 500
+```
+
+#### Streamlit 保持快速的關鍵
+- **不要**在 Streamlit render 時自動跑全市場 yfinance 下載
+- **要**用 Parquet 快取 → Streamlit 只負責讀取 + 篩選 + 顯示
+- **按需**：新聞情緒、AI 分析只在用戶主動點擊時才觸發
+"""
+
+
+
 def render_sidebar_market_panel():
     # ── Header row with refresh ──────────────────────────────────────
     h_col1, h_col2 = st.columns([3, 1])
@@ -3868,8 +4134,11 @@ def render_sidebar_market_panel():
             fetch_sidebar_market_data.clear()
             st.rerun()
 
-    with st.spinner("載入市場數據..."):
+    # Fast: render N/A cards immediately, data loads via cached function
+    try:
         m = fetch_sidebar_market_data()
+    except Exception:
+        m = {}
 
     # ── 更新時間戳 ──
     st.markdown(
@@ -3878,8 +4147,8 @@ def render_sidebar_market_panel():
         unsafe_allow_html=True)
 
     # ── Fear & Greed + VIX 並列 ──
-    fg = m.get('FEAR_GREED', {})
-    vix = m.get('VIX', {})
+    fg = m.get('FEAR_GREED', {}) or {}
+    vix = m.get('VIX', {}) or {}
 
     fc1, fc2 = st.columns(2)
     with fc1:
@@ -4676,6 +4945,184 @@ def _render_stock_sentiment_panel(candidate_tickers, sentiment_data):
 
 
 
+def _render_fast_mode_cache_panel():
+    """
+    Fast Mode: render cache-based radar panel.
+    Returns (df, used_fast_mode: bool).
+    If cache is found, renders the full panel and returns (df, True).
+    Otherwise shows instructions and returns (empty_df, False).
+    """
+    df, ts, status_msg = load_latest_scan_cache(DEFAULT_SCAN_PATH)
+    age_h = _cache_age_hours(DEFAULT_SCAN_PATH)
+
+    # ── Performance / status card ──────────────────────────────────────
+    if not df.empty:
+        cache_color = '#00C851' if age_h < 24 else ('#FF8C00' if age_h < 48 else '#e74c3c')
+        age_warn = '' if age_h < 24 else f' ⚠️ 已 {age_h:.0f}h 未更新'
+        bench = df['benchmark'].iloc[0] if 'benchmark' in df.columns else 'SPY'
+        active_name = st.session_state.get('active_universe_name', '快取池')
+        st.markdown(
+            f"<div style='background:linear-gradient(135deg,#071a0d,#0d2a18);border:1px solid {cache_color}44;"
+            f"border-radius:10px;padding:12px 16px;margin-bottom:12px'>"
+            f"<div style='display:flex;align-items:center;gap:16px;flex-wrap:wrap'>"
+            f"<span style='font-size:0.88rem;font-weight:700;color:{cache_color}'>⚡ Fast Mode 已啟動</span>"
+            f"<span style='color:#aaa;font-size:0.8rem'>Universe: <b style='color:#4FC3F7'>{active_name}</b></span>"
+            f"<span style='color:#aaa;font-size:0.8rem'>強制对象: <b style='color:#4FC3F7'>{len(df)}</b> 隻</span>"
+            f"<span style='color:#aaa;font-size:0.8rem'>基準: <b style='color:#4FC3F7'>{bench}</b></span>"
+            f"<span style='color:{cache_color};font-size:0.78rem'>{status_msg}{age_warn}</span>"
+            f"</div></div>",
+            unsafe_allow_html=True
+        )
+    else:
+        st.info(status_msg, icon='⚡')
+        st.markdown("""
+#### 如何始用 Fast Mode
+
+1. **安裝相依套件**：`pip install yfinance pyarrow pandas`
+2. **運行小型測試掃描**：
+   ```bash
+   python scanner.py --tickers "AAPL,MSFT,NVDA,SPY,QQQ" --output data/latest_scan.parquet
+   ```
+3. **運行預設粿選池**（約 80 隻）：
+   ```bash
+   python scanner.py
+   ```
+4. **自定義 Universe**：
+   ```bash
+   python scanner.py --universe-file my_tickers.csv --benchmark SPY
+   ```
+5. 掃描完成後，刷新頁面即可看到快取結果。
+        """)
+
+    return df
+
+
+def _render_fast_mode_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """Render filter controls for the cache-based view. Returns filtered DataFrame."""
+    if df.empty:
+        return df
+
+    all_setups = sorted(df['setup_type'].dropna().unique().tolist()) if 'setup_type' in df.columns else []
+    all_rs = sorted(df['rs_status'].dropna().unique().tolist()) if 'rs_status' in df.columns else []
+
+    fc1, fc2, fc3 = st.columns([3, 3, 2])
+    with fc1:
+        default_setups = [s for s in all_setups if s in ('強勢延續', '接近爆發', '低風险回踩', '早期轉強')]
+        selected_setups = st.multiselect(
+            '築選 Setup 類型:', all_setups,
+            default=default_setups or all_setups[:4],
+            key='fm_setup_filter'
+        )
+    with fc2:
+        selected_rs = st.multiselect(
+            '築選 RS 狀態:', all_rs,
+            default=all_rs,
+            key='fm_rs_filter'
+        )
+    with fc3:
+        max_rows = st.number_input('最多顯示行數', min_value=5, max_value=200, value=50, step=5, key='fm_max_rows')
+        prefer_low = st.checkbox('優先顯示低風险', value=False, key='fm_prefer_low')
+
+    # Apply filters
+    filtered = df.copy()
+    if selected_setups and 'setup_type' in filtered.columns:
+        filtered = filtered[filtered['setup_type'].isin(selected_setups)]
+    if selected_rs and 'rs_status' in filtered.columns:
+        filtered = filtered[filtered['rs_status'].isin(selected_rs)]
+
+    # Sort
+    setup_order_map = {'強勢延續': 0, '接近爆發': 1, '低風险回踩': 2, '早期轉強': 3, '過度延伸': 4, '跑輸觀望': 5}
+    if prefer_low:
+        setup_order_map = {'低風险回踩': 0, '早期轉強': 1, '強勢延續': 2, '接近爆發': 3, '過度延伸': 4, '跑輸觀望': 5}
+    if 'setup_type' in filtered.columns:
+        filtered['_sort'] = filtered['setup_type'].map(setup_order_map).fillna(9)
+        sort_by = ['_sort']
+        if 'rel_1m' in filtered.columns:
+            sort_by.append('rel_1m')
+        filtered = filtered.sort_values(sort_by, ascending=[True, False]).drop(columns=['_sort'])
+
+    return filtered.head(int(max_rows))
+
+
+def _render_fast_mode_table(df: pd.DataFrame) -> None:
+    """Render the filtered cache results as a styled table."""
+    if df.empty:
+        st.warning('⚠️ 當前築選條件下無候選股票，請調整等級築選。')
+        return
+
+    # Colour helpers
+    def pct_colour(v):
+        try:
+            v = float(v)
+            if v >= 5: return '#00C851'
+            if v >= 1: return '#26A69A'
+            if v >= -1: return '#f1c40f'
+            if v >= -5: return '#FF8C00'
+            return '#e74c3c'
+        except: return '#888'
+
+    SETUP_COLORS_FM = {
+        '強勢延續': ('#0D2010','#00C851'),
+        '接近爆發': ('#1A0E00','#FF8C00'),
+        '低風险回踩': ('#0A1A2A','#4FC3F7'),
+        '早期轉強': ('#1A1A0A','#FFD700'),
+        '過度延伸': ('#2A0A0A','#FF4444'),
+        '跑輸觀望': ('#111','#666'),
+    }
+    RS_COLORS_FM = {'跑贏指數': '#00C851', '接近突破': '#FF8C00', '剛轉強': '#FFD700', '跑輸指數': '#888'}
+
+    rows_html = []
+    for _, row in df.iterrows():
+        setup = str(row.get('setup_type', ''))
+        rs = str(row.get('rs_status', ''))
+        bg, fg = SETUP_COLORS_FM.get(setup, ('#111', '#aaa'))
+        rs_c = RS_COLORS_FM.get(rs, '#aaa')
+
+        def _fmt(col, fmt='{:.2f}%', na='N/A'):
+            v = row.get(col)
+            try:
+                return fmt.format(float(v))
+            except: return na
+
+        price = _fmt('latest_price', '${:.2f}')
+        ret5d = _fmt('ret_5d')
+        rel1m = _fmt('rel_1m')
+        dist20 = _fmt('distance_to_ma20_pct')
+        vol_s = str(row.get('volume_signal', 'N/A'))
+        vol_ratio = _fmt('volume_ratio', '{:.1f}x', 'N/A')
+        vol_col = '#00C851' if '放量' in vol_s else ('#4FC3F7' if '縮量' in vol_s else '#888')
+
+        r5_c = pct_colour(row.get('ret_5d'))
+        r1m_c = pct_colour(row.get('rel_1m'))
+        d20_c = pct_colour(row.get('distance_to_ma20_pct'))
+
+        rows_html.append(
+            f"<tr>"
+            f"<td><b style='color:#4FC3F7'>{row.get('ticker','')}</b></td>"
+            f"<td style='color:{r5_c}'>{ret5d}</td>"
+            f"<td style='color:{r1m_c}'>{rel1m}</td>"
+            f"<td style='color:{d20_c}'>{dist20}</td>"
+            f"<td style='color:{vol_col}'>{vol_s} <span style='color:#555'>({vol_ratio})</span></td>"
+            f"<td><span style='background:{bg};color:{fg};padding:2px 7px;border-radius:8px;font-size:0.75rem'>{setup}</span></td>"
+            f"<td><span style='color:{rs_c};font-size:0.78rem'>{rs}</span></td>"
+            f"<td>{price}</td>"
+            f"</tr>"
+        )
+
+    header = """
+<style>.fm-tbl{width:100%;border-collapse:collapse;font-family:'Inter',sans-serif;font-size:0.79rem}
+.fm-tbl th{background:#141824;color:#8a9bb0;padding:7px 9px;text-align:left;border-bottom:2px solid #252d3d;white-space:nowrap;font-size:0.72rem}
+.fm-tbl td{padding:6px 9px;border-bottom:1px solid #1a1e28;vertical-align:middle}
+.fm-tbl tr:nth-child(even){background:#0c0f18}.fm-tbl tr:nth-child(odd){background:#101420}
+.fm-tbl tr:hover{background:#1c2535!important}</style>
+<table class='fm-tbl'>
+<thead><tr>
+<th>Ticker</th><th>5D回報</th><th>1M超額回報</th>
+<th>MA20距離</th><th>成交量訊號</th><th>Setup 類型</th><th>RS 狀態</th><th>現價</th>
+</tr></thead><tbody>"""
+    st.markdown(header + ''.join(rows_html) + '</tbody></table>', unsafe_allow_html=True)
+
+
 def render_radar_module():
     """Main render function for 🔥 當炒 / 低風險機會雷達."""
     st.title('🔥 當炒 / 低風險機會雷達')
@@ -4691,221 +5138,262 @@ def render_radar_module():
     _init_universe_session_state()
     _render_universe_selector_compact()
 
-        # ── Controls ────────────────────────────────────────────────────
-    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 2, 1])
-    with col_ctrl1:
-        all_themes = list(CATALYST_THEME_MAP.keys())
-        radar_themes = st.multiselect(
-            '選擇板塊 (可多選):',
-            all_themes,
-            default=all_themes[:5],
-            key='radar_theme_select',
-        )
-    with col_ctrl2:
-        radar_bench = st.selectbox(
-            'RS 比較基準:',
-            ['SPY', 'QQQ', 'IWM'],
-            key='radar_bench',
-        )
-        setup_filter = st.multiselect(
-            '篩選 Setup 類型:',
-            list(SETUP_LABELS.values()),
-            default=[
-                SETUP_LABELS['HOT_MOMENTUM'],
-                SETUP_LABELS['NEAR_BREAKOUT'],
-                SETUP_LABELS['LOW_RISK'],
-                SETUP_LABELS['EARLY_TURN'],
-            ],
-            key='radar_setup_filter',
-        )
-    with col_ctrl3:
-        st.markdown('<br>', unsafe_allow_html=True)
-        prefer_low_risk = st.checkbox('優先顯示低風險', value=False, key='radar_prefer_lowrisk')
-        max_rows = st.number_input('最多顯示行數', min_value=5, max_value=100, value=30, step=5, key='radar_max_rows')
-        refresh_radar_btn = st.button('🔄 刷新', use_container_width=True, key='refresh_radar_main')
-
-    if refresh_radar_btn:
-        try:
-            fetch_catalyst_rs_data.clear()
-            fetch_ticker_news_sentiment.clear()
-            fetch_ma_data.clear()
-        except Exception:
-            pass
-        st.rerun()
-
-    if not radar_themes:
-        st.info('請至少選擇一個板塊。')
-        return
-
-    # For broad universes, ensure radar_themes stays as selected (for theme ranking table).
-    # The candidate_tickers section below will override tickers from the active universe.
-
-    # ── Collect candidate tickers ───────────────────────────────────
-    _active_universe_name = st.session_state.get('active_universe_name', '主題精選池')
-    _max_scan_limit = st.session_state.get('universe_max_scan_limit', 150)
-    _news_enabled = st.session_state.get('universe_news_enabled', True)
-
-    if _active_universe_name == '主題精選池':
-        # Default: iterate selected themes from CATALYST_THEME_MAP
-        candidate_tickers = []
-        for theme in radar_themes:
-            for t in CATALYST_THEME_MAP[theme].get('tickers', {}):
-                if t not in candidate_tickers:
-                    candidate_tickers.append(t)
-    else:
-        # Broad universe: use active universe tickers (capped to max_scan_limit)
-        _universe_pool = get_active_universe_tickers()
-        candidate_tickers = list(_universe_pool[:_max_scan_limit])
-        if len(_universe_pool) > _max_scan_limit:
-            st.warning(
-                f'⚠️ 當前 Universe「{_active_universe_name}」共 {len(_universe_pool)} 隻，'
-                f'已限制掃描首 {_max_scan_limit} 隻。可於 Universe Manager 調整上限。'
-            )
-
-    # Include theme ETFs for heatmap
-    theme_etfs = list(THEME_ETF_MAP.values())
-    all_fetch = list(set(candidate_tickers + theme_etfs + [radar_bench]))
-
-    # ── Fetch data ──────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # ⚡ FAST MODE — render cache-based results first (no blocking scan)
+    # ─────────────────────────────────────────────────────────────────
     st.markdown('---')
-    st.markdown('### 📡 一. 板塊熱力排名')
+    st.markdown('### ⚡ Fast Mode — 盤後預掃描快取模式')
+    cache_df = _render_fast_mode_cache_panel()
+    if not cache_df.empty:
+        st.markdown('#### 📂 篩選控制框')
+        filtered_df = _render_fast_mode_filters(cache_df)
+        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+        mc1.metric('候選股票', len(cache_df))
+        mc2.metric('🔥 強勢延續', int((cache_df.get('setup_type', pd.Series()) == '強勢延續').sum()))
+        mc3.metric('🚀 接近爆發', int((cache_df.get('setup_type', pd.Series()) == '接近爆發').sum()))
+        mc4.metric('🛡️ 低風險回踩', int((cache_df.get('setup_type', pd.Series()) == '低風險回踩').sum()))
+        mc5.metric('👀 早期轉強', int((cache_df.get('setup_type', pd.Series()) == '早期轉強').sum()))
+        st.markdown(
+            f"<div style='color:#888;font-size:0.78rem;margin:4px 0'>顯示 {len(filtered_df)} / {len(cache_df)} 隻（已套用篩選）。</div>",
+            unsafe_allow_html=True
+        )
+        _render_fast_mode_table(filtered_df)
+        st.markdown('---')
+        with st.expander('📰 個股新聞情緒分析（按需，不會自動全部掃描）', expanded=False):
+            st.caption('選擇單一股票，按鈕才發起 AI 新聞情緒分析。')
+            _t_list = sorted(cache_df['ticker'].tolist()) if 'ticker' in cache_df.columns else []
+            sel_ticker = st.selectbox('選擇股票', _t_list, key='fm_sent_ticker')
+            if st.button('🔍 按需分析新聞情緒', key='fm_sent_btn') and sel_ticker:
+                with st.spinner(f'分析 {sel_ticker} 新聞...'):
+                    try:
+                        _news = fetch_single_stock_news(sel_ticker)
+                        st.markdown(analyze_single_stock_sentiment(sel_ticker, _news))
+                    except Exception as _e:
+                        st.warning(f'分析失敗: {_e}')
 
-    with st.spinner(f'正在抓取 {len(all_fetch)} 隻股票數據...'):
-        try:
-            perf_data = fetch_catalyst_rs_data(
-                tuple(sorted(all_fetch)), benchmark=radar_bench
+    # ── Legacy live-scan (slow) — collapsed ──────────────────────────
+    st.markdown('---')
+    with st.expander('🐢 Legacy 小型即時掃描（慢，主題精選池專用）', expanded=False):
+        st.warning(
+            '⚠️ 這個路徑會實時發起 yfinance 掃描，小型主題精選池會較快，'
+            '廣義 Universe 會很慢。建議少於 50 隻。'
+        )
+
+        # ── Controls (Legacy live scan) ──────────────────────────────
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 2, 1])
+        with col_ctrl1:
+            all_themes = list(CATALYST_THEME_MAP.keys())
+            radar_themes = st.multiselect(
+                '選擇板塊 (可多選):',
+                all_themes,
+                default=all_themes[:5],
+                key='radar_theme_select',
             )
-        except Exception:
-            perf_data = {}
+        with col_ctrl2:
+            radar_bench = st.selectbox(
+                'RS 比較基準:',
+                ['SPY', 'QQQ', 'IWM'],
+                key='radar_bench',
+            )
+            setup_filter = st.multiselect(
+                '篩選 Setup 類型:',
+                list(SETUP_LABELS.values()),
+                default=[
+                    SETUP_LABELS['HOT_MOMENTUM'],
+                    SETUP_LABELS['NEAR_BREAKOUT'],
+                    SETUP_LABELS['LOW_RISK'],
+                    SETUP_LABELS['EARLY_TURN'],
+                ],
+                key='radar_setup_filter',
+            )
+        with col_ctrl3:
+            st.markdown('<br>', unsafe_allow_html=True)
+            prefer_low_risk = st.checkbox('優先顯示低風險', value=False, key='radar_prefer_lowrisk')
+            max_rows = st.number_input('最多顯示行數', min_value=5, max_value=100, value=30, step=5, key='radar_max_rows')
+            refresh_radar_btn = st.button('🔄 刷新', use_container_width=True, key='refresh_radar_main')
 
-    with st.spinner('分析新聞情緒...'):
-        try:
-            _skip_news = (not _news_enabled) or (len(candidate_tickers) > 100 and _active_universe_name != '主題精選池')
-            if _skip_news:
+        if refresh_radar_btn:
+            try:
+                fetch_catalyst_rs_data.clear()
+                fetch_ticker_news_sentiment.clear()
+                fetch_ma_data.clear()
+            except Exception:
+                pass
+            st.rerun()
+
+        if not radar_themes:
+            st.info('請至少選擇一個板塊。')
+            return
+
+        # For broad universes, ensure radar_themes stays as selected (for theme ranking table).
+        # The candidate_tickers section below will override tickers from the active universe.
+
+        # ── Collect candidate tickers ───────────────────────────────────
+        _active_universe_name = st.session_state.get('active_universe_name', '主題精選池')
+        _max_scan_limit = st.session_state.get('universe_max_scan_limit', 150)
+        _news_enabled = st.session_state.get('universe_news_enabled', True)
+
+        if _active_universe_name == '主題精選池':
+            # Default: iterate selected themes from CATALYST_THEME_MAP
+            candidate_tickers = []
+            for theme in radar_themes:
+                for t in CATALYST_THEME_MAP[theme].get('tickers', {}):
+                    if t not in candidate_tickers:
+                        candidate_tickers.append(t)
+        else:
+            # Broad universe: use active universe tickers (capped to max_scan_limit)
+            _universe_pool = get_active_universe_tickers()
+            candidate_tickers = list(_universe_pool[:_max_scan_limit])
+            if len(_universe_pool) > _max_scan_limit:
+                st.warning(
+                    f'⚠️ 當前 Universe「{_active_universe_name}」共 {len(_universe_pool)} 隻，'
+                    f'已限制掃描首 {_max_scan_limit} 隻。可於 Universe Manager 調整上限。'
+                )
+
+        # Include theme ETFs for heatmap
+        theme_etfs = list(THEME_ETF_MAP.values())
+        all_fetch = list(set(candidate_tickers + theme_etfs + [radar_bench]))
+
+        # ── Fetch data ──────────────────────────────────────────────────
+        st.markdown('---')
+        st.markdown('### 📡 一. 板塊熱力排名')
+
+        with st.spinner(f'正在抓取 {len(all_fetch)} 隻股票數據...'):
+            try:
+                perf_data = fetch_catalyst_rs_data(
+                    tuple(sorted(all_fetch)), benchmark=radar_bench
+                )
+            except Exception:
+                perf_data = {}
+
+        with st.spinner('分析新聞情緒...'):
+            try:
+                _skip_news = (not _news_enabled) or (len(candidate_tickers) > 100 and _active_universe_name != '主題精選池')
+                if _skip_news:
+                    sentiment_data = {}
+                    if len(candidate_tickers) > 100 and _news_enabled:
+                        st.info(
+                            f'💡 廣義 Universe（{len(candidate_tickers)} 隻）已自動停用新聞情緒分析以加快掃描速度。'
+                            '如需啟用，請於 Universe Manager → ⚙️ 設定中開啟「新聞情緒分析」。'
+                        )
+                else:
+                    sentiment_data = fetch_ticker_news_sentiment(tuple(candidate_tickers))
+            except Exception:
                 sentiment_data = {}
-                if len(candidate_tickers) > 100 and _news_enabled:
-                    st.info(
-                        f'💡 廣義 Universe（{len(candidate_tickers)} 隻）已自動停用新聞情緒分析以加快掃描速度。'
-                        '如需啟用，請於 Universe Manager → ⚙️ 設定中開啟「新聞情緒分析」。'
-                    )
-            else:
-                sentiment_data = fetch_ticker_news_sentiment(tuple(candidate_tickers))
-        except Exception:
-            sentiment_data = {}
 
-    with st.spinner('計算 MA20/MA50 及波動率...'):
-        try:
-            ma_data = fetch_ma_data(tuple(candidate_tickers))
-        except Exception:
-            ma_data = {}
+        with st.spinner('計算 MA20/MA50 及波動率...'):
+            try:
+                ma_data = fetch_ma_data(tuple(candidate_tickers))
+            except Exception:
+                ma_data = {}
 
-    # ── A. Theme ranking table ──────────────────────────────────────
-    st.markdown(render_theme_ranking_table(radar_themes, perf_data, sentiment_data, radar_bench),
-                unsafe_allow_html=True)
-    st.caption(
-        '🔥 當炒主線 = ETF 1M相對>0 + 強勢廣度≥40% + 正面情緒；'
-        '🚀 下一輪潛在 = ETF 5D改善 + 廣度≥35%；👀 觀察/未確認 = 其他情況。'
-    )
-
-    # ── B. Build watchlist rows ────────────────────────────────────
-    all_rows = build_radar_rows(
-        radar_themes, perf_data, sentiment_data, ma_data, radar_bench
-    )
-
-    # ── Bucket summaries ───────────────────────────────────────────
-    st.markdown('---')
-    st.markdown('### 🗂️ 二. 觀察清單 Watchlist 分類')
-
-    hot_rows  = [r for r in all_rows if r['setup'] in (SETUP_LABELS['HOT_MOMENTUM'], SETUP_LABELS['NEAR_BREAKOUT'])]
-    low_rows  = [r for r in all_rows if r['setup'] in (SETUP_LABELS['LOW_RISK'], SETUP_LABELS['EARLY_TURN'])]
-    other_rows = [r for r in all_rows if r['setup'] not in (
-        SETUP_LABELS['HOT_MOMENTUM'], SETUP_LABELS['NEAR_BREAKOUT'],
-        SETUP_LABELS['LOW_RISK'], SETUP_LABELS['EARLY_TURN']
-    )]
-
-    bc1, bc2 = st.columns(2)
-    with bc1:
-        st.markdown(
-            "<div style='background:#0D2010;border:1px solid #00C851;border-radius:8px;padding:10px 12px'>"
-            "<div style='font-size:0.9rem;font-weight:bold;color:#00C851'>🔥 潛在當炒 / Hot Momentum</div>"
-            "<div style='font-size:0.72rem;color:#888;margin:3px 0 6px'>RS強勢+正面情緒+板塊熱度高</div>"
-            + ''.join(
-                f"<div style='font-size:0.79rem;color:#ccc;padding:1px 0'>"
-                f"• <b style='color:#4FC3F7'>{r['ticker']}</b> {r['company'][:20]}  "
-                f"<span style='color:#00C851;font-size:0.72rem'>{r['setup']}</span></div>"
-                for r in hot_rows[:8]
-            )
-            + (f"<div style='color:#555;font-size:0.72rem'>⋯ 另 {len(hot_rows)-8} 隻</div>" if len(hot_rows) > 8 else '')
-            + (f"<div style='color:#555;font-size:0.72rem'>（暫無符合條件股票）</div>" if not hot_rows else '')
-            + "</div>",
-            unsafe_allow_html=True
-        )
-    with bc2:
-        st.markdown(
-            "<div style='background:#0A1A2A;border:1px solid #4FC3F7;border-radius:8px;padding:10px 12px'>"
-            "<div style='font-size:0.9rem;font-weight:bold;color:#4FC3F7'>🛡️ 低風險買入 / Lower-Risk Setup</div>"
-            "<div style='font-size:0.72rem;color:#888;margin:3px 0 6px'>回踩至MA20附近+RS仍強+未過度延伸</div>"
-            + ''.join(
-                f"<div style='font-size:0.79rem;color:#ccc;padding:1px 0'>"
-                f"• <b style='color:#4FC3F7'>{r['ticker']}</b> {r['company'][:20]}  "
-                f"<span style='color:#4FC3F7;font-size:0.72rem'>{r['setup']}</span></div>"
-                for r in low_rows[:8]
-            )
-            + (f"<div style='color:#555;font-size:0.72rem'>⋯ 另 {len(low_rows)-8} 隻</div>" if len(low_rows) > 8 else '')
-            + (f"<div style='color:#555;font-size:0.72rem'>（暫無符合條件股票）</div>" if not low_rows else '')
-            + "</div>",
-            unsafe_allow_html=True
-        )
-
-    # ── C. Full filtered table ─────────────────────────────────────
-    st.markdown('<br>', unsafe_allow_html=True)
-    st.markdown('### 📋 三. 完整篩選名單')
-
-    # Sort order
-    setup_order = {
-        SETUP_LABELS['HOT_MOMENTUM']:  0,
-        SETUP_LABELS['NEAR_BREAKOUT']: 1,
-        SETUP_LABELS['LOW_RISK']:      2,
-        SETUP_LABELS['EARLY_TURN']:    3,
-        SETUP_LABELS['OVEREXTENDED']:  4,
-        SETUP_LABELS['LAGGING']:       5,
-    }
-    rows_display = [r for r in all_rows if r['setup'] in setup_filter]
-    if prefer_low_risk:
-        rows_display.sort(key=lambda r: (
-            0 if r['setup'] == SETUP_LABELS['LOW_RISK'] else
-            1 if r['setup'] == SETUP_LABELS['EARLY_TURN'] else
-            setup_order.get(r['setup'], 9),
-            -(r['rel_1m'] or -999)
-        ))
-    else:
-        rows_display.sort(key=lambda r: (
-            setup_order.get(r['setup'], 9),
-            -(r['rel_1m'] or -999)
-        ))
-    rows_display = rows_display[:int(max_rows)]
-
-    # Metric bar
-    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
-    bench_1d = perf_data.get(radar_bench, {}).get('1d')
-    mc1.metric('候選股票', len(all_rows))
-    mc2.metric('🔥 強勢延續', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['HOT_MOMENTUM']))
-    mc3.metric('🚀 接近爆發', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['NEAR_BREAKOUT']))
-    mc4.metric('🛡️ 低風險', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['LOW_RISK']))
-    mc5.metric('👀 早期轉強', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['EARLY_TURN']))
-    mc6.metric(f'{radar_bench} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
-
-    if rows_display:
-        st.markdown(
-            f"<div style='color:#888;font-size:0.78rem;margin:4px 0'>"
-            f"顯示 {len(rows_display)} / {len(all_rows)} 隻（已套用篩選）。</div>",
-            unsafe_allow_html=True
-        )
-        body_html = '\n'.join(_radar_row_html(r, radar_bench) for r in rows_display)
-        st.markdown(RADAR_TABLE_HEADER + body_html + '\n</tbody></table>',
+        # ── A. Theme ranking table ──────────────────────────────────────
+        st.markdown(render_theme_ranking_table(radar_themes, perf_data, sentiment_data, radar_bench),
                     unsafe_allow_html=True)
-    else:
-        st.warning('⚠️ 當前篩選條件下無候選股票，請調整 Setup 類型篩選。')
+        st.caption(
+            '🔥 當炒主線 = ETF 1M相對>0 + 強勢廣度≥40% + 正面情緒；'
+            '🚀 下一輪潛在 = ETF 5D改善 + 廣度≥35%；👀 觀察/未確認 = 其他情況。'
+        )
+
+        # ── B. Build watchlist rows ────────────────────────────────────
+        all_rows = build_radar_rows(
+            radar_themes, perf_data, sentiment_data, ma_data, radar_bench
+        )
+
+        # ── Bucket summaries ───────────────────────────────────────────
+        st.markdown('---')
+        st.markdown('### 🗂️ 二. 觀察清單 Watchlist 分類')
+
+        hot_rows  = [r for r in all_rows if r['setup'] in (SETUP_LABELS['HOT_MOMENTUM'], SETUP_LABELS['NEAR_BREAKOUT'])]
+        low_rows  = [r for r in all_rows if r['setup'] in (SETUP_LABELS['LOW_RISK'], SETUP_LABELS['EARLY_TURN'])]
+        other_rows = [r for r in all_rows if r['setup'] not in (
+            SETUP_LABELS['HOT_MOMENTUM'], SETUP_LABELS['NEAR_BREAKOUT'],
+            SETUP_LABELS['LOW_RISK'], SETUP_LABELS['EARLY_TURN']
+        )]
+
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            st.markdown(
+                "<div style='background:#0D2010;border:1px solid #00C851;border-radius:8px;padding:10px 12px'>"
+                "<div style='font-size:0.9rem;font-weight:bold;color:#00C851'>🔥 潛在當炒 / Hot Momentum</div>"
+                "<div style='font-size:0.72rem;color:#888;margin:3px 0 6px'>RS強勢+正面情緒+板塊熱度高</div>"
+                + ''.join(
+                    f"<div style='font-size:0.79rem;color:#ccc;padding:1px 0'>"
+                    f"• <b style='color:#4FC3F7'>{r['ticker']}</b> {r['company'][:20]}  "
+                    f"<span style='color:#00C851;font-size:0.72rem'>{r['setup']}</span></div>"
+                    for r in hot_rows[:8]
+                )
+                + (f"<div style='color:#555;font-size:0.72rem'>⋯ 另 {len(hot_rows)-8} 隻</div>" if len(hot_rows) > 8 else '')
+                + (f"<div style='color:#555;font-size:0.72rem'>（暫無符合條件股票）</div>" if not hot_rows else '')
+                + "</div>",
+                unsafe_allow_html=True
+            )
+        with bc2:
+            st.markdown(
+                "<div style='background:#0A1A2A;border:1px solid #4FC3F7;border-radius:8px;padding:10px 12px'>"
+                "<div style='font-size:0.9rem;font-weight:bold;color:#4FC3F7'>🛡️ 低風險買入 / Lower-Risk Setup</div>"
+                "<div style='font-size:0.72rem;color:#888;margin:3px 0 6px'>回踩至MA20附近+RS仍強+未過度延伸</div>"
+                + ''.join(
+                    f"<div style='font-size:0.79rem;color:#ccc;padding:1px 0'>"
+                    f"• <b style='color:#4FC3F7'>{r['ticker']}</b> {r['company'][:20]}  "
+                    f"<span style='color:#4FC3F7;font-size:0.72rem'>{r['setup']}</span></div>"
+                    for r in low_rows[:8]
+                )
+                + (f"<div style='color:#555;font-size:0.72rem'>⋯ 另 {len(low_rows)-8} 隻</div>" if len(low_rows) > 8 else '')
+                + (f"<div style='color:#555;font-size:0.72rem'>（暫無符合條件股票）</div>" if not low_rows else '')
+                + "</div>",
+                unsafe_allow_html=True
+            )
+
+        # ── C. Full filtered table ─────────────────────────────────────
+        st.markdown('<br>', unsafe_allow_html=True)
+        st.markdown('### 📋 三. 完整篩選名單')
+
+        # Sort order
+        setup_order = {
+            SETUP_LABELS['HOT_MOMENTUM']:  0,
+            SETUP_LABELS['NEAR_BREAKOUT']: 1,
+            SETUP_LABELS['LOW_RISK']:      2,
+            SETUP_LABELS['EARLY_TURN']:    3,
+            SETUP_LABELS['OVEREXTENDED']:  4,
+            SETUP_LABELS['LAGGING']:       5,
+        }
+        rows_display = [r for r in all_rows if r['setup'] in setup_filter]
+        if prefer_low_risk:
+            rows_display.sort(key=lambda r: (
+                0 if r['setup'] == SETUP_LABELS['LOW_RISK'] else
+                1 if r['setup'] == SETUP_LABELS['EARLY_TURN'] else
+                setup_order.get(r['setup'], 9),
+                -(r['rel_1m'] or -999)
+            ))
+        else:
+            rows_display.sort(key=lambda r: (
+                setup_order.get(r['setup'], 9),
+                -(r['rel_1m'] or -999)
+            ))
+        rows_display = rows_display[:int(max_rows)]
+
+        # Metric bar
+        mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
+        bench_1d = perf_data.get(radar_bench, {}).get('1d')
+        mc1.metric('候選股票', len(all_rows))
+        mc2.metric('🔥 強勢延續', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['HOT_MOMENTUM']))
+        mc3.metric('🚀 接近爆發', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['NEAR_BREAKOUT']))
+        mc4.metric('🛡️ 低風險', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['LOW_RISK']))
+        mc5.metric('👀 早期轉強', sum(1 for r in all_rows if r['setup'] == SETUP_LABELS['EARLY_TURN']))
+        mc6.metric(f'{radar_bench} 今日', f"{bench_1d:+.2f}%" if bench_1d is not None else 'N/A')
+
+        if rows_display:
+            st.markdown(
+                f"<div style='color:#888;font-size:0.78rem;margin:4px 0'>"
+                f"顯示 {len(rows_display)} / {len(all_rows)} 隻（已套用篩選）。</div>",
+                unsafe_allow_html=True
+            )
+            body_html = '\n'.join(_radar_row_html(r, radar_bench) for r in rows_display)
+            st.markdown(RADAR_TABLE_HEADER + body_html + '\n</tbody></table>',
+                        unsafe_allow_html=True)
+        else:
+            st.warning('⚠️ 當前篩選條件下無候選股票，請調整 Setup 類型篩選。')
 
     # ── D. Stock-level sentiment panel ────────────────────────────
     _render_stock_sentiment_panel(candidate_tickers, sentiment_data)
@@ -5545,6 +6033,35 @@ def _render_faster_scanning_guide():
 > ⚠️ **免責聲明**：所有速度估算為參考值，實際取決於網絡狀況、API 可用性及快取狀態。
     """)
 
+    # ── Fast Mode scanner.py info card ────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### ⚡ Fast Mode — scanner.py 每日盤後預掃描')
+    st.markdown("""
+`scanner.py` 係本系統附帶嘅獨立掃描腳本，每日盤後跑一次，將結果存入 Parquet，
+Streamlit App 只需讀取快取，唔做任何即時 yfinance 廣義掃描。
+
+**快速上手：**
+```bash
+# 最小測試（3隻）
+python scanner.py --tickers "AAPL,MSFT,SPY" --max-tickers 3
+
+# 預設精選池（約80隻）
+python scanner.py
+
+# 自定義 Universe
+python scanner.py --universe-file my_tickers.csv --benchmark SPY
+
+# 大型掃描（500隻）
+python scanner.py --universe-file sp500.csv --max-tickers 500
+```
+
+**關鍵優點：**
+- MongoDB **唔係必須**：Parquet + Pandas 係免費輕量方案
+- DuckDB + Parquet 比 MongoDB 更適合股票篩選
+- Streamlit 只讀快取，< 1 秒載入
+- 真正 8,000+ 全市場：夜間排程 (cron) 跑 scanner.py
+    """)
+
 
 # ── Universe selector compact control (for use inside radar module) ────────
 def _render_universe_selector_compact():
@@ -5607,6 +6124,7 @@ with st.sidebar:
         options=[
             '🗂️ Universe Manager',
             '🔥 當炒/低風險機會雷達',
+            '📡 市場實時雷達',
             '🔥 熱門板塊關係圖',
             '🎯 產業故事 Radar / Scorecard',
             '📡 新聞催化劑 / RS 方法選股',
@@ -5642,6 +6160,9 @@ if app_mode == '🗂️ Universe Manager':
 
 elif app_mode == '🔥 當炒/低風險機會雷達':
     render_radar_module()
+
+elif app_mode == '📡 市場實時雷達':
+    render_market_real_time_radar_page()
 
 elif app_mode == '🎯 產業故事 Radar / Scorecard':
     render_market_radar_module()
