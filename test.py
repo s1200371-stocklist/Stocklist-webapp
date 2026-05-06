@@ -3424,7 +3424,7 @@ def fetch_sidebar_market_data():
         data['FEAR_GREED'] = {'score': None, 'rating': 'N/A'}
 
     # ── FRED helper: parse CSV robustly, multi-strategy fetch ──
-    def _fred_csv(series_id, timeout=12):
+    def _fred_csv(series_id, timeout=5):
         """Fetch a FRED CSV with multiple fallback strategies.
         Returns list of (date_str, float_value) tuples, chronological order.
         Last element = most recent. Empty list if all strategies fail."""
@@ -6137,20 +6137,34 @@ with st.sidebar:
 
     _divider()
 
-    # ── Market Radar panel ──
-    render_sidebar_market_panel()
+    # ── Market Radar panel (lazy: opt-in to keep first paint fast) ──
+    # Initial cold load on Streamlit Cloud was hanging because the sidebar
+    # synchronously fetched ~9 FRED CSVs + a yfinance batch (~16 tickers)
+    # *before* anything could render. We now gate those calls behind a button.
+    if 'sidebar_market_loaded' not in st.session_state:
+        st.session_state.sidebar_market_loaded = False
 
-    _divider()
-
-    # ── Employment + Macro expanders (reuse cached data) ──
-    try:
-        _sb_m = fetch_sidebar_market_data()
-        render_sidebar_employment_expander(_sb_m)
-        render_sidebar_macro_expander(_sb_m)
+    if st.session_state.sidebar_market_loaded:
+        render_sidebar_market_panel()
         _divider()
-        render_macro_signal_sidebar(_sb_m)
-    except Exception as _e:
-        st.caption(f'⚠️ 宏觀數據載入失敗: {_e}')
+        try:
+            _sb_m = fetch_sidebar_market_data()
+            render_sidebar_employment_expander(_sb_m)
+            render_sidebar_macro_expander(_sb_m)
+            _divider()
+            render_macro_signal_sidebar(_sb_m)
+        except Exception as _e:
+            st.caption(f'⚠️ 宏觀數據載入失敗: {_e}')
+    else:
+        st.markdown(
+            "<div style='font-size:0.72rem;color:#888;padding:6px 0'>"
+            "📡 市場實時雷達 / 宏觀面板已暫停載入以加快首次開啟。"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button('📡 載入市場 / 宏觀數據', use_container_width=True, key='load_sidebar_mkt'):
+            st.session_state.sidebar_market_loaded = True
+            st.rerun()
 
 # ==========================================
 # 模組渲染
