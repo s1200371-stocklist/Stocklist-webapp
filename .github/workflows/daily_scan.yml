@@ -126,5 +126,10 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "chore: update scan data [skip ci]"
+            # If multiple manual/scheduled runs finish close together, the
+            # remote branch may move between checkout and push. Rebase once
+            # before pushing so a successful earlier scan does not make this
+            # run fail with a non-fast-forward rejection.
+            git pull --rebase origin "${GITHUB_REF_NAME:-main}"
             git push
           fi
