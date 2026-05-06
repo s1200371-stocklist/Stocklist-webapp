@@ -1269,11 +1269,30 @@ def render_hot_sectors_module():
     col_ctrl1, col_ctrl2 = st.columns([4, 1])
     with col_ctrl2:
         st.markdown('<br>', unsafe_allow_html=True)
-        if st.button('🔄 強制刷新', use_container_width=True, key='refresh_sectors'):
-            get_hot_sectors_by_etf_performance.clear()
-            analyze_hot_sectors_ai_dynamic.clear()
-            fetch_sector_performance_dynamic.clear()
-            st.rerun()
+        load_sectors = st.button(
+            '📡 載入 / 更新數據',
+            use_container_width=True,
+            key='load_sectors',
+            type='primary',
+        )
+        if load_sectors:
+            try:
+                get_hot_sectors_by_etf_performance.clear()
+                analyze_hot_sectors_ai_dynamic.clear()
+                fetch_sector_performance_dynamic.clear()
+            except Exception:
+                pass
+            st.session_state['hot_sectors_loaded'] = True
+
+    # Lazy gate: avoid heavy auto-fetch on first visit
+    if not st.session_state.get('hot_sectors_loaded'):
+        with col_ctrl1:
+            st.info(
+                '⚡ 快速模式：此頁需要抓取市場新聞、跑 AI 板塊分析、批量下載 ETF/個股 yfinance 數據，'
+                '預設 **不會自動載入**。\n\n'
+                '👉 按右邊 **「📡 載入 / 更新數據」** 才會發起抓取。'
+            )
+        return
 
     # ── Step 1: 抓新聞 ──
     with st.spinner('📰 抓取最新市場新聞...'):
@@ -1610,7 +1629,14 @@ def render_market_radar_module():
     ctrl_l, ctrl_r = st.columns([5, 1])
     with ctrl_r:
         st.markdown("<br>", unsafe_allow_html=True)
-        refresh_radar = st.button("🔄 刷新評分", use_container_width=True, key="refresh_radar")
+        load_radar = st.button(
+            "📡 載入 ETF 數據",
+            use_container_width=True,
+            key="load_radar_scorecard",
+            type='primary',
+        )
+        if load_radar:
+            st.session_state['radar_scorecard_loaded'] = True
 
     # ── 動態評分調整：拉取各主題代表 ETF 近5日表現，疊加到靜態分數上 ──
     @st.cache_data(ttl=600, show_spinner=False)
@@ -1637,17 +1663,26 @@ def render_market_radar_module():
         except:
             return {}
 
-    if refresh_radar:
+    if load_radar:
         try:
             _fetch_radar_etf_scores.clear()
         except:
             pass
 
-    with ctrl_l:
-        st.markdown("載入代表 ETF 近5日表現調整評分...")
-
-    with st.spinner("📡 抓取 ETF 實時數據..."):
-        etf_perfs = _fetch_radar_etf_scores()
+    # Lazy gate: avoid auto yfinance ETF fetch on first visit.
+    # Static scoring still renders so users can see the manual。
+    if st.session_state.get('radar_scorecard_loaded'):
+        with ctrl_l:
+            st.markdown("載入代表 ETF 近5日表現調整評分...")
+        with st.spinner("📡 抓取 ETF 實時數據..."):
+            etf_perfs = _fetch_radar_etf_scores()
+    else:
+        with ctrl_l:
+            st.info(
+                '⚡ 快速模式：預設只顯示靜態評分及主題說明，不自動抓取 ETF 數據。'
+                '按右邊「📡 載入 ETF 數據」才會即時抓取近5日 ETF 表現並動態調分。'
+            )
+        etf_perfs = {}
 
     # ── 計算動態分數（靜態分 + ETF表現微調，上限5，下限0）──
     def _dynamic_score(theme, etf_perfs):
@@ -2651,18 +2686,37 @@ def render_catalyst_screener_module():
         )
     with ctrl_r:
         st.markdown('<br>', unsafe_allow_html=True)
-        refresh_cat = st.button('🔄 刷新數據', use_container_width=True, key='refresh_catalyst')
+        load_cat = st.button(
+            '📡 載入 / 更新數據',
+            use_container_width=True,
+            key='load_catalyst',
+            type='primary',
+        )
 
-    if refresh_cat:
+    if load_cat:
         try:
             fetch_catalyst_rs_data.clear()
             fetch_ticker_news_sentiment.clear()
         except Exception:
             pass
-        st.rerun()
+        st.session_state['cat_screener_loaded'] = True
+        st.session_state['cat_screener_loaded_themes'] = list(selected_themes)
+        st.session_state['cat_screener_loaded_bench'] = benchmark
 
     if not selected_themes:
         st.info('請至少選擇一個催化劑主題。')
+        return
+
+    # Lazy gate: avoid auto-fetch on every render (page change / sidebar click).
+    # First-time visit shows a call-to-action; data only fetched after button click.
+    if not st.session_state.get('cat_screener_loaded'):
+        st.info(
+            '⚡ 快速模式：此頁的新聞、yfinance 及情緒抓取需要時間。'
+            '為避免拖慢整個 App，預設 **不會自動載入數據**。\n\n'
+            '👉 設定好上方主題 / 基準後，按 **「📡 載入 / 更新數據」** 才會發起抓取。'
+            '抓取一次後可直接調整篩選條件，不會重新發起網絡請求。'
+        )
+        st.caption('💡 大型 universe 建議改用 GitHub Actions scanner（盤後預掃描），或於 Universe Manager 限制掃描隻數。')
         return
 
     # Collect ALL candidate tickers (no RS truncation)
@@ -5288,7 +5342,12 @@ def render_radar_module():
             st.markdown('<br>', unsafe_allow_html=True)
             prefer_low_risk = st.checkbox('優先顯示低風險', value=False, key='radar_prefer_lowrisk')
             max_rows = st.number_input('最多顯示行數', min_value=5, max_value=100, value=30, step=5, key='radar_max_rows')
-            refresh_radar_btn = st.button('🔄 刷新', use_container_width=True, key='refresh_radar_main')
+            refresh_radar_btn = st.button(
+                '📡 載入 / 刷新',
+                use_container_width=True,
+                key='refresh_radar_main',
+                type='primary',
+            )
 
         if refresh_radar_btn:
             try:
@@ -5297,10 +5356,20 @@ def render_radar_module():
                 fetch_ma_data.clear()
             except Exception:
                 pass
-            st.rerun()
+            st.session_state['radar_live_loaded'] = True
 
         if not radar_themes:
             st.info('請至少選擇一個板塊。')
+            return
+
+        # Lazy gate: don't auto-fetch yfinance/news on every render.
+        # Only fetch after user explicitly clicks 「📡 載入 / 刷新」.
+        if not st.session_state.get('radar_live_loaded'):
+            st.info(
+                '⚡ 快速模式：Legacy 即時掃描預設不會自動發起 yfinance/news 抓取。'
+                '上面已有 Fast Mode 預掃描快取結果。'
+                '如需現場掃描，請先設定主題後按 **「📡 載入 / 刷新」**。'
+            )
             return
 
         # For broad universes, ensure radar_themes stays as selected (for theme ranking table).
@@ -6417,42 +6486,76 @@ elif app_mode == '📰 近月 AI 洞察 (廣東話版)':
 
 elif app_mode == '🕵️ 另類數據雷達 (6大維度)':
     st.title('🕵️ 另類數據雷達 (6大維度)')
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('**1. Reddit WSB 討論熱度 (Top 10)**')
-        r_df, r_msg = fetch_reddit_sentiment()
-        st.caption(r_msg); st.dataframe(r_df.head(10), use_container_width=True, hide_index=True)
-    with c2:
-        st.markdown('**2. StockTwits 全美熱搜榜 (Top 10)**')
-        t_df, t_msg = fetch_stocktwits_trending()
-        st.caption(t_msg); st.dataframe(t_df.head(10), use_container_width=True, hide_index=True)
-    c3, c4 = st.columns(2)
-    with c3:
-        st.markdown('**3. X / FinTwit 社交情緒熱度 (Top 10)**')
-        x_df, x_msg = fetch_x_sentiment()
-        st.caption(x_msg); st.dataframe(x_df.head(10), use_container_width=True, hide_index=True)
-    with c4:
-        st.markdown('**4. 高層 Insider 真金白銀買入 (全市場)**')
-        with st.spinner('🔍 抓取全市場真實 Insider 買入數據...'):
-            i_df, i_msg = fetch_insider_buying()
-        st.caption(i_msg)
-        st.dataframe(i_df.head(10), use_container_width=True, hide_index=True)
-    c5, c6 = st.columns(2)
-    with c5:
-        st.markdown('**5. 國會議員交易 (QuiverQuant 真實數據)**')
-        with st.spinner('🔍 從 QuiverQuant 抓取真實國會交易數據...'):
-            c_df, c_msg = fetch_congress_trades()
-        st.caption(c_msg); st.dataframe(c_df.head(10), use_container_width=True, hide_index=True)
-    with c6:
-        st.markdown('**6. 日本 2ch/5ch 海外散戶情緒**')
-        jp_df, jp_msg = fetch_5ch_sentiment()
-        st.caption(jp_msg); st.dataframe(jp_df.head(10), use_container_width=True, hide_index=True)
-    if st.button('🚀 啟動 AI 六維交叉博弈分析', type='primary', use_container_width=True):
-        with st.spinner('🧠 AI 正在進行多維度深度分析...'):
-            res = final_text_sanitize(analyze_alt_data_ai(r_df, t_df, x_df, i_df, c_df))
-            st.markdown('### 🤖 另類數據 AI 偵測深度報告')
-            with st.container(border=True):
-                st.markdown(res)
+    st.caption(
+        '同時抓取 6 個資料源（Reddit / StockTwits / X / Insider / Congress / 5ch），'
+        '預設不會自動抓取，按按鈕才載入。'
+    )
+
+    alt_top1, alt_top2 = st.columns([4, 1])
+    with alt_top2:
+        st.markdown('<br>', unsafe_allow_html=True)
+        load_alt = st.button(
+            '📡 載入 6 大數據源',
+            use_container_width=True,
+            key='load_alt_data',
+            type='primary',
+        )
+        if load_alt:
+            for _fn in (
+                'fetch_reddit_sentiment', 'fetch_stocktwits_trending',
+                'fetch_x_sentiment', 'fetch_insider_buying',
+                'fetch_congress_trades', 'fetch_5ch_sentiment',
+            ):
+                try:
+                    globals()[_fn].clear()
+                except Exception:
+                    pass
+            st.session_state['alt_data_loaded'] = True
+
+    if not st.session_state.get('alt_data_loaded'):
+        with alt_top1:
+            st.info(
+                '⚡ 快速模式：呢頁會同時抓取 6 個外部資料源（部分速度較慢或會失敗），'
+                '為避免拖慢全 App，預設 **唔會自動載入**。\n\n'
+                '👉 按右邊 **「📡 載入 6 大數據源」** 才會發起抓取。'
+            )
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('**1. Reddit WSB 討論熱度 (Top 10)**')
+            r_df, r_msg = fetch_reddit_sentiment()
+            st.caption(r_msg); st.dataframe(r_df.head(10), use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown('**2. StockTwits 全美熱搜榜 (Top 10)**')
+            t_df, t_msg = fetch_stocktwits_trending()
+            st.caption(t_msg); st.dataframe(t_df.head(10), use_container_width=True, hide_index=True)
+        c3, c4 = st.columns(2)
+        with c3:
+            st.markdown('**3. X / FinTwit 社交情緒熱度 (Top 10)**')
+            x_df, x_msg = fetch_x_sentiment()
+            st.caption(x_msg); st.dataframe(x_df.head(10), use_container_width=True, hide_index=True)
+        with c4:
+            st.markdown('**4. 高層 Insider 真金白銀買入 (全市場)**')
+            with st.spinner('🔍 抓取全市場真實 Insider 買入數據...'):
+                i_df, i_msg = fetch_insider_buying()
+            st.caption(i_msg)
+            st.dataframe(i_df.head(10), use_container_width=True, hide_index=True)
+        c5, c6 = st.columns(2)
+        with c5:
+            st.markdown('**5. 國會議員交易 (QuiverQuant 真實數據)**')
+            with st.spinner('🔍 從 QuiverQuant 抓取真實國會交易數據...'):
+                c_df, c_msg = fetch_congress_trades()
+            st.caption(c_msg); st.dataframe(c_df.head(10), use_container_width=True, hide_index=True)
+        with c6:
+            st.markdown('**6. 日本 2ch/5ch 海外散戶情緒**')
+            jp_df, jp_msg = fetch_5ch_sentiment()
+            st.caption(jp_msg); st.dataframe(jp_df.head(10), use_container_width=True, hide_index=True)
+        if st.button('🚀 啟動 AI 六維交叉博弈分析', type='primary', use_container_width=True):
+            with st.spinner('🧠 AI 正在進行多維度深度分析...'):
+                res = final_text_sanitize(analyze_alt_data_ai(r_df, t_df, x_df, i_df, c_df))
+                st.markdown('### 🤖 另類數據 AI 偵測深度報告')
+                with st.container(border=True):
+                    st.markdown(res)
 
 elif app_mode == '🔥 熱門板塊關係圖':
     render_hot_sectors_module()
