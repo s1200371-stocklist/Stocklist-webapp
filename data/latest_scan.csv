@@ -1,0 +1,4 @@
+ticker,latest_price,ret_5d,ret_1m,ret_3m,ret_ytd,bench_ret_5d,bench_ret_1m,bench_ret_3m,bench_ret_ytd,rel_5d,rel_1m,rel_3m,rs_status,ma20,ma50,distance_to_ma20_pct,distance_to_ma50_pct,distance_from_20d_high_pct,latest_volume,avg20_volume,volume_ratio,volume_signal,volatility_20d,setup_type,scan_timestamp,benchmark
+SPY,723.77,1.7,9.84,5.25,6.23,1.7,9.84,5.25,6.23,0.0,0.0,0.0,接近突破,704.6805,680.9518,2.71,6.29,0.0,31842935,52404722.0,0.61,量價背馳,12.26,接近爆發,2026-05-06 02:34:33,SPY
+AAPL,284.18,4.98,9.78,5.55,4.96,1.7,9.84,5.25,6.23,3.28,-0.06,0.3,接近突破,268.7915,261.8236,5.73,8.54,0.0,47037582,45916659.0,1.02,正常量能,26.31,接近爆發,2026-05-06 02:34:33,SPY
+MSFT,411.38,-4.16,10.33,0.27,-12.82,1.7,9.84,5.25,6.23,-5.86,0.49,-4.98,接近突破,409.5645,396.9764,0.44,3.63,-4.98,23160604,35400620.0,0.65,縮量回踩,34.32,低風險回踩,2026-05-06 02:34:33,SPY

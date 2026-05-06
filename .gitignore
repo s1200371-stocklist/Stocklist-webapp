@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.DS_Store
+.ipynb_checkpoints/
+
+# Transient scan outputs (keep latest_scan.* as a demo cache for the app)
+data/test_scan.*
+data/smoke_test.*
+data/*.tmp

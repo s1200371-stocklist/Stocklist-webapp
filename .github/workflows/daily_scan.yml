@@ -1,0 +1,130 @@
+name: Daily Market Scanner
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ──────────────────────────────────────────────────────────────────────────────
+on:
+  # Manual run from the Actions tab
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: 'Comma-separated tickers (leave blank for curated pool)'
+        required: false
+        default: ''
+      universe_file:
+        description: 'Path to a CSV universe file checked in to the repo'
+        required: false
+        default: ''
+      benchmark:
+        description: 'Benchmark ticker'
+        required: false
+        default: 'SPY'
+      max_tickers:
+        description: 'Max tickers to scan (0 = no limit)'
+        required: false
+        default: '0'
+      commit_results:
+        description: 'Commit data/ back to repo after scan? (true / false)'
+        required: false
+        default: 'false'
+
+  # Scheduled: runs at 22:30 UTC on weekdays
+  # US market closes 4 pm ET.
+  #   During US EDT (Mar–Nov) → 4 pm ET = 20:00 UTC → 22:30 UTC is ~2.5 h after close ✓
+  #   During US EST (Nov–Mar) → 4 pm ET = 21:00 UTC → 22:30 UTC is ~1.5 h after close ✓
+  # HKT = UTC+8: 22:30 UTC = 06:30 HKT (next morning) — data will be ready when you wake up.
+  schedule:
+    - cron: '30 22 * * 1-5'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Jobs
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+  scan:
+    name: Run Market Scanner
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            pandas \
+            yfinance \
+            numpy \
+            pyarrow \
+            requests
+
+      # 4. Build scanner arguments
+      #    For scheduled runs all inputs are empty strings; fall back to defaults.
+      - name: Build scanner arguments
+        id: args
+        run: |
+          TICKERS="${{ github.event.inputs.tickers }}"
+          UNIVERSE="${{ github.event.inputs.universe_file }}"
+          BENCHMARK="${{ github.event.inputs.benchmark }}"
+          MAX_TICKERS="${{ github.event.inputs.max_tickers }}"
+
+          # Fall back to defaults when triggered by schedule
+          [ -z "$BENCHMARK" ]    && BENCHMARK="SPY"
+          [ -z "$MAX_TICKERS" ]  && MAX_TICKERS="0"
+
+          CMD="python scanner.py --benchmark $BENCHMARK --max-tickers $MAX_TICKERS"
+
+          if [ -n "$TICKERS" ]; then
+            CMD="$CMD --tickers \"$TICKERS\""
+          fi
+
+          if [ -n "$UNIVERSE" ]; then
+            CMD="$CMD --universe-file \"$UNIVERSE\""
+          fi
+
+          echo "cmd=$CMD" >> "$GITHUB_OUTPUT"
+
+      # 5. Run scanner
+      - name: Run scanner.py
+        run: |
+          eval "${{ steps.args.outputs.cmd }}"
+
+      # 6. Upload scan artifacts (always, even on failure, so partial results survive)
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-scan-${{ github.run_number }}
+          path: |
+            data/latest_scan.parquet
+            data/latest_scan.csv
+          if-no-files-found: warn
+          retention-days: 30
+
+      # 7. (Optional) Commit data files back to the repo
+      #    Only runs when commit_results == 'true' (manual dispatch) OR
+      #    COMMIT_RESULTS secret/variable is set to 'true' for scheduled runs.
+      #    The workflow only fires on schedule/dispatch so there is no loop risk.
+      - name: Commit scan results to repo
+        if: |
+          github.event.inputs.commit_results == 'true' ||
+          vars.COMMIT_RESULTS == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/latest_scan.parquet data/latest_scan.csv || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: update scan data [skip ci]"
+            git push
+          fi

@@ -1,8 +1,10 @@
 streamlit
 pandas
+numpy
 yfinance
 finvizfinance
 requests
 lxml
 html5lib
 matplotlib
+pyarrow
