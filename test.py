@@ -4687,6 +4687,10 @@ def render_radar_module():
     # ── Universe Info Card ─────────────────────────────────────────
     _universe_info_card()
 
+    # ── Universe Selector (compact bar) ───────────────────────────
+    _init_universe_session_state()
+    _render_universe_selector_compact()
+
         # ── Controls ────────────────────────────────────────────────────
     col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 2, 1])
     with col_ctrl1:
@@ -4733,12 +4737,30 @@ def render_radar_module():
         st.info('請至少選擇一個板塊。')
         return
 
+    # For broad universes, ensure radar_themes stays as selected (for theme ranking table).
+    # The candidate_tickers section below will override tickers from the active universe.
+
     # ── Collect candidate tickers ───────────────────────────────────
-    candidate_tickers = []
-    for theme in radar_themes:
-        for t in CATALYST_THEME_MAP[theme].get('tickers', {}):
-            if t not in candidate_tickers:
-                candidate_tickers.append(t)
+    _active_universe_name = st.session_state.get('active_universe_name', '主題精選池')
+    _max_scan_limit = st.session_state.get('universe_max_scan_limit', 150)
+    _news_enabled = st.session_state.get('universe_news_enabled', True)
+
+    if _active_universe_name == '主題精選池':
+        # Default: iterate selected themes from CATALYST_THEME_MAP
+        candidate_tickers = []
+        for theme in radar_themes:
+            for t in CATALYST_THEME_MAP[theme].get('tickers', {}):
+                if t not in candidate_tickers:
+                    candidate_tickers.append(t)
+    else:
+        # Broad universe: use active universe tickers (capped to max_scan_limit)
+        _universe_pool = get_active_universe_tickers()
+        candidate_tickers = list(_universe_pool[:_max_scan_limit])
+        if len(_universe_pool) > _max_scan_limit:
+            st.warning(
+                f'⚠️ 當前 Universe「{_active_universe_name}」共 {len(_universe_pool)} 隻，'
+                f'已限制掃描首 {_max_scan_limit} 隻。可於 Universe Manager 調整上限。'
+            )
 
     # Include theme ETFs for heatmap
     theme_etfs = list(THEME_ETF_MAP.values())
@@ -4758,7 +4780,16 @@ def render_radar_module():
 
     with st.spinner('分析新聞情緒...'):
         try:
-            sentiment_data = fetch_ticker_news_sentiment(tuple(candidate_tickers))
+            _skip_news = (not _news_enabled) or (len(candidate_tickers) > 100 and _active_universe_name != '主題精選池')
+            if _skip_news:
+                sentiment_data = {}
+                if len(candidate_tickers) > 100 and _news_enabled:
+                    st.info(
+                        f'💡 廣義 Universe（{len(candidate_tickers)} 隻）已自動停用新聞情緒分析以加快掃描速度。'
+                        '如需啟用，請於 Universe Manager → ⚙️ 設定中開啟「新聞情緒分析」。'
+                    )
+            else:
+                sentiment_data = fetch_ticker_news_sentiment(tuple(candidate_tickers))
         except Exception:
             sentiment_data = {}
 
@@ -4923,6 +4954,635 @@ def render_radar_module():
         """)
 
 
+
+# ==========================================
+# 🗂️ Universe Manager – 掃描範圍管理器
+# ==========================================
+# Session-state keys:
+#   active_universe_name  : str  – e.g. '主題精選池'
+#   active_universe_tickers: list[str]
+#   universe_news_enabled : bool – whether to fetch per-ticker news in radar
+
+# ── Static fallback lists ──────────────────────────────────────────────────
+_SP500_STATIC_FALLBACK = [
+    'AAPL','MSFT','AMZN','NVDA','GOOGL','META','TSLA','BRK-B','AVGO','JPM',
+    'UNH','XOM','V','MA','HD','LLY','ABBV','MRK','PEP','COST','BAC','PG',
+    'CVX','ORCL','ADBE','NFLX','CRM','TMO','AMD','WMT','ABT','ACN','QCOM',
+    'DIS','INTC','GE','NEE','PM','T','MCD','UPS','LOW','HON','IBM','CAT',
+    'INTU','MDT','GS','AMT','SPGI','AXP','ISRG','DE','AMAT','BKNG','GILD',
+    'LRCX','PLD','NOW','ADI','KLAC','TXN','PANW','SYK','BSX','MMC','CB',
+    'ETN','REGN','VRTX','CI','MO','BDX','ADP','ZTS','SO','TJX','C','CME',
+    'EL','AON','ITW','FCX','CRWD','WM','D','ECL','APH','NSC','MMM','MRNA',
+    'CEG','VST','ENPH','TSCO','MSCI','DHR','PCG','PSX','SNPS','CDNS','ORLY',
+]
+
+_NDX100_STATIC_FALLBACK = [
+    'AAPL','MSFT','AMZN','NVDA','META','GOOGL','GOOG','TSLA','AVGO','COST',
+    'NFLX','ASML','AMD','QCOM','TMUS','INTC','CSCO','INTU','TXN','AMAT',
+    'MU','LRCX','KLAC','ADI','MRVL','PANW','CRWD','SNPS','CDNS','MELI',
+    'ORLY','REGN','VRTX','PYPL','ISRG','ADP','MAR','CSX','CTAS','PCAR',
+    'FISV','IDXX','CEG','DASH','BKNG','KDP','ADSK','ROST','FAST','EXC',
+    'SIRI','GEHC','FANG','BKR','XEL','CTSH','VRSK','MNST','DXCM','WBA',
+    'ON','CPRT','PAYX','BIIB','ILMN','GILD','CHTR','EA','ZS','ANSS','SBUX',
+    'ABNB','ALGN','TEAM','DDOG','ZM','DOCU','SGEN','ODFL','FTNT','WBD',
+]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_sp500_tickers():
+    """Fetch S&P 500 tickers from Wikipedia. Cached 24 hours. Falls back to static list."""
+    try:
+        tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+        df = tables[0]
+        col = next((c for c in df.columns if 'symbol' in c.lower() or 'ticker' in c.lower()), None)
+        if col is None:
+            col = df.columns[0]
+        tickers = [str(t).strip().replace('.', '-') for t in df[col].tolist() if isinstance(t, str) and len(t) <= 5]
+        if len(tickers) >= 400:
+            return tickers, '🟢 Wikipedia S&P 500 (實時)'
+    except Exception:
+        pass
+    return _SP500_STATIC_FALLBACK.copy(), '🟡 S&P 500 靜態備援清單 (100隻代表股)'
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_nasdaq100_tickers():
+    """Fetch Nasdaq-100 tickers from Wikipedia. Cached 24 hours. Falls back to static list."""
+    try:
+        tables = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100')
+        for df in tables:
+            cols_lower = [c.lower() for c in df.columns]
+            if any('ticker' in c or 'symbol' in c for c in cols_lower):
+                col = next(c for c in df.columns if 'ticker' in c.lower() or 'symbol' in c.lower())
+                tickers = [str(t).strip().replace('.', '-') for t in df[col].tolist()
+                           if isinstance(t, str) and 1 < len(t) <= 5]
+                if len(tickers) >= 80:
+                    return tickers, '🟢 Wikipedia Nasdaq-100 (實時)'
+    except Exception:
+        pass
+    return _NDX100_STATIC_FALLBACK.copy(), '🟡 Nasdaq-100 靜態備援清單'
+
+
+def parse_manual_tickers(text):
+    """Parse comma/newline separated ticker list. Returns deduplicated, uppercased list."""
+    if not text or not text.strip():
+        return []
+    import re
+    raw = re.split(r'[,\n\r\t;]+', text)
+    seen = set()
+    result = []
+    for t in raw:
+        t = t.strip().upper()
+        t = re.sub(r'[^A-Z0-9.\-]', '', t)
+        if t and t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
+
+def get_theme_pool_tickers():
+    """Return all unique tickers from the curated CATALYST_THEME_MAP."""
+    seen = set()
+    result = []
+    for tdata in CATALYST_THEME_MAP.values():
+        for ticker in tdata.get('tickers', {}).keys():
+            if ticker not in seen:
+                seen.add(ticker)
+                result.append(ticker)
+    return result
+
+
+def get_active_universe_tickers():
+    """Return the currently active universe tickers from session_state.
+    Falls back to the curated theme pool if nothing is set."""
+    return st.session_state.get('active_universe_tickers', get_theme_pool_tickers())
+
+
+def build_active_universe_theme_map():
+    """Build a CATALYST_THEME_MAP-compatible dict for the active universe.
+    For curated pool, returns CATALYST_THEME_MAP directly.
+    For other universes, groups all tickers under 'Custom Universe'."""
+    name = st.session_state.get('active_universe_name', '主題精選池')
+    if name == '主題精選池':
+        return CATALYST_THEME_MAP
+    tickers = get_active_universe_tickers()
+    # Build a synthetic map grouped by custom universe
+    return {
+        '🌐 Custom Universe': {
+            'keywords': [],
+            'etf': 'SPY',
+            'tickers': {t: t for t in tickers},
+            'catalyst_tags': ['Custom Universe'],
+        }
+    }
+
+
+def _init_universe_session_state():
+    """Ensure universe session state keys are initialised."""
+    if 'active_universe_name' not in st.session_state:
+        st.session_state['active_universe_name'] = '主題精選池'
+    if 'active_universe_tickers' not in st.session_state:
+        st.session_state['active_universe_tickers'] = get_theme_pool_tickers()
+    if 'universe_news_enabled' not in st.session_state:
+        st.session_state['universe_news_enabled'] = True
+
+
+# ── Bulk OHLCV fetch helper ────────────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_bulk_ohlcv(tickers_tuple, period='6mo'):
+    """
+    Batch-download OHLCV for a list of tickers in one yfinance call.
+    Returns dict: {ticker: {'close': pd.Series, 'volume': pd.Series}}
+    Uses a single batched API call for efficiency.
+    """
+    tickers = list(tickers_tuple)
+    result = {}
+    if not tickers:
+        return result
+    try:
+        raw = yf.download(
+            tickers, period=period, interval='1d',
+            progress=False, auto_adjust=True,
+            group_by='column', threads=True
+        )
+        if raw.empty:
+            return result
+        closes = raw['Close'] if ('Close' in raw.columns.get_level_values(0)
+                                   if isinstance(raw.columns, pd.MultiIndex) else 'Close' in raw.columns) else raw
+        volumes = None
+        try:
+            if isinstance(raw.columns, pd.MultiIndex) and 'Volume' in raw.columns.get_level_values(0):
+                volumes = raw['Volume']
+        except Exception:
+            pass
+        for ticker in tickers:
+            try:
+                c = (closes[ticker].dropna() if ticker in closes.columns
+                     else pd.Series(dtype=float))
+                v = (volumes[ticker].dropna() if volumes is not None and ticker in volumes.columns
+                     else pd.Series(dtype=float))
+                result[ticker] = {'close': c, 'volume': v}
+            except Exception:
+                result[ticker] = {'close': pd.Series(dtype=float), 'volume': pd.Series(dtype=float)}
+    except Exception:
+        pass
+    return result
+
+
+# ── Universe Manager renderer ──────────────────────────────────────────────
+def render_universe_manager_module():
+    """Main render function for 🗂️ Universe Manager."""
+    _init_universe_session_state()
+
+    st.title('🗂️ Universe Manager — 掃描範圍管理器')
+    st.caption(
+        '選擇或自定義雷達掃描嘅股票池。唔同範圍有唔同速度：主題精選池最快，S&P 500/Nasdaq 100 中速，'
+        '全手動輸入最靈活。設定後雷達模組會自動採用所選池。'
+    )
+
+    # ── Current universe status bar ──────────────────────────────────────
+    cur_name = st.session_state.get('active_universe_name', '主題精選池')
+    cur_tickers = st.session_state.get('active_universe_tickers', [])
+    news_enabled = st.session_state.get('universe_news_enabled', True)
+
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,#0a1a10,#1a3020);border:1px solid #2a8a50;"
+        f"border-radius:10px;padding:12px 16px;margin-bottom:16px'>"
+        f"<div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
+        f"<span style='font-size:0.9rem;font-weight:700;color:#00C851'>✅ 當前啟用範圍</span>"
+        f"<span style='background:#003a18;color:#00C851;padding:3px 10px;border-radius:8px;"
+        f"font-size:0.82rem;font-weight:bold'>{cur_name}</span>"
+        f"<span style='color:#aaa;font-size:0.82rem'>共 <b style='color:#4FC3F7'>{len(cur_tickers)}</b> 隻 Ticker</span>"
+        f"<span style='color:#aaa;font-size:0.8rem'>｜ 新聞情緒: "
+        f"<b style='color:{'#00C851' if news_enabled else '#888'}'>{'✅ 開啟' if news_enabled else '❌ 關閉'}</b></span>"
+        f"</div></div>",
+        unsafe_allow_html=True
+    )
+
+    # ── Universe cards ───────────────────────────────────────────────────
+    st.markdown('### 🌐 選擇掃描範圍')
+    st.markdown(
+        "<div style='font-size:0.76rem;color:#888;margin-bottom:10px'>"
+        "每個選項顯示大概速度、適用場合及 Ticker 數量。點擊「套用」即時切換。"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    # Card definitions
+    UNIVERSE_CARDS = [
+        {
+            'id': '主題精選池',
+            'icon': '🎯',
+            'title': '主題精選池 (預設)',
+            'desc': '涵蓋 AI、半導體、能源、醫療、消費等 11 個熱門主題板塊，精選約 70 隻最具代表性美股。',
+            'speed': '⚡ Fast',
+            'speed_color': '#00C851',
+            'recommended': '日常快速掃描、主題輪動分析',
+            'ticker_count': lambda: len(get_theme_pool_tickers()),
+            'news_default': True,
+        },
+        {
+            'id': 'S&P 500',
+            'icon': '📊',
+            'title': 'S&P 500',
+            'desc': '美國最大 500 家上市公司。涵蓋面廣，可捕捉大盤輪動機會。首次載入需從 Wikipedia 抓取清單。',
+            'speed': '🟡 Medium',
+            'speed_color': '#F9A825',
+            'recommended': '大盤廣泛掃描，建議限制至 100-200 隻',
+            'ticker_count': lambda: 500,
+            'news_default': False,
+        },
+        {
+            'id': 'Nasdaq 100',
+            'icon': '💻',
+            'title': 'Nasdaq 100',
+            'desc': '納斯達克 100 家大型非金融科技及增長型企業。科技/AI 集中度高。',
+            'speed': '🟡 Medium',
+            'speed_color': '#F9A825',
+            'recommended': '科技/成長股輪動分析，建議新聞關閉',
+            'ticker_count': lambda: 100,
+            'news_default': False,
+        },
+        {
+            'id': '手動輸入',
+            'icon': '✏️',
+            'title': '手動輸入 Ticker 清單',
+            'desc': '自行輸入任意美股 Ticker，用逗號或換行分隔。最靈活，可針對特定觀察名單。',
+            'speed': '⚡ Fast (depends on count)',
+            'speed_color': '#4FC3F7',
+            'recommended': '個人觀察清單、特定組合監控',
+            'ticker_count': lambda: len(st.session_state.get('manual_tickers_parsed', [])),
+            'news_default': True,
+        },
+        {
+            'id': 'CSV 上載',
+            'icon': '📁',
+            'title': 'CSV 上載',
+            'desc': '上載 CSV 檔案，自動識別 ticker/symbol 欄或使用第一欄。支援標準格式。',
+            'speed': '⚡ Fast (depends on count)',
+            'speed_color': '#4FC3F7',
+            'recommended': '批量輸入大量 Ticker',
+            'ticker_count': lambda: len(st.session_state.get('csv_tickers_parsed', [])),
+            'news_default': False,
+        },
+    ]
+
+    # Render cards in grid
+    card_cols = st.columns(len(UNIVERSE_CARDS))
+    selected_universe_id = st.session_state.get('_universe_card_selected', '主題精選池')
+
+    for col, card in zip(card_cols, UNIVERSE_CARDS):
+        is_active = cur_name == card['id']
+        border_color = '#00C851' if is_active else '#2a3a4a'
+        bg_color = '#0a1a10' if is_active else '#0d1117'
+        count = card['ticker_count']()
+        with col:
+            st.markdown(
+                f"<div style='background:{bg_color};border:2px solid {border_color};"
+                f"border-radius:10px;padding:12px 10px;min-height:160px;position:relative'>"
+                f"<div style='font-size:1.3rem'>{card['icon']}</div>"
+                f"<div style='font-size:0.82rem;font-weight:700;color:#eee;margin:4px 0'>{card['title']}</div>"
+                f"<div style='font-size:0.68rem;color:#888;line-height:1.4;margin-bottom:6px'>{card['desc']}</div>"
+                f"<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px'>"
+                f"<span style='color:{card['speed_color']};font-size:0.68rem;font-weight:bold'>{card['speed']}</span>"
+                f"<span style='background:#1a2a3a;color:#7EC8E3;padding:1px 6px;border-radius:6px;font-size:0.65rem'>"
+                f"~{count} tickers</span>"
+                f"</div>"
+                f"{'<div style=\"background:#003a18;color:#00C851;font-size:0.63rem;padding:1px 6px;border-radius:6px;display:inline\">✅ 已啟用</div>' if is_active else ''}"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            if st.button(f"套用 {card['icon']}", key=f"apply_universe_{card['id']}", use_container_width=True):
+                st.session_state['_universe_card_selected'] = card['id']
+                st.session_state['_universe_apply_pending'] = card['id']
+
+    # ── Manual input section ──────────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### ✏️ 手動輸入 / CSV 設定')
+    tab_manual, tab_csv = st.tabs(['✏️ 手動輸入 Ticker', '📁 CSV 上載'])
+
+    with tab_manual:
+        manual_text = st.text_area(
+            '輸入 Ticker（用逗號或換行分隔）：',
+            value=st.session_state.get('_manual_input_text', ''),
+            height=120,
+            placeholder='例如:\nNVDA, AAPL, TSLA, AMD\nMSFT\nAMZN',
+            key='manual_ticker_textarea',
+        )
+        if manual_text:
+            parsed = parse_manual_tickers(manual_text)
+            st.session_state['manual_tickers_parsed'] = parsed
+            st.session_state['_manual_input_text'] = manual_text
+            if parsed:
+                st.markdown(
+                    f"<div style='font-size:0.75rem;color:#00C851;margin-bottom:4px'>"
+                    f"✅ 解析到 <b>{len(parsed)}</b> 隻 Ticker</div>",
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    ' '.join(
+                        f"<span style='background:#1A2A3A;color:#4FC3F7;padding:1px 6px;"
+                        f"border-radius:4px;font-size:0.7rem;margin:2px;display:inline-block'>{t}</span>"
+                        for t in parsed[:30]
+                    ) + (f"<span style='color:#666;font-size:0.7rem'> ... +{len(parsed)-30} 隻</span>" if len(parsed) > 30 else ''),
+                    unsafe_allow_html=True
+                )
+
+        if st.button('✏️ 套用手動清單', key='apply_manual_tickers',
+                     disabled=not st.session_state.get('manual_tickers_parsed')):
+            st.session_state['_universe_apply_pending'] = '手動輸入'
+
+    with tab_csv:
+        uploaded_file = st.file_uploader(
+            '上載 CSV 檔案（需包含 ticker 或 symbol 欄，或使用第一欄）',
+            type=['csv'],
+            key='universe_csv_uploader'
+        )
+        if uploaded_file is not None:
+            try:
+                import io
+                csv_df = pd.read_csv(io.BytesIO(uploaded_file.read()))
+                # Try to find ticker column
+                col_map = {c.lower(): c for c in csv_df.columns}
+                ticker_col = (
+                    col_map.get('ticker') or col_map.get('symbol') or
+                    col_map.get('tickers') or col_map.get('symbols') or
+                    csv_df.columns[0]
+                )
+                raw_tickers = csv_df[ticker_col].astype(str).tolist()
+                parsed_csv = parse_manual_tickers(','.join(raw_tickers))
+                st.session_state['csv_tickers_parsed'] = parsed_csv
+                st.success(f'✅ CSV 解析成功：{len(parsed_csv)} 隻 Ticker，來自欄位「{ticker_col}」')
+                if parsed_csv:
+                    st.markdown(
+                        ' '.join(
+                            f"<span style='background:#1A2A3A;color:#4FC3F7;padding:1px 6px;"
+                            f"border-radius:4px;font-size:0.7rem;margin:2px;display:inline-block'>{t}</span>"
+                            for t in parsed_csv[:20]
+                        ) + (f"<span style='color:#666;font-size:0.7rem'> ... +{len(parsed_csv)-20} 隻</span>" if len(parsed_csv) > 20 else ''),
+                        unsafe_allow_html=True
+                    )
+            except Exception as e:
+                st.error(f'⚠️ CSV 解析失敗: {e}')
+
+        if st.button('📁 套用 CSV 清單', key='apply_csv_tickers',
+                     disabled=not st.session_state.get('csv_tickers_parsed')):
+            st.session_state['_universe_apply_pending'] = 'CSV 上載'
+
+    # ── Max ticker limit control ──────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### ⚙️ 掃描設定')
+    col_set1, col_set2, col_set3 = st.columns(3)
+    with col_set1:
+        max_scan_limit = st.number_input(
+            '最多掃描 Ticker 數量（避免 yfinance 速率限制）',
+            min_value=10, max_value=500, value=150, step=10,
+            key='universe_max_scan_limit',
+            help='超過 100 隻建議關閉新聞情緒以加快速度'
+        )
+    with col_set2:
+        news_toggle = st.checkbox(
+            '開啟新聞情緒分析',
+            value=st.session_state.get('universe_news_enabled', True),
+            key='universe_news_toggle',
+            help='廣泛掃描（>100 隻）建議關閉，否則會很慢'
+        )
+    with col_set3:
+        st.markdown('<br>', unsafe_allow_html=True)
+        if st.button('🔄 重設至主題精選池', key='reset_to_theme_pool', use_container_width=True):
+            st.session_state['active_universe_name'] = '主題精選池'
+            st.session_state['active_universe_tickers'] = get_theme_pool_tickers()
+            st.session_state['universe_news_enabled'] = True
+            st.success('✅ 已重設至主題精選池')
+            st.rerun()
+
+    # ── Apply pending universe ────────────────────────────────────────────
+    pending = st.session_state.pop('_universe_apply_pending', None)
+    if pending:
+        _apply_universe(pending, max_scan_limit, news_toggle)
+        st.rerun()
+
+    # Also apply news toggle update
+    if st.session_state.get('universe_news_toggle') != st.session_state.get('universe_news_enabled'):
+        st.session_state['universe_news_enabled'] = news_toggle
+
+    # ── Data health warning ──────────────────────────────────────────────
+    st.markdown('---')
+    _n = len(cur_tickers)
+    if _n > 200:
+        st.warning(
+            f'⚠️ **數據健康警告**：當前池有 {_n} 隻股票。yfinance 免費批量下載在超過 200 隻時容易遭到速率限制（429 錯誤）。'
+            '建議：① 限制最多掃描數量 ② 關閉新聞情緒 ③ 使用分段掃描 ④ 或考慮 Polygon.io / Tiingo 等專業 API。'
+        )
+    elif _n > 100:
+        st.info(
+            f'ℹ️ 當前池有 {_n} 隻股票。建議關閉新聞情緒分析，或設定最多掃描 ≤ 100 隻以保持速度。'
+        )
+
+    # ── 點樣掃得快啲 panel ────────────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('### ⚡ 點樣掃得快啲 — 加速掃描指南')
+    _render_faster_scanning_guide()
+
+
+def _apply_universe(universe_id, max_scan_limit, news_enabled):
+    """Apply the selected universe to session state."""
+    _init_universe_session_state()
+
+    if universe_id == '主題精選池':
+        tickers = get_theme_pool_tickers()
+        st.session_state['active_universe_name'] = '主題精選池'
+        st.session_state['active_universe_tickers'] = tickers
+        st.session_state['universe_news_enabled'] = True
+        st.success(f'✅ 已切換至主題精選池（{len(tickers)} 隻精選股票）')
+
+    elif universe_id == 'S&P 500':
+        with st.spinner('📡 從 Wikipedia 抓取 S&P 500 清單...'):
+            tickers, msg = fetch_sp500_tickers()
+        tickers = tickers[:max_scan_limit]
+        st.session_state['active_universe_name'] = 'S&P 500'
+        st.session_state['active_universe_tickers'] = tickers
+        st.session_state['universe_news_enabled'] = news_enabled
+        st.success(f'✅ 已切換至 S&P 500（{msg}，採用 {len(tickers)} 隻）')
+
+    elif universe_id == 'Nasdaq 100':
+        with st.spinner('📡 從 Wikipedia 抓取 Nasdaq-100 清單...'):
+            tickers, msg = fetch_nasdaq100_tickers()
+        tickers = tickers[:max_scan_limit]
+        st.session_state['active_universe_name'] = 'Nasdaq 100'
+        st.session_state['active_universe_tickers'] = tickers
+        st.session_state['universe_news_enabled'] = news_enabled
+        st.success(f'✅ 已切換至 Nasdaq 100（{msg}，採用 {len(tickers)} 隻）')
+
+    elif universe_id == '手動輸入':
+        tickers = st.session_state.get('manual_tickers_parsed', [])
+        tickers = tickers[:max_scan_limit]
+        if not tickers:
+            st.error('⚠️ 手動清單為空，請先輸入 Ticker。')
+            return
+        st.session_state['active_universe_name'] = '手動輸入'
+        st.session_state['active_universe_tickers'] = tickers
+        st.session_state['universe_news_enabled'] = news_enabled
+        st.success(f'✅ 已套用手動清單（{len(tickers)} 隻）')
+
+    elif universe_id == 'CSV 上載':
+        tickers = st.session_state.get('csv_tickers_parsed', [])
+        tickers = tickers[:max_scan_limit]
+        if not tickers:
+            st.error('⚠️ CSV 清單為空，請先上載 CSV 檔案。')
+            return
+        st.session_state['active_universe_name'] = 'CSV 上載'
+        st.session_state['active_universe_tickers'] = tickers
+        st.session_state['universe_news_enabled'] = news_enabled
+        st.success(f'✅ 已套用 CSV 清單（{len(tickers)} 隻）')
+
+
+def _render_faster_scanning_guide():
+    """Render the faster scanning educational panel."""
+    st.markdown(
+        "<div style='background:#0a1020;border:1px solid #2a3a5a;border-radius:10px;padding:16px;margin-bottom:12px'>"
+        "<div style='font-size:0.92rem;font-weight:700;color:#4FC3F7;margin-bottom:10px'>"
+        "🚀 六大加速方法 — 點解依個 App 掃唔完全市場 8,000+ 美股？</div>"
+        "<div style='font-size:0.78rem;color:#aaa;line-height:1.6'>",
+        unsafe_allow_html=True
+    )
+
+    tips = [
+        {
+            'icon': '1️⃣',
+            'title': '兩階段掃描 (Two-Stage Scan)',
+            'color': '#00C851',
+            'body': (
+                '第一階段：用 yfinance 批量下載所有 Ticker 嘅價格/成交量，快速篩走 RS 差同無動能嘅股票，'
+                '縮短至 20-50 隻候選。'
+                '第二階段：只對候選股做新聞/情緒分析（最慢嘅部分）。'
+                '→ 本 App 已採用此邏輯：「情緒分析」只係喺板塊候選池上做，唔係全市場。'
+            ),
+        },
+        {
+            'icon': '2️⃣',
+            'title': '批量 yfinance 下載 (Batch Download)',
+            'color': '#4FC3F7',
+            'body': (
+                '唔好逐隻 ticker 叫 yfinance.Ticker(t).history()，'
+                '應該用 yf.download([list of tickers], period="6mo") 一次過下載。'
+                '本 App 嘅 fetch_bulk_ohlcv() 同 fetch_catalyst_rs_data() 已實現批量下載。'
+                '100 隻 ticker 批量 vs 逐隻可節省 5-10 倍時間。'
+            ),
+        },
+        {
+            'icon': '3️⃣',
+            'title': 'Streamlit 快取 (Cache EOD Prices)',
+            'color': '#F9A825',
+            'body': (
+                '本 App 用 @st.cache_data(ttl=3600) 快取所有 yfinance 數據（1小時），'
+                '唔係每次互動都重新抓取。'
+                '更佳做法：用 CSV/Parquet 本地快取每日收盤價，只係盤前更新一次，'
+                '日內所有請求讀快取。'
+            ),
+        },
+        {
+            'icon': '4️⃣',
+            'title': '預計算夜間批次 (Precompute Nightly)',
+            'color': '#FF8C00',
+            'body': (
+                '終極方案：每晚 00:00 跑一次 Python 腳本，'
+                '批量下載全市場/自選池嘅 OHLCV、計算 RS/MA/成交量訊號，'
+                '結果存入 CSV 或 Parquet 檔案。'
+                'Streamlit App 只係讀預計算結果，唔做實時計算。'
+                '掃 500 隻股票只需數秒而非分鐘。'
+            ),
+        },
+        {
+            'icon': '5️⃣',
+            'title': '專業 API / 本地數據庫',
+            'color': '#CE93D8',
+            'body': (
+                '免費 yfinance 有速率限制，不適合全市場 8,000+ 掃描。'
+                '可考慮以下方案（各有取捨）：\n'
+                '• Polygon.io — 美股全量實時/歷史數據，免費層有限額\n'
+                '• Tiingo — EOD 數據 API，免費層500 隻/日\n'
+                '• Financial Modeling Prep (FMP) — 財報+價格，免費250次/日\n'
+                '• Alpaca Markets — 免費股票數據 API（需帳戶）\n'
+                '• Stooq / NasdaqTrader — 可下載歷史 CSV，本地儲存\n'
+                '• Interactive Brokers API — 需帳戶，但數據完整'
+            ),
+        },
+        {
+            'icon': '6️⃣',
+            'title': 'DuckDB / Polars 本地向量化掃描',
+            'color': '#FF6B6B',
+            'body': (
+                '若數據已本地化（Parquet格式），用 DuckDB SQL 或 Polars（比 pandas 快 5-20x）'
+                '做向量化篩選，可喺毫秒內過濾 8,000+ 股票。'
+                '配合預計算夜間批次，係最快嘅全市場方案。'
+                '參考：duckdb.org 同 pola.rs'
+            ),
+        },
+    ]
+
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+    for tip in tips:
+        with st.expander(f"{tip['icon']} {tip['title']}", expanded=False):
+            st.markdown(
+                f"<div style='font-size:0.79rem;color:#ccc;line-height:1.65;white-space:pre-line'>{tip['body']}</div>",
+                unsafe_allow_html=True
+            )
+
+    # Performance comparison table
+    st.markdown('#### 📊 掃描方案速度比較')
+    st.markdown("""
+| 方案 | 典型速度 | 適合場景 | 注意事項 |
+|------|----------|----------|----------|
+| 主題精選池（~70隻）| **5-15 秒** | 日常快速輪動分析 | 本 App 預設 |
+| S&P 500（批量）| **30-90 秒** | 大盤廣泛掃描 | 關閉新聞情緒 |
+| Nasdaq 100 | **15-45 秒** | 科技股分析 | 關閉新聞情緒 |
+| 全市場 8,000+（yfinance）| **30-120 分鐘** | 不推薦實時用 | 容易 rate limit |
+| 預計算 Parquet + DuckDB | **< 1 秒讀取** | 最佳全市場方案 | 需夜間批次腳本 |
+| Polygon.io / Tiingo API | **5-20 秒** | 專業全市場掃描 | 需付費/帳戶 |
+
+> ⚠️ **免責聲明**：所有速度估算為參考值，實際取決於網絡狀況、API 可用性及快取狀態。
+    """)
+
+
+# ── Universe selector compact control (for use inside radar module) ────────
+def _render_universe_selector_compact():
+    """Render a compact universe selector bar for use at the top of radar module."""
+    _init_universe_session_state()
+    cur_name = st.session_state.get('active_universe_name', '主題精選池')
+    cur_tickers = st.session_state.get('active_universe_tickers', [])
+    news_enabled = st.session_state.get('universe_news_enabled', True)
+
+    col_u1, col_u2, col_u3 = st.columns([3, 2, 1])
+    with col_u1:
+        st.markdown(
+            f"<div style='background:#0a1520;border:1px solid #2a4a6b;border-radius:8px;"
+            f"padding:8px 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"
+            f"<span style='font-size:0.78rem;color:#aaa'>🌐 掃描池：</span>"
+            f"<span style='background:#003a5a;color:#4FC3F7;padding:2px 9px;border-radius:6px;"
+            f"font-size:0.8rem;font-weight:bold'>{cur_name}</span>"
+            f"<span style='color:#888;font-size:0.78rem'>{len(cur_tickers)} 隻 Ticker</span>"
+            f"<span style='color:{'#00C851' if news_enabled else '#888'};font-size:0.72rem'>"
+            f"{'✅ 新聞開' if news_enabled else '❌ 新聞關'}</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    with col_u2:
+        st.markdown(
+            "<div style='font-size:0.72rem;color:#666;padding:8px 0'>"
+            "⚙️ 如需更換掃描池，請至側欄選擇「🗂️ Universe Manager」</div>",
+            unsafe_allow_html=True
+        )
+    with col_u3:
+        if st.button('🔄 重設池', key='radar_reset_universe', use_container_width=True,
+                     help='重設至主題精選池'):
+            st.session_state['active_universe_name'] = '主題精選池'
+            st.session_state['active_universe_tickers'] = get_theme_pool_tickers()
+            st.session_state['universe_news_enabled'] = True
+            st.rerun()
+
+
 # ==========================================
 # Sidebar
 # ==========================================
@@ -4945,6 +5605,7 @@ with st.sidebar:
     app_mode = st.radio(
         label='模組',
         options=[
+            '🗂️ Universe Manager',
             '🔥 當炒/低風險機會雷達',
             '🔥 熱門板塊關係圖',
             '🎯 產業故事 Radar / Scorecard',
@@ -4976,7 +5637,10 @@ with st.sidebar:
 # ==========================================
 # 模組渲染
 # ==========================================
-if app_mode == '🔥 當炒/低風險機會雷達':
+if app_mode == '🗂️ Universe Manager':
+    render_universe_manager_module()
+
+elif app_mode == '🔥 當炒/低風險機會雷達':
     render_radar_module()
 
 elif app_mode == '🎯 產業故事 Radar / Scorecard':
